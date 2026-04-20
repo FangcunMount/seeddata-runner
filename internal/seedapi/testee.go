@@ -56,6 +56,30 @@ func (c *APIClient) ListTesteesByOrg(ctx context.Context, orgID int64, page, pag
 	return &listResp, nil
 }
 
+// GetTesteeByProfileID 根据 profile_id 获取受试者详情（apiserver）。
+func (c *APIClient) GetTesteeByProfileID(ctx context.Context, orgID int64, profileID string) (*ApiserverTesteeResponse, error) {
+	path := fmt.Sprintf(
+		"/api/v1/testees/by-profile-id?org_id=%d&profile_id=%s",
+		orgID,
+		urlQueryEscape(strings.TrimSpace(profileID)),
+	)
+	resp, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get testee by profile_id: org_id=%d profile_id=%s: %w", orgID, strings.TrimSpace(profileID), err)
+	}
+
+	dataBytes, err := json.Marshal(resp.Data)
+	if err != nil {
+		return nil, fmt.Errorf("marshal response data: %w", err)
+	}
+
+	var testeeResp ApiserverTesteeResponse
+	if err := json.Unmarshal(dataBytes, &testeeResp); err != nil {
+		return nil, fmt.Errorf("unmarshal testee-by-profile response: %w", err)
+	}
+	return &testeeResp, nil
+}
+
 // ListIAMMyChildren 获取当前 IAM 用户名下 children。
 func (c *APIClient) ListIAMMyChildren(ctx context.Context, limit, offset int) (*IAMChildPageResponse, error) {
 	path := fmt.Sprintf("/api/v1/identity/me/children?limit=%d&offset=%d", limit, offset)

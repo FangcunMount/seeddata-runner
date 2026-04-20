@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 )
 
 func TestResolveDailySimulationJourneyTargetStable(t *testing.T) {
@@ -201,6 +203,47 @@ func TestBuildDailySimulationEntryIntakeRequestUsesExistingTesteeProfileID(t *te
 	}
 	if req.Birthday == nil || !req.Birthday.Equal(birthday) {
 		t.Fatalf("unexpected birthday: %+v", req.Birthday)
+	}
+}
+
+func TestResolveDailySimulationCanonicalTesteeIDUsesProfileLookup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/testees/by-profile-id" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("org_id"); got != "1" {
+			t.Fatalf("unexpected org_id %q", got)
+		}
+		if got := r.URL.Query().Get("profile_id"); got != "615969735435104814" {
+			t.Fatalf("unexpected profile_id %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"id":"615508260325175854","profile_id":"615969735435104814","name":"王子轩"}}`))
+	}))
+	defer server.Close()
+
+	profileID := "615969735435104814"
+	state := &dailySimulationJourneyState{
+		deps: &dependencies{
+			Config: &seedconfig.Config{
+				Global: seedconfig.GlobalConfig{OrgID: 1},
+			},
+			APIClient: NewAPIClient(server.URL, "", nil),
+		},
+		testee: &TesteeResponse{ID: "old-id"},
+		existingTestee: &ApiserverTesteeResponse{
+			ID:        "old-id",
+			ProfileID: &profileID,
+			Name:      "王子轩",
+		},
+	}
+
+	canonicalID, err := resolveDailySimulationCanonicalTesteeID(context.Background(), state)
+	if err != nil {
+		t.Fatalf("resolve canonical testee id: %v", err)
+	}
+	if canonicalID != 615508260325175854 {
+		t.Fatalf("unexpected canonical testee id: %d", canonicalID)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math/rand"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -424,9 +425,16 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 	if state.testee == nil || strings.TrimSpace(state.testee.ID) == "" {
 		return toolchain.Decision{}, fmt.Errorf("testee is not initialized before answersheet submission")
 	}
+	canonicalTesteeID, err := resolveDailySimulationCanonicalTesteeID(ctx, state)
+	if err != nil {
+		return toolchain.Decision{}, err
+	}
+	state.testee.ID = strconv.FormatUint(canonicalTesteeID, 10)
+	if state.existingTestee != nil {
+		state.existingTestee.ID = state.testee.ID
+	}
 	var (
 		existingAnswerSheet *AdminAnswerSheetListItem
-		err                 error
 	)
 	if strings.TrimSpace(state.guardianUserID) != "" {
 		existingAnswerSheet, err = findDailySimulationAnswerSheet(
@@ -592,6 +600,69 @@ func dailySimulationExistingTesteeAPIGender(value string) string {
 	default:
 		return strings.ToLower(strings.TrimSpace(value))
 	}
+}
+
+func resolveDailySimulationCanonicalTesteeID(ctx context.Context, state *dailySimulationJourneyState) (uint64, error) {
+	if state == nil || state.testee == nil {
+		return 0, fmt.Errorf("testee is not initialized before canonical resolution")
+	}
+
+	if profileID := dailySimulationProfileIDForSubmit(state); profileID != "" && state.deps != nil && state.deps.APIClient != nil && state.deps.Config != nil {
+		testeeResp, err := state.deps.APIClient.GetTesteeByProfileID(ctx, state.deps.Config.Global.OrgID, profileID)
+		if err == nil {
+			if canonicalID := parseID(testeeResp.ID); canonicalID > 0 {
+				return canonicalID, nil
+			}
+		} else if !isDailySimulationAPIHTTPStatus(err, http.StatusNotFound) {
+			return 0, err
+		}
+	}
+
+	if state.child != nil && strings.TrimSpace(state.child.ID) != "" && state.collectionClient != nil {
+		existsResp, err := state.collectionClient.TesteeExistsByIAMChildID(ctx, state.child.ID)
+		if err != nil {
+			return 0, err
+		}
+		if existsResp != nil && existsResp.Exists {
+			if canonicalID := parseID(existsResp.TesteeID); canonicalID > 0 {
+				return canonicalID, nil
+			}
+		}
+	}
+
+	if canonicalID := parseID(state.testee.ID); canonicalID > 0 {
+		return canonicalID, nil
+	}
+	return 0, fmt.Errorf("invalid canonical testee id %q", state.testee.ID)
+}
+
+func dailySimulationProfileIDForSubmit(state *dailySimulationJourneyState) string {
+	if state == nil {
+		return ""
+	}
+	if state.existingTestee != nil {
+		if state.existingTestee.ProfileID != nil && strings.TrimSpace(*state.existingTestee.ProfileID) != "" {
+			return strings.TrimSpace(*state.existingTestee.ProfileID)
+		}
+		if state.existingTestee.IAMChildID != nil && strings.TrimSpace(*state.existingTestee.IAMChildID) != "" {
+			return strings.TrimSpace(*state.existingTestee.IAMChildID)
+		}
+	}
+	if state.child != nil && strings.TrimSpace(state.child.ID) != "" {
+		return strings.TrimSpace(state.child.ID)
+	}
+	return ""
+}
+
+func isDailySimulationAPIHTTPStatus(err error, status int) bool {
+	if err == nil {
+		return false
+	}
+	statusToken := fmt.Sprintf("http_status=%d", status)
+	if strings.Contains(err.Error(), statusToken) {
+		return true
+	}
+	return strings.Contains(err.Error(), fmt.Sprintf("status=%d", status))
 }
 
 func (state *dailySimulationJourneyState) nextDecision(stage dailySimulationJourneyStage) toolchain.Decision {
