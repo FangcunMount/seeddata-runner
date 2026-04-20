@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
-	. "github.com/FangcunMount/seeddata-runner/internal/seedapi"
+	seedapi "github.com/FangcunMount/seeddata-runner/internal/seedapi"
 )
 
 func TestResolveDailySimulationBatchCountStableRange(t *testing.T) {
@@ -362,7 +362,7 @@ func TestListDailySimulationTesteesByOrgUsesApiserverMaxPageSize(t *testing.T) {
 	}))
 	defer server.Close()
 
-	items, err := listDailySimulationTesteesByOrg(context.Background(), NewAPIClient(server.URL, "", nil), 1)
+	items, err := listDailySimulationTesteesByOrg(context.Background(), seedapi.NewAPIClient(server.URL, "", nil), 1)
 	if err != nil {
 		t.Fatalf("listDailySimulationTesteesByOrg returned error: %v", err)
 	}
