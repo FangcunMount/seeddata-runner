@@ -108,6 +108,31 @@ func (m dailySimulationStateMachine) MarkSuccess(
 	return state
 }
 
+// MarkAfterHoursCatchup 标记窗口外补提完成。
+func (m dailySimulationStateMachine) MarkAfterHoursCatchup(
+	state *dailySimulationDaemonState,
+	runDate time.Time,
+	slotTime time.Time,
+	completedAt time.Time,
+) *dailySimulationDaemonState {
+	if state == nil {
+		state = &dailySimulationDaemonState{}
+	}
+
+	runDay := runDate.In(time.Local)
+	runDayKey := runDay.Format("2006-01-02")
+	state.LastSuccessDate = runDayKey
+	state.LastSuccessAt = completedAt.In(time.Local)
+	state.LastCompletedSlot = slotTime.In(time.Local)
+	state.LastAfterHoursCatchupDay = runDayKey
+	state.LastAfterHoursCatchupAt = completedAt.In(time.Local)
+	if state.DailyUserCountDate != runDayKey {
+		state.DailyUserCountDate = runDayKey
+		state.DailyUserCount = 0
+	}
+	return state
+}
+
 // remainingQuota 返回剩余配额
 func (m dailySimulationStateMachine) remainingQuota(day time.Time, state *dailySimulationDaemonState) int {
 	if m.schedule.DailyMaxUsers <= 0 {

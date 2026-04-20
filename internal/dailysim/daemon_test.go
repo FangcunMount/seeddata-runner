@@ -209,6 +209,42 @@ func TestDailySimulationStateMachineMarkSuccess(t *testing.T) {
 	}
 }
 
+func TestDailySimulationStateMachineMarkAfterHoursCatchup(t *testing.T) {
+	schedule := dailySimulationSchedule{
+		Window:        mustTestWindowSchedule(t, scheduler.Clock{Hour: 10, Minute: 0}, scheduler.Clock{Hour: 18, Minute: 0}, 30*time.Minute),
+		DailyMaxUsers: 60,
+	}
+	stateMachine := newDailySimulationStateMachine(schedule)
+
+	state := &dailySimulationDaemonState{
+		DailyUserCountDate: "2026-04-17",
+		DailyUserCount:     20,
+	}
+	runDate := time.Date(2026, 4, 17, 0, 0, 0, 0, time.Local)
+	slotTime := time.Date(2026, 4, 17, 18, 0, 0, 0, time.Local)
+	completedAt := time.Date(2026, 4, 17, 19, 7, 0, 0, time.Local)
+
+	state = stateMachine.MarkAfterHoursCatchup(state, runDate, slotTime, completedAt)
+	if state.LastSuccessDate != "2026-04-17" {
+		t.Fatalf("unexpected last success date: %q", state.LastSuccessDate)
+	}
+	if !state.LastSuccessAt.Equal(completedAt) {
+		t.Fatalf("unexpected last success at: %s", state.LastSuccessAt)
+	}
+	if !state.LastCompletedSlot.Equal(slotTime) {
+		t.Fatalf("unexpected last completed slot: %s", state.LastCompletedSlot)
+	}
+	if state.LastAfterHoursCatchupDay != "2026-04-17" {
+		t.Fatalf("unexpected last after-hours catchup day: %q", state.LastAfterHoursCatchupDay)
+	}
+	if !state.LastAfterHoursCatchupAt.Equal(completedAt) {
+		t.Fatalf("unexpected last after-hours catchup at: %s", state.LastAfterHoursCatchupAt)
+	}
+	if state.DailyUserCount != 20 {
+		t.Fatalf("expected daily user count to remain unchanged, got %d", state.DailyUserCount)
+	}
+}
+
 func mustTestWindowSchedule(t *testing.T, startAt, endAt scheduler.Clock, interval time.Duration) scheduler.Window {
 	t.Helper()
 	window, err := scheduler.NewWindow(startAt, endAt, interval)
@@ -289,6 +325,20 @@ func TestMatchDailySimulationExistingTesteesByIndex(t *testing.T) {
 	}
 	if got := matched[2]; got != nil {
 		t.Fatalf("expected index 2 to remain unmatched, got %+v", got)
+	}
+}
+
+func TestSortedDailySimulationExistingIndexes(t *testing.T) {
+	indexes := sortedDailySimulationExistingIndexes(map[int]*ApiserverTesteeResponse{
+		5: {ID: "t-5"},
+		2: {ID: "t-2"},
+		9: nil,
+	})
+	if len(indexes) != 2 {
+		t.Fatalf("expected 2 indexes, got %d", len(indexes))
+	}
+	if indexes[0] != 1 || indexes[1] != 4 {
+		t.Fatalf("unexpected sorted indexes: %#v", indexes)
 	}
 }
 

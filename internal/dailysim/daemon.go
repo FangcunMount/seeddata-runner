@@ -28,16 +28,24 @@ type dailySimulationScenario struct {
 }
 
 type dailySimulationDaemonState struct {
-	LastSuccessDate    string    `json:"lastSuccessDate"`
-	LastSuccessAt      time.Time `json:"lastSuccessAt"`
-	LastCompletedSlot  time.Time `json:"lastCompletedSlot"`
-	DailyUserCountDate string    `json:"dailyUserCountDate"`
-	DailyUserCount     int       `json:"dailyUserCount"`
+	LastSuccessDate          string    `json:"lastSuccessDate"`
+	LastSuccessAt            time.Time `json:"lastSuccessAt"`
+	LastCompletedSlot        time.Time `json:"lastCompletedSlot"`
+	DailyUserCountDate       string    `json:"dailyUserCountDate"`
+	DailyUserCount           int       `json:"dailyUserCount"`
+	LastAfterHoursCatchupDay string    `json:"lastAfterHoursCatchupDay"`
+	LastAfterHoursCatchupAt  time.Time `json:"lastAfterHoursCatchupAt"`
 }
 
 type dailySimulationSchedule struct {
 	scheduler.Window
 	DailyMaxUsers int
+}
+
+type dailySimulationBatchOptions struct {
+	ReuseOnly              bool
+	ExistingTesteesByIndex map[int]*ApiserverTesteeResponse
+	JobIndexes             []int
 }
 
 /**
@@ -87,6 +95,25 @@ func seedDailySimulationDaemon(ctx context.Context, deps *dependencies) error {
 			return err
 		}
 
+		state, handled, err := maybeHandleDailySimulationAfterHoursCatchup(ctx, deps, cfg, schedule, stateMachine, state, now)
+		if err != nil {
+			deps.Logger.Warnw("Daily simulation daemon after-hours catchup failed",
+				"run_date", time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local).Format("2006-01-02"),
+				"retry_delay", retryDelay.String(),
+				"error", err.Error(),
+			)
+			if err := scheduler.Wait(ctx, retryDelay); err != nil {
+				return err
+			}
+			continue
+		}
+		if handled {
+			if err := stateStore.Save(state); err != nil {
+				return err
+			}
+			continue
+		}
+
 		decision := stateMachine.Next(now, state)
 		if decision.WaitDuration > 0 {
 			deps.Logger.Infow("Daily simulation daemon waiting for next run",
@@ -126,6 +153,71 @@ func seedDailySimulationDaemon(ctx context.Context, deps *dependencies) error {
 	}
 }
 
+func maybeHandleDailySimulationAfterHoursCatchup(
+	ctx context.Context,
+	deps *dependencies,
+	cfg DailySimulationConfig,
+	schedule dailySimulationSchedule,
+	stateMachine dailySimulationStateMachine,
+	state *dailySimulationDaemonState,
+	now time.Time,
+) (*dailySimulationDaemonState, bool, error) {
+	now = now.In(time.Local)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	todayEnd := schedule.EndTime(today)
+	if !now.After(todayEnd) {
+		return state, false, nil
+	}
+
+	dayKey := today.Format("2006-01-02")
+	if state != nil && strings.TrimSpace(state.LastAfterHoursCatchupDay) == dayKey {
+		return state, false, nil
+	}
+
+	targetCount, err := resolveDailySimulationBatchCount(cfg, today, -1)
+	if err != nil {
+		return state, false, err
+	}
+	existingTesteesByIndex, err := loadDailySimulationExistingTesteesByIndex(ctx, deps, cfg, today, targetCount)
+	if err != nil {
+		return state, false, err
+	}
+	jobIndexes := sortedDailySimulationExistingIndexes(existingTesteesByIndex)
+	if len(jobIndexes) > 0 {
+		deps.Logger.Infow("Daily simulation daemon running after-hours catchup",
+			"run_date", dayKey,
+			"window_end_at", todayEnd.Format(time.RFC3339),
+			"existing_testees", len(existingTesteesByIndex),
+			"catchup_testees", len(jobIndexes),
+		)
+		if err := runDailySimulationBatchWithOptions(
+			ctx,
+			deps,
+			cfg,
+			today,
+			len(jobIndexes),
+			"daily_simulation_daemon_after_hours",
+			dailySimulationBatchOptions{
+				ReuseOnly:              true,
+				ExistingTesteesByIndex: existingTesteesByIndex,
+				JobIndexes:             jobIndexes,
+			},
+		); err != nil {
+			return state, false, err
+		}
+	} else {
+		deps.Logger.Infow("Daily simulation daemon skipping after-hours catchup",
+			"run_date", dayKey,
+			"window_end_at", todayEnd.Format(time.RFC3339),
+			"existing_testees", 0,
+			"reason", "no_existing_mock_testees",
+		)
+	}
+
+	state = stateMachine.MarkAfterHoursCatchup(state, today, todayEnd, now)
+	return state, true, nil
+}
+
 // runDailySimulationBatch 运行每日模拟用户批量
 func runDailySimulationBatch(
 	ctx context.Context,
@@ -135,12 +227,21 @@ func runDailySimulationBatch(
 	count int,
 	progressLabel string,
 ) error {
+	return runDailySimulationBatchWithOptions(ctx, deps, cfg, runDate, count, progressLabel, dailySimulationBatchOptions{})
+}
+
+func runDailySimulationBatchWithOptions(
+	ctx context.Context,
+	deps *dependencies,
+	cfg DailySimulationConfig,
+	runDate time.Time,
+	count int,
+	progressLabel string,
+	options dailySimulationBatchOptions,
+) error {
 	if count <= 0 {
 		return fmt.Errorf("%s requires count > 0", progressLabel)
 	}
-
-	// 规范化每日模拟用户工作线程数量
-	workers := normalizeDailySimulationWorkers(cfg.Workers, count)
 
 	var (
 		iamBundle      *dailySimulationIAMBundle
@@ -172,23 +273,47 @@ func runDailySimulationBatch(
 		return fmt.Errorf("%s resolved zero scenarios", progressLabel)
 	}
 
-	existingTesteesByIndex, err := loadDailySimulationExistingTesteesByIndex(ctx, deps, cfg, runDate, count)
-	if err != nil {
-		return err
+	existingTesteesByIndex := options.ExistingTesteesByIndex
+	if existingTesteesByIndex == nil {
+		existingTesteesByIndex, err = loadDailySimulationExistingTesteesByIndex(ctx, deps, cfg, runDate, count)
+		if err != nil {
+			return err
+		}
 	}
+	jobIndexes := append([]int(nil), options.JobIndexes...)
+	if len(jobIndexes) == 0 {
+		jobIndexes = make([]int, 0, count)
+		for idx := 0; idx < count; idx++ {
+			jobIndexes = append(jobIndexes, idx)
+		}
+	}
+	jobCount := len(jobIndexes)
+	if jobCount == 0 {
+		return fmt.Errorf("%s resolved zero job indexes", progressLabel)
+	}
+
+	// 规范化每日模拟用户工作线程数量
+	workers := normalizeDailySimulationWorkers(cfg.Workers, jobCount)
+
 	if dailySimulationUsesIAMMockConsumer(deps.Config.IAM) {
 		existingCount := len(existingTesteesByIndex)
+		newTesteesNeeded := max(0, count-existingCount)
+		if options.ReuseOnly {
+			newTesteesNeeded = 0
+		}
 		deps.Logger.Infow("Daily simulation existing mock testees resolved",
 			"run_date", runDate.Format("2006-01-02"),
 			"target_count", count,
+			"job_count", jobCount,
 			"existing_testees", existingCount,
-			"new_testees_needed", max(0, count-existingCount),
+			"new_testees_needed", newTesteesNeeded,
+			"reuse_only", options.ReuseOnly,
 			"testee_source", normalizeDailySimulationSource(cfg.TesteeSource),
 		)
 	}
 
 	// 创建每日模拟用户进度条
-	progress := toolprogress.New(progressLabel+" users", count)
+	progress := toolprogress.New(progressLabel+" users", jobCount)
 	defer progress.Close()
 
 	// 创建每日模拟用户工作通道
@@ -216,6 +341,16 @@ func runDailySimulationBatch(
 				// 构建每日模拟用户配置
 				profile := buildDailySimulationProfile(cfg, runDate, idx)
 				existingTestee := existingTesteesByIndex[profile.Index]
+				if options.ReuseOnly && existingTestee == nil {
+					counters.addFailure()
+					failureMu.Lock()
+					if len(failures) < 8 {
+						failures = append(failures, fmt.Sprintf("idx=%d guardian=%s child=%s clinician=%s journey=%s err=%s", profile.Index, profile.GuardianEmail, profile.ChildName, "", dailySimulationJourneySubmitAnswer, "after-hours reuse batch resolved missing existing testee"))
+					}
+					failureMu.Unlock()
+					progress.Increment()
+					continue
+				}
 				scenario := scenarios[idx%len(scenarios)]
 				// 模拟每日模拟用户
 				outcome, simErr := simulateDailyUser(
@@ -258,7 +393,7 @@ func runDailySimulationBatch(
 		}()
 	}
 
-	for idx := 0; idx < count; idx++ {
+	for _, idx := range jobIndexes {
 		select {
 		case <-ctx.Done():
 			close(jobs)
@@ -280,6 +415,8 @@ func runDailySimulationBatch(
 		"label", progressLabel,
 		"run_date", runDate.Format("2006-01-02"),
 		"count", count,
+		"job_count", jobCount,
+		"reuse_only", options.ReuseOnly,
 		"workers", workers,
 		"selected_clinicians", selectedClinicians,
 		"users_created", atomic.LoadInt64(&counters.userCreated),
@@ -441,6 +578,21 @@ func matchDailySimulationExistingTesteesByIndex(
 		matched[index] = item
 	}
 	return matched
+}
+
+func sortedDailySimulationExistingIndexes(items map[int]*ApiserverTesteeResponse) []int {
+	if len(items) == 0 {
+		return nil
+	}
+	indexes := make([]int, 0, len(items))
+	for index, item := range items {
+		if item == nil {
+			continue
+		}
+		indexes = append(indexes, index-1)
+	}
+	sort.Ints(indexes)
+	return indexes
 }
 
 func isDailySimulationExistingTesteeCandidate(
