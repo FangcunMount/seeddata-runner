@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FangcunMount/component-base/pkg/log"
 	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 )
 
@@ -244,6 +245,62 @@ func TestResolveDailySimulationCanonicalTesteeIDUsesProfileLookup(t *testing.T) 
 	}
 	if canonicalID != 615508260325175854 {
 		t.Fatalf("unexpected canonical testee id: %d", canonicalID)
+	}
+}
+
+func TestWaitForDailySimulationAssessmentFallsBackToAssessmentList(t *testing.T) {
+	const (
+		answerSheetID      = "615984776595124782"
+		testeeID           = "615969746222854702"
+		assessmentID       = "615984705628090926"
+		questionnaireCode  = "3adyDE"
+		questionnaireVer   = "6.0.1"
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/answersheets/"+answerSheetID+"/assessment":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"code":1,"message":"An internal server error occurred"}`))
+			return
+		case r.URL.Path == "/api/v1/evaluations/assessments":
+			if got := r.URL.Query().Get("testee_id"); got != testeeID {
+				t.Fatalf("unexpected testee_id %q", got)
+			}
+			if got := r.URL.Query().Get("page"); got != "1" {
+				t.Fatalf("unexpected page %q", got)
+			}
+			if got := r.URL.Query().Get("page_size"); got != "100" {
+				t.Fatalf("unexpected page_size %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"items":[{"id":"` + assessmentID + `","testee_id":"` + testeeID + `","questionnaire_code":"` + questionnaireCode + `","status":"done"}],"total":1,"page":1,"page_size":100,"total_pages":1}}`))
+			return
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	logger := log.New(log.NewOptions())
+	collectionClient := NewAPIClient(server.URL, "", logger)
+	apiClient := NewAPIClient(server.URL, "", logger)
+
+	gotAssessmentID, err := waitForDailySimulationAssessment(
+		context.Background(),
+		collectionClient,
+		apiClient,
+		answerSheetID,
+		testeeID,
+		questionnaireCode,
+		questionnaireVer,
+	)
+	if err != nil {
+		t.Fatalf("wait for assessment: %v", err)
+	}
+	if gotAssessmentID != assessmentID {
+		t.Fatalf("unexpected assessment id: got=%q want=%q", gotAssessmentID, assessmentID)
 	}
 }
 

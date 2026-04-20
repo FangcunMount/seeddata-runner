@@ -476,7 +476,15 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 		return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
 	}
 	if existingAnswerSheet != nil && state.target.RequiresAssessment {
-		assessmentID, waitErr := waitForDailySimulationAssessment(ctx, assessmentClient, existingAnswerSheet.ID)
+		assessmentID, waitErr := waitForDailySimulationAssessment(
+			ctx,
+			assessmentClient,
+			state.deps.APIClient,
+			existingAnswerSheet.ID,
+			state.testee.ID,
+			state.target.QuestionnaireCode,
+			state.target.QuestionnaireVersion,
+		)
 		if waitErr == nil {
 			state.outcome.AnswerSheetID = existingAnswerSheet.ID
 			state.outcome.AssessmentID = assessmentID
@@ -521,7 +529,15 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 	state.outcome.AnswerSheetID = submitResp.ID
 
 	if state.target.RequiresAssessment {
-		assessmentID, err := waitForDailySimulationAssessment(ctx, assessmentClient, submitResp.ID)
+		assessmentID, err := waitForDailySimulationAssessment(
+			ctx,
+			assessmentClient,
+			state.deps.APIClient,
+			submitResp.ID,
+			state.testee.ID,
+			state.target.QuestionnaireCode,
+			state.target.QuestionnaireVersion,
+		)
 		if err != nil {
 			return toolchain.Decision{}, err
 		}
@@ -1438,18 +1454,48 @@ func findDailySimulationAssessment(
 func waitForDailySimulationAssessment(
 	ctx context.Context,
 	collectionClient *APIClient,
+	apiClient *APIClient,
 	answerSheetID string,
+	testeeID, questionnaireCode, questionnaireVersion string,
 ) (string, error) {
 	deadline := time.Now().Add(seedAssessmentPollTimeout)
+	var lastErr error
 	for {
-		detail, err := collectionClient.GetAssessmentByAnswerSheetID(ctx, answerSheetID)
-		if err != nil {
-			return "", fmt.Errorf("get assessment by answersheet %s: %w", answerSheetID, err)
+		if collectionClient != nil {
+			detail, err := collectionClient.GetAssessmentByAnswerSheetID(ctx, answerSheetID)
+			if err != nil {
+				wrappedErr := fmt.Errorf("get assessment by answersheet %s: %w", answerSheetID, err)
+				if !shouldRetryDailySimulationAssessmentLookup(wrappedErr) {
+					return "", wrappedErr
+				}
+				lastErr = wrappedErr
+			} else if detail != nil && strings.TrimSpace(detail.ID) != "" {
+				return strings.TrimSpace(detail.ID), nil
+			}
 		}
-		if detail != nil && strings.TrimSpace(detail.ID) != "" {
-			return strings.TrimSpace(detail.ID), nil
+
+		if apiClient != nil && strings.TrimSpace(testeeID) != "" && strings.TrimSpace(questionnaireCode) != "" {
+			assessmentID, err := findDailySimulationAssessment(
+				ctx,
+				apiClient,
+				testeeID,
+				questionnaireCode,
+				questionnaireVersion,
+			)
+			if err != nil {
+				if !shouldRetryDailySimulationAssessmentLookup(err) {
+					return "", err
+				}
+				lastErr = err
+			} else if strings.TrimSpace(assessmentID) != "" {
+				return strings.TrimSpace(assessmentID), nil
+			}
 		}
+
 		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return "", fmt.Errorf("assessment not ready for answersheet %s before timeout: %w", answerSheetID, lastErr)
+			}
 			return "", fmt.Errorf("assessment not found by answersheet %s before timeout", answerSheetID)
 		}
 		select {
@@ -1457,6 +1503,26 @@ func waitForDailySimulationAssessment(
 			return "", ctx.Err()
 		case <-time.After(seedAssessmentPollInterval):
 		}
+	}
+}
+
+func shouldRetryDailySimulationAssessmentLookup(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch {
+	case isDailySimulationAPIHTTPStatus(err, http.StatusBadRequest):
+		return false
+	case isDailySimulationAPIHTTPStatus(err, http.StatusUnauthorized):
+		return false
+	case isDailySimulationAPIHTTPStatus(err, http.StatusForbidden):
+		return false
+	case isDailySimulationAPIHTTPStatus(err, http.StatusNotFound):
+		return false
+	case isDailySimulationAPIHTTPStatus(err, http.StatusUnprocessableEntity):
+		return false
+	default:
+		return true
 	}
 }
 
