@@ -379,7 +379,7 @@ func listDailySimulationTesteesByOrg(
 	if client == nil {
 		return nil, fmt.Errorf("daily simulation api client is nil")
 	}
-	const pageSize = 200
+	const pageSize = 100 // apiserver /api/v1/testees currently caps page_size at 100.
 	page := 1
 	items := make([]*ApiserverTesteeResponse, 0, pageSize)
 	for {

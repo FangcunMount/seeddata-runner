@@ -1,10 +1,16 @@
 package dailysim
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
+	. "github.com/FangcunMount/seeddata-runner/internal/seedapi"
 )
 
 func TestResolveDailySimulationBatchCountStableRange(t *testing.T) {
@@ -302,5 +308,73 @@ func TestNewDailySimulationMockIAMLimiter(t *testing.T) {
 	}
 	if got := cap(limiter); got != 2 {
 		t.Fatalf("unexpected limiter capacity: %d", got)
+	}
+}
+
+func TestListDailySimulationTesteesByOrgUsesApiserverMaxPageSize(t *testing.T) {
+	t.Helper()
+
+	requests := make([]url.Values, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Query())
+		switch r.URL.Query().Get("page") {
+		case "1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code":    0,
+				"message": "success",
+				"data": map[string]any{
+					"items": []map[string]any{
+						{
+							"id":         "t-1",
+							"name":       "child-1",
+							"created_at": "2026-04-20T10:00:00+08:00",
+							"updated_at": "2026-04-20T10:00:00+08:00",
+						},
+					},
+					"total":       2,
+					"page":        1,
+					"page_size":   100,
+					"total_pages": 2,
+				},
+			})
+		case "2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code":    0,
+				"message": "success",
+				"data": map[string]any{
+					"items": []map[string]any{
+						{
+							"id":         "t-2",
+							"name":       "child-2",
+							"created_at": "2026-04-20T10:01:00+08:00",
+							"updated_at": "2026-04-20T10:01:00+08:00",
+						},
+					},
+					"total":       2,
+					"page":        2,
+					"page_size":   100,
+					"total_pages": 2,
+				},
+			})
+		default:
+			t.Fatalf("unexpected page query: %s", r.URL.RawQuery)
+		}
+	}))
+	defer server.Close()
+
+	items, err := listDailySimulationTesteesByOrg(context.Background(), NewAPIClient(server.URL, "", nil), 1)
+	if err != nil {
+		t.Fatalf("listDailySimulationTesteesByOrg returned error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 testees, got %d", len(items))
+	}
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 paged requests, got %d", len(requests))
+	}
+	for idx, query := range requests {
+		if got := query.Get("page_size"); got != "100" {
+			t.Fatalf("request %d used unexpected page_size %q", idx+1, got)
+		}
 	}
 }
