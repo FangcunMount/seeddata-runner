@@ -80,3 +80,12 @@ func TestDailySimulationUsesIAMMockConsumer(t *testing.T) {
 		t.Fatalf("expected mock-consumer mode enabled")
 	}
 }
+
+func TestDailySimulationTesteeID(t *testing.T) {
+	if got := dailySimulationTesteeID(nil); got != "" {
+		t.Fatalf("expected empty testee id for nil testee, got %q", got)
+	}
+	if got := dailySimulationTesteeID(&TesteeResponse{ID: " 615 "}); got != "615" {
+		t.Fatalf("expected trimmed testee id, got %q", got)
+	}
+}

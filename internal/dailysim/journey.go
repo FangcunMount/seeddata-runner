@@ -223,7 +223,7 @@ func simulateDailyUser(
 		clinicianID,
 		entry,
 		target,
-		state.testee.ID,
+		dailySimulationTesteeID(state.testee),
 		state.guardianUserID,
 		state.outcome,
 	)
@@ -530,6 +530,13 @@ func logDailySimulationOutcome(
 		"stop_reason", outcome.StopReason,
 	)
 	return nil
+}
+
+func dailySimulationTesteeID(testee *TesteeResponse) string {
+	if testee == nil {
+		return ""
+	}
+	return strings.TrimSpace(testee.ID)
 }
 
 func ensureDailySimulationEntryAndTarget(
