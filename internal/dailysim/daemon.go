@@ -176,7 +176,13 @@ func maybeHandleDailySimulationAfterHoursCatchup(
 	}
 
 	dayKey := today.Format("2006-01-02")
-	if state != nil && strings.TrimSpace(state.LastAfterHoursCatchupDay) == dayKey {
+	if dailySimulationAfterHoursCatchupHandled(state, today, todayEnd) {
+		deps.Logger.Infow("Daily simulation daemon skipping after-hours catchup",
+			"run_date", dayKey,
+			"window_end_at", todayEnd.Format(time.RFC3339),
+			"last_after_hours_catchup_at", state.LastAfterHoursCatchupAt.In(time.Local).Format(time.RFC3339),
+			"reason", "already_handled_for_current_window_end",
+		)
 		return state, false, nil
 	}
 
@@ -222,6 +228,21 @@ func maybeHandleDailySimulationAfterHoursCatchup(
 
 	state = stateMachine.MarkAfterHoursCatchup(state, today, todayEnd, now)
 	return state, true, nil
+}
+
+func dailySimulationAfterHoursCatchupHandled(state *dailySimulationDaemonState, day time.Time, windowEnd time.Time) bool {
+	if state == nil {
+		return false
+	}
+	dayKey := day.In(time.Local).Format("2006-01-02")
+	if strings.TrimSpace(state.LastAfterHoursCatchupDay) != dayKey {
+		return false
+	}
+	if state.LastAfterHoursCatchupAt.IsZero() {
+		return false
+	}
+	catchupAt := state.LastAfterHoursCatchupAt.In(time.Local)
+	return !catchupAt.Before(windowEnd.In(time.Local))
 }
 
 // runDailySimulationBatch 运行每日模拟用户批量

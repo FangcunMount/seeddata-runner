@@ -25,6 +25,15 @@ func buildAdminSubmitAnswerSheetRequest(req SubmitAnswerSheetRequest) AdminSubmi
 	}
 }
 
+func buildDailySimulationAdminSubmitAnswerSheetRequest(req SubmitAnswerSheetRequest, guardianUserID string) AdminSubmitAnswerSheetRequest {
+	adminReq := buildAdminSubmitAnswerSheetRequest(req)
+	if userID := parseID(guardianUserID); userID > 0 {
+		adminReq.WriterID = userID
+		adminReq.FillerID = userID
+	}
+	return adminReq
+}
+
 func submitAdminAnswerSheet(
 	ctx context.Context,
 	client adminAnswerSheetSubmitClient,

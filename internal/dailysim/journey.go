@@ -513,15 +513,8 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 		TesteeID:             testeeID,
 		Answers:              answers,
 	}
-	var submitResp *SubmitAnswerSheetResponse
-	if state.existingTestee != nil {
-		submitResp, err = state.deps.APIClient.SubmitAnswerSheetAdmin(ctx, buildAdminSubmitAnswerSheetRequest(submitReq))
-	} else {
-		if state.collectionClient == nil {
-			return toolchain.Decision{}, fmt.Errorf("collection client is not initialized")
-		}
-		submitResp, err = state.collectionClient.SubmitAnswerSheet(ctx, submitReq)
-	}
+	adminSubmitReq := buildDailySimulationAdminSubmitAnswerSheetRequest(submitReq, state.guardianUserID)
+	submitResp, err := state.deps.APIClient.SubmitAnswerSheetAdmin(ctx, adminSubmitReq)
 	if err != nil {
 		return toolchain.Decision{}, err
 	}

@@ -245,6 +245,32 @@ func TestDailySimulationStateMachineMarkAfterHoursCatchup(t *testing.T) {
 	}
 }
 
+func TestDailySimulationAfterHoursCatchupHandledRespectsCurrentWindowEnd(t *testing.T) {
+	day := time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local)
+	state := &dailySimulationDaemonState{
+		LastAfterHoursCatchupDay: "2026-04-20",
+		LastAfterHoursCatchupAt:  time.Date(2026, 4, 20, 18, 5, 0, 0, time.Local),
+	}
+
+	if !dailySimulationAfterHoursCatchupHandled(state, day, time.Date(2026, 4, 20, 18, 0, 0, 0, time.Local)) {
+		t.Fatalf("expected after-hours catchup to be treated as handled for the original window end")
+	}
+	if dailySimulationAfterHoursCatchupHandled(state, day, time.Date(2026, 4, 20, 19, 0, 0, 0, time.Local)) {
+		t.Fatalf("expected after-hours catchup to rerun when the current window end moves later")
+	}
+}
+
+func TestDailySimulationAfterHoursCatchupHandledRequiresCatchupTimestamp(t *testing.T) {
+	day := time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local)
+	state := &dailySimulationDaemonState{
+		LastAfterHoursCatchupDay: "2026-04-20",
+	}
+
+	if dailySimulationAfterHoursCatchupHandled(state, day, time.Date(2026, 4, 20, 18, 0, 0, 0, time.Local)) {
+		t.Fatalf("expected legacy state without catchup timestamp to rerun catchup")
+	}
+}
+
 func mustTestWindowSchedule(t *testing.T, startAt, endAt scheduler.Clock, interval time.Duration) scheduler.Window {
 	t.Helper()
 	window, err := scheduler.NewWindow(startAt, endAt, interval)

@@ -65,6 +65,20 @@ func TestBuildAdminSubmitAnswerSheetRequest(t *testing.T) {
 	}
 }
 
+func TestBuildDailySimulationAdminSubmitAnswerSheetRequestCarriesGuardianUserID(t *testing.T) {
+	req := SubmitAnswerSheetRequest{
+		QuestionnaireCode:    "QNR-001",
+		QuestionnaireVersion: "1.0.0",
+		Title:                "测试问卷",
+		TesteeID:             1001,
+	}
+
+	adminReq := buildDailySimulationAdminSubmitAnswerSheetRequest(req, "615966157324694062")
+	if adminReq.WriterID != 615966157324694062 || adminReq.FillerID != 615966157324694062 {
+		t.Fatalf("unexpected writer/filler ids: %+v", adminReq)
+	}
+}
+
 func TestSubmitAdminAnswerSheetUsesPlainAdminAPIWithoutPolicy(t *testing.T) {
 	client := &adminAnswerSheetSubmitClientStub{}
 	_, err := submitAdminAnswerSheet(context.Background(), client, SubmitAnswerSheetRequest{}, adminAnswerSheetSubmitPolicy{
