@@ -870,6 +870,23 @@ type IAMChildRegisterResponse struct {
 	Child *IAMChildResponse `json:"child"`
 }
 
+type EnsureIAMMockConsumerRequest struct {
+	Name     string            `json:"name"`
+	Phone    string            `json:"phone"`
+	Email    string            `json:"email"`
+	Password string            `json:"password"`
+	Profile  map[string]string `json:"profile,omitempty"`
+	Meta     map[string]string `json:"meta,omitempty"`
+}
+
+type EnsureIAMMockConsumerResponse struct {
+	UserID       string `json:"user_id"`
+	AccountID    string `json:"account_id"`
+	LoginID      string `json:"login_id"`
+	IsNewUser    bool   `json:"is_new_user"`
+	IsNewAccount bool   `json:"is_new_account"`
+}
+
 // CollectionCreateTesteeRequest 创建 collection 受试者请求。
 type CollectionCreateTesteeRequest struct {
 	IAMUserID  string   `json:"iam_user_id,omitempty"`
@@ -991,17 +1008,40 @@ type AdminAnswerSheetListResponse struct {
 
 // doRequest 执行 HTTP 请求
 func (c *APIClient) doRequest(ctx context.Context, method, path string, body interface{}) (*Response, error) {
-	return c.doRequestWithRetryAndTimeout(ctx, method, path, body, true, c.httpClient.Timeout)
+	return c.doRequestWithHeadersRetryAndTimeout(ctx, method, path, body, nil, true, c.httpClient.Timeout)
 }
 
 func (c *APIClient) doRequestWithRetryAndTimeout(ctx context.Context, method, path string, body interface{}, allowRefresh bool, timeout time.Duration) (*Response, error) {
-	return c.doRequestWithRetryTimeoutAndLimit(ctx, method, path, body, allowRefresh, timeout, c.retryMax)
+	return c.doRequestWithHeadersRetryAndTimeout(ctx, method, path, body, nil, allowRefresh, timeout)
+}
+
+func (c *APIClient) doRequestWithHeadersRetryAndTimeout(
+	ctx context.Context,
+	method, path string,
+	body interface{},
+	headers map[string]string,
+	allowRefresh bool,
+	timeout time.Duration,
+) (*Response, error) {
+	return c.doRequestWithHeadersRetryTimeoutAndLimit(ctx, method, path, body, headers, allowRefresh, timeout, c.retryMax)
 }
 
 func (c *APIClient) doRequestWithRetryTimeoutAndLimit(
 	ctx context.Context,
 	method, path string,
 	body interface{},
+	allowRefresh bool,
+	timeout time.Duration,
+	retryMax int,
+) (*Response, error) {
+	return c.doRequestWithHeadersRetryTimeoutAndLimit(ctx, method, path, body, nil, allowRefresh, timeout, retryMax)
+}
+
+func (c *APIClient) doRequestWithHeadersRetryTimeoutAndLimit(
+	ctx context.Context,
+	method, path string,
+	body interface{},
+	headers map[string]string,
 	allowRefresh bool,
 	timeout time.Duration,
 	retryMax int,
@@ -1036,6 +1076,12 @@ func (c *APIClient) doRequestWithRetryTimeoutAndLimit(
 		req.Header.Set("Content-Type", "application/json")
 		if token := c.getToken(); token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		for key, value := range headers {
+			if strings.TrimSpace(key) == "" {
+				continue
+			}
+			req.Header.Set(key, value)
 		}
 
 		resp, err := httpClient.Do(req)
@@ -1085,14 +1131,14 @@ func (c *APIClient) doRequestWithRetryTimeoutAndLimit(
 			if err := json.Unmarshal(respBody, &apiResp); err == nil {
 				if allowRefresh && c.refresher != nil {
 					if err := c.refreshToken(ctx); err == nil {
-						return c.doRequestWithRetryTimeoutAndLimit(ctx, method, path, body, false, timeout, retryMax)
+						return c.doRequestWithHeadersRetryTimeoutAndLimit(ctx, method, path, body, headers, false, timeout, retryMax)
 					}
 				}
 				return nil, fmt.Errorf("authentication failed (401): please check your API token. message=%s", apiResp.Message)
 			}
 			if allowRefresh && c.refresher != nil {
 				if err := c.refreshToken(ctx); err == nil {
-					return c.doRequestWithRetryTimeoutAndLimit(ctx, method, path, body, false, timeout, retryMax)
+					return c.doRequestWithHeadersRetryTimeoutAndLimit(ctx, method, path, body, headers, false, timeout, retryMax)
 				}
 			}
 			return nil, fmt.Errorf("authentication failed (401): please check your API token. url=%s", url)
@@ -1143,6 +1189,26 @@ func (c *APIClient) doRequestWithRetryTimeoutAndLimit(
 	}
 
 	return nil, fmt.Errorf("request failed after retries: url=%s", url)
+}
+
+func (c *APIClient) EnsureIAMMockConsumer(
+	ctx context.Context,
+	path string,
+	req EnsureIAMMockConsumerRequest,
+	sharedSecret string,
+) (*EnsureIAMMockConsumerResponse, error) {
+	headers := map[string]string{
+		"X-IAM-Seed-Secret": strings.TrimSpace(sharedSecret),
+	}
+	resp, err := c.doRequestWithHeadersRetryAndTimeout(ctx, http.MethodPost, path, req, headers, false, c.httpClient.Timeout)
+	if err != nil {
+		return nil, err
+	}
+	var result EnsureIAMMockConsumerResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 func defaultRetryConfig() (int, time.Duration, time.Duration) {

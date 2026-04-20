@@ -230,13 +230,28 @@ func simulateDailyUser(
 }
 
 func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
-	guardianUserID, guardianToken, userCreated, err := ensureDailySimulationGuardianAccount(
-		ctx,
-		state.deps,
-		state.iamBundle,
-		state.cfg,
-		state.profile,
+	var (
+		guardianUserID string
+		guardianToken  string
+		userCreated    bool
+		err            error
 	)
+	if dailySimulationUsesIAMMockConsumer(state.deps.Config.IAM) {
+		guardianUserID, guardianToken, userCreated, err = ensureDailySimulationGuardianMockConsumer(
+			ctx,
+			state.deps,
+			state.cfg,
+			state.profile,
+		)
+	} else {
+		guardianUserID, guardianToken, userCreated, err = ensureDailySimulationGuardianAccount(
+			ctx,
+			state.deps,
+			state.iamBundle,
+			state.cfg,
+			state.profile,
+		)
+	}
 	if err != nil {
 		return toolchain.Decision{}, err
 	}
@@ -762,6 +777,53 @@ func ensureDailySimulationGuardianAccount(
 	return userID, token, created, nil
 }
 
+func ensureDailySimulationGuardianMockConsumer(
+	ctx context.Context,
+	deps *dependencies,
+	cfg DailySimulationConfig,
+	profile dailySimulationProfile,
+) (string, string, bool, error) {
+	baseURL, err := resolveDailySimulationIAMBaseURL(deps.Config.IAM)
+	if err != nil {
+		return "", "", false, err
+	}
+	endpointPath := resolveDailySimulationIAMMockConsumerEndpointPath(deps.Config.IAM)
+	sharedSecret := strings.TrimSpace(deps.Config.IAM.MockConsumer.SharedSecret)
+	if sharedSecret == "" {
+		return "", "", false, fmt.Errorf("iam.mockConsumer.sharedSecret is required for daily_simulation mock-consumer mode")
+	}
+
+	password := normalizeDailySimulationPassword(cfg.UserPassword)
+	client := NewAPIClient(baseURL, "", deps.Logger)
+	client.SetRetryConfig(deps.Config.API.Retry)
+
+	ensureResp, err := client.EnsureIAMMockConsumer(ctx, endpointPath, EnsureIAMMockConsumerRequest{
+		Name:     profile.GuardianName,
+		Phone:    profile.GuardianPhone,
+		Email:    profile.GuardianEmail,
+		Password: password,
+	}, sharedSecret)
+	if err != nil {
+		return "", "", false, fmt.Errorf("ensure guardian mock-consumer %s: %w", profile.GuardianEmail, err)
+	}
+	if ensureResp == nil || strings.TrimSpace(ensureResp.UserID) == "" {
+		return "", "", false, fmt.Errorf("ensure guardian mock-consumer returned empty user id")
+	}
+
+	loginURL, err := resolveDailySimulationIAMLoginURL(deps.Config.IAM)
+	if err != nil {
+		return "", "", false, err
+	}
+	tenantID := resolveDailySimulationTenantID(deps.Config.IAM, deps.Config.Global.OrgID)
+	deviceID := fmt.Sprintf("%s-%s-%03d", dailySimulationDeviceIDPrefix, profile.RunDate.Format("20060102"), profile.Index+1)
+
+	token, err := tryDailySimulationGuardianLogin(ctx, loginURL, tenantID, deviceID, profile.GuardianEmail, profile.GuardianPhone, password, deps.Logger)
+	if err != nil {
+		return "", "", false, fmt.Errorf("login guardian %s after ensuring mock-consumer: %w", profile.GuardianEmail, err)
+	}
+	return strings.TrimSpace(ensureResp.UserID), token, ensureResp.IsNewUser, nil
+}
+
 func ensureDailySimulationIAMUser(
 	ctx context.Context,
 	iamBundle *dailySimulationIAMBundle,
@@ -1093,6 +1155,29 @@ func resolveDailySimulationIAMLoginURL(cfg IAMConfig) (string, error) {
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/api/v1/authn/login"
 	return parsed.String(), nil
+}
+
+func resolveDailySimulationIAMBaseURL(cfg IAMConfig) (string, error) {
+	base := strings.TrimSpace(cfg.BaseURL)
+	if base == "" {
+		return "", fmt.Errorf("iam.baseUrl is required for daily_simulation")
+	}
+	return base, nil
+}
+
+func resolveDailySimulationIAMMockConsumerEndpointPath(cfg IAMConfig) string {
+	path := strings.TrimSpace(cfg.MockConsumer.EndpointPath)
+	if path == "" {
+		return "/api/v1/internal/authn/mock-consumers/ensure"
+	}
+	if strings.HasPrefix(path, "/") {
+		return path
+	}
+	return "/" + path
+}
+
+func dailySimulationUsesIAMMockConsumer(cfg IAMConfig) bool {
+	return cfg.MockConsumer.Enabled
 }
 
 func resolveDailySimulationTenantID(cfg IAMConfig, orgID int64) string {

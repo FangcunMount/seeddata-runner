@@ -186,3 +186,33 @@ planSubmit:
 		t.Fatalf("unexpected daily max users: %d", cfg.DailySimulation.DailyMaxUsers)
 	}
 }
+
+func TestLoadRequiresIAMMockConsumerSharedSecretWhenEnabled(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "seeddata.yaml")
+	content := `
+global:
+  orgId: 1
+api:
+  baseUrl: "https://qs.example.com"
+iam:
+  baseUrl: "https://iam.example.com"
+  mockConsumer:
+    enabled: true
+dailySimulation:
+  clinicianIds: ["1001"]
+  targetType: "scale"
+  targetCode: "SAS"
+  planIds: ["614333603412718126"]
+planSubmit:
+  planIds: ["614333603412718126"]
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(configPath)
+	if err == nil || !strings.Contains(err.Error(), "iam.mockConsumer.sharedSecret is required") {
+		t.Fatalf("expected missing mock consumer secret error, got %v", err)
+	}
+}

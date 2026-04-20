@@ -17,6 +17,10 @@ iam:
   username: ""
   password: ""
   tenantId: "1"
+  mockConsumer:
+    enabled: true
+    sharedSecret: ""
+    endpointPath: "/api/v1/internal/authn/mock-consumers/ensure"
   grpc:
     address: "iam-apiserver:9090"
     timeout: "15s"

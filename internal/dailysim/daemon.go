@@ -141,10 +141,16 @@ func runDailySimulationBatch(
 	// 规范化每日模拟用户工作线程数量
 	workers := normalizeDailySimulationWorkers(cfg.Workers, count)
 
-	// 创建每日模拟用户 IAM 凭证
-	iamBundle, err := newDailySimulationIAMBundle(ctx, deps.Config.IAM, deps.Config.Global.OrgID)
-	if err != nil {
-		return err
+	var (
+		iamBundle *dailySimulationIAMBundle
+		err       error
+	)
+	// mock-consumer 模式走内部 REST + 现有密码登录，不再初始化 IAM gRPC bundle。
+	if !dailySimulationUsesIAMMockConsumer(deps.Config.IAM) {
+		iamBundle, err = newDailySimulationIAMBundle(ctx, deps.Config.IAM, deps.Config.Global.OrgID)
+		if err != nil {
+			return err
+		}
 	}
 	defer func() {
 		if iamBundle != nil && iamBundle.client != nil {

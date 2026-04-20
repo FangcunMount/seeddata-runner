@@ -53,12 +53,13 @@ type APIConfig struct {
 
 // IAMConfig IAM 登录配置
 type IAMConfig struct {
-	BaseURL  string        `yaml:"baseUrl"`
-	LoginURL string        `yaml:"loginUrl"`
-	Username string        `yaml:"username"`
-	Password string        `yaml:"password"`
-	TenantID string        `yaml:"tenantId"`
-	GRPC     IAMGRPCConfig `yaml:"grpc"`
+	BaseURL      string                `yaml:"baseUrl"`
+	LoginURL     string                `yaml:"loginUrl"`
+	Username     string                `yaml:"username"`
+	Password     string                `yaml:"password"`
+	TenantID     string                `yaml:"tenantId"`
+	GRPC         IAMGRPCConfig         `yaml:"grpc"`
+	MockConsumer IAMMockConsumerConfig `yaml:"mockConsumer"`
 }
 
 type IAMGRPCConfig struct {
@@ -75,6 +76,12 @@ type IAMGRPCTLSConfig struct {
 	KeyFile            string `yaml:"keyFile"`
 	ServerName         string `yaml:"serverName"`
 	InsecureSkipVerify bool   `yaml:"insecureSkipVerify"`
+}
+
+type IAMMockConsumerConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	SharedSecret string `yaml:"sharedSecret"`
+	EndpointPath string `yaml:"endpointPath"`
 }
 
 type RetryConfig = seedapi.RetryConfig
@@ -212,6 +219,9 @@ func applyEnvOverrides(cfg *Config) {
 	if password := strings.TrimSpace(os.Getenv("IAM_PASSWORD")); password != "" {
 		cfg.IAM.Password = password
 	}
+	if sharedSecret := strings.TrimSpace(os.Getenv("IAM_MOCK_CONSUMER_SHARED_SECRET")); sharedSecret != "" {
+		cfg.IAM.MockConsumer.SharedSecret = sharedSecret
+	}
 }
 
 func (cfg *Config) Normalize() {
@@ -219,6 +229,7 @@ func (cfg *Config) Normalize() {
 		return
 	}
 
+	cfg.IAM.Normalize()
 	cfg.DailySimulation.Normalize()
 	cfg.PlanSubmit.Normalize()
 }
@@ -226,6 +237,9 @@ func (cfg *Config) Normalize() {
 func (cfg *Config) Validate() error {
 	if cfg == nil {
 		return fmt.Errorf("seeddata config is nil")
+	}
+	if err := cfg.IAM.Validate(); err != nil {
+		return err
 	}
 	if cfg.DailySimulation.IsZero() {
 		return fmt.Errorf("dailySimulation config is required")
@@ -235,6 +249,41 @@ func (cfg *Config) Validate() error {
 	}
 	if err := cfg.PlanSubmit.Validate(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (cfg *IAMConfig) Normalize() {
+	if cfg == nil {
+		return
+	}
+	cfg.BaseURL = strings.TrimSpace(cfg.BaseURL)
+	cfg.LoginURL = strings.TrimSpace(cfg.LoginURL)
+	cfg.Username = strings.TrimSpace(cfg.Username)
+	cfg.Password = strings.TrimSpace(cfg.Password)
+	cfg.TenantID = strings.TrimSpace(cfg.TenantID)
+	cfg.GRPC.Address = strings.TrimSpace(cfg.GRPC.Address)
+	cfg.GRPC.Timeout = strings.TrimSpace(cfg.GRPC.Timeout)
+	cfg.GRPC.TLS.CAFile = strings.TrimSpace(cfg.GRPC.TLS.CAFile)
+	cfg.GRPC.TLS.CertFile = strings.TrimSpace(cfg.GRPC.TLS.CertFile)
+	cfg.GRPC.TLS.KeyFile = strings.TrimSpace(cfg.GRPC.TLS.KeyFile)
+	cfg.GRPC.TLS.ServerName = strings.TrimSpace(cfg.GRPC.TLS.ServerName)
+	cfg.MockConsumer.SharedSecret = strings.TrimSpace(cfg.MockConsumer.SharedSecret)
+	cfg.MockConsumer.EndpointPath = strings.TrimSpace(cfg.MockConsumer.EndpointPath)
+	if cfg.MockConsumer.EndpointPath == "" {
+		cfg.MockConsumer.EndpointPath = "/api/v1/internal/authn/mock-consumers/ensure"
+	}
+}
+
+func (cfg IAMConfig) Validate() error {
+	if !cfg.MockConsumer.Enabled {
+		return nil
+	}
+	if cfg.BaseURL == "" {
+		return fmt.Errorf("iam.baseUrl is required when iam.mockConsumer.enabled is true")
+	}
+	if cfg.MockConsumer.SharedSecret == "" {
+		return fmt.Errorf("iam.mockConsumer.sharedSecret is required when iam.mockConsumer.enabled is true")
 	}
 	return nil
 }

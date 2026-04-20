@@ -62,3 +62,21 @@ func TestShouldStopDailySimulationJourneyAfter(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveDailySimulationIAMMockConsumerEndpointPathDefaults(t *testing.T) {
+	got := resolveDailySimulationIAMMockConsumerEndpointPath(IAMConfig{})
+	if got != "/api/v1/internal/authn/mock-consumers/ensure" {
+		t.Fatalf("unexpected default endpoint path: %q", got)
+	}
+}
+
+func TestDailySimulationUsesIAMMockConsumer(t *testing.T) {
+	if dailySimulationUsesIAMMockConsumer(IAMConfig{}) {
+		t.Fatalf("expected mock-consumer mode disabled by default")
+	}
+	if !dailySimulationUsesIAMMockConsumer(IAMConfig{
+		MockConsumer: IAMMockConsumerConfig{Enabled: true},
+	}) {
+		t.Fatalf("expected mock-consumer mode enabled")
+	}
+}

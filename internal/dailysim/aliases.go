@@ -20,6 +20,7 @@ type dependencies = Dependencies
 type DailySimulationConfig = seedconfig.DailySimulationConfig
 type DailySimulationJourneyMixConfig = seedconfig.DailySimulationJourneyMixConfig
 type IAMConfig = seedconfig.IAMConfig
+type IAMMockConsumerConfig = seedconfig.IAMMockConsumerConfig
 type FlexibleID = seedconfig.FlexibleID
 
 type APIClient = seedapi.APIClient
@@ -44,6 +45,8 @@ type IAMChildResponse = seedapi.IAMChildResponse
 type IAMChildPageResponse = seedapi.IAMChildPageResponse
 type IAMChildRegisterRequest = seedapi.IAMChildRegisterRequest
 type IAMChildRegisterResponse = seedapi.IAMChildRegisterResponse
+type EnsureIAMMockConsumerRequest = seedapi.EnsureIAMMockConsumerRequest
+type EnsureIAMMockConsumerResponse = seedapi.EnsureIAMMockConsumerResponse
 type CollectionCreateTesteeRequest = seedapi.CollectionCreateTesteeRequest
 type CollectionTesteeExistsResponse = seedapi.CollectionTesteeExistsResponse
 type CollectionAssessmentDetailResponse = seedapi.CollectionAssessmentDetailResponse
