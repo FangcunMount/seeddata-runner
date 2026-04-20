@@ -44,7 +44,7 @@ dailySimulation:
   runDate: ""
   runAt: "10:00" # 兼容单次调度；设置 windowStartAt/windowEndAt/interval 后按窗口模式执行
   windowStartAt: "10:00"
-  windowEndAt: "18:00"
+  windowEndAt: "24:00"
   interval: "30m"
   retryDelay: "30m"
   stateFile: ".seeddata-cache/daily-simulation-daemon-state.json"
