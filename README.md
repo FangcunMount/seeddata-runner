@@ -51,6 +51,131 @@ go run ./cmd/seeddata --config ./configs/seeddata.yaml --verbose
 
 `--verbose` 会把日志级别提升到 `debug`。
 
+## 编译二进制并通过 systemd 运行
+
+如果 `seeddata-runner` 已经以 `seeddata-runner.service` 的形式托管在服务器上，推荐把可执行文件编译成固定二进制，再交给 `systemd` 启停，而不是在线上直接 `go run`。
+
+### 1. 编译二进制
+
+在仓库根目录执行：
+
+```bash
+cd seeddata-runner
+mkdir -p ./bin
+go build -o ./bin/seeddata ./cmd/seeddata
+```
+
+如果需要交叉编译 Linux AMD64：
+
+```bash
+cd seeddata-runner
+mkdir -p ./bin
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ./bin/seeddata-linux-amd64 ./cmd/seeddata
+```
+
+### 2. 确认 systemd 当前使用的启动方式
+
+先检查服务单元文件，确认它当前是直接跑二进制，还是仍然在跑 `go run`：
+
+```bash
+sudo systemctl cat seeddata-runner.service
+```
+
+重点关注：
+
+- `ExecStart`
+- `WorkingDirectory`
+- `Environment`
+- `EnvironmentFile`
+
+如果 `ExecStart` 还是类似：
+
+```ini
+ExecStart=/usr/bin/env bash -lc 'go run ./cmd/seeddata --config ./configs/seeddata.yaml'
+```
+
+建议改成固定二进制，例如：
+
+```ini
+ExecStart=/opt/seeddata-runner/bin/seeddata --config /opt/seeddata-runner/configs/seeddata.yaml
+WorkingDirectory=/opt/seeddata-runner
+EnvironmentFile=-/etc/seeddata-runner.env
+```
+
+这样升级时只需要替换二进制，不需要依赖线上 Go 编译环境。
+
+### 3. 替换二进制
+
+下面假设服务实际使用的二进制路径是 `/opt/seeddata-runner/bin/seeddata`。如果你的 unit file 使用的是别的路径，以 `ExecStart` 为准。
+
+```bash
+sudo install -d /opt/seeddata-runner/bin
+sudo install -m 0755 ./bin/seeddata /opt/seeddata-runner/bin/seeddata
+```
+
+如果同时更新了配置文件，也一并覆盖对应路径。
+
+### 4. 重新加载并重启服务
+
+如果只替换二进制，不改 unit file，通常直接重启即可：
+
+```bash
+sudo systemctl restart seeddata-runner
+```
+
+如果修改了 unit file 或 `EnvironmentFile`，先 reload 再 restart：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart seeddata-runner
+```
+
+### 5. 验证服务是否按新版本运行
+
+```bash
+sudo systemctl status seeddata-runner --no-pager
+sudo journalctl -u seeddata-runner -n 200 --no-pager
+```
+
+建议重点看这几类日志：
+
+- `Fetching API token from IAM`
+- `Initialized API client`
+- `Daily simulation daemon started`
+- `Plan opened-task answersheet daemon started`
+- `Daily simulation daemon batch failed`
+
+如果服务不断重启，可以继续检查：
+
+```bash
+sudo systemctl show seeddata-runner -p Environment
+sudo systemctl cat seeddata-runner.service
+```
+
+这样可以快速确认：
+
+- IAM 用户名/密码是否真的注入到了进程环境里
+- `ExecStart` 是否已经切到新二进制
+- `--config` 指向的是否是你预期的配置文件
+
+### 6. 一次典型升级流程
+
+```bash
+cd /path/to/seeddata-runner
+go build -o ./bin/seeddata ./cmd/seeddata
+sudo install -m 0755 ./bin/seeddata /opt/seeddata-runner/bin/seeddata
+sudo systemctl restart seeddata-runner
+sudo systemctl status seeddata-runner --no-pager
+sudo journalctl -u seeddata-runner -n 100 --no-pager
+```
+
+如果这次升级还改了 unit file 或环境文件，则改为：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart seeddata-runner
+```
+
 ## 认证与依赖
 
 运行时依赖主要分为三类：

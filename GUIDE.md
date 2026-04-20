@@ -54,6 +54,8 @@ cd seeddata-runner
 go run ./cmd/seeddata --config ./configs/seeddata.yaml
 ```
 
+如果是服务器常驻部署，优先看 [README.md](./README.md) 里的“编译二进制并通过 systemd 运行”章节；线上推荐固定二进制 + `systemctl`，不要长期依赖 `go run`。
+
 ## 4. 配置原则
 
 `configs/seeddata.yaml` 只保留：
