@@ -1,6 +1,7 @@
 package dailysim
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -89,3 +90,23 @@ func TestDailySimulationTesteeID(t *testing.T) {
 		t.Fatalf("expected trimmed testee id, got %q", got)
 	}
 }
+
+func TestShouldRetryDailySimulationIAMLogin(t *testing.T) {
+	if !shouldRetryDailySimulationIAMLogin(context.DeadlineExceeded) {
+		t.Fatalf("expected timeout to be retryable")
+	}
+	if !shouldRetryDailySimulationIAMLogin(assertErr("iam login failed: status=502 body=bad gateway")) {
+		t.Fatalf("expected 502 to be retryable")
+	}
+	if shouldRetryDailySimulationIAMLogin(assertErr("iam login failed: status=401 body=unauthorized")) {
+		t.Fatalf("expected 401 not to be retryable")
+	}
+}
+
+func assertErr(message string) error {
+	return testErr(message)
+}
+
+type testErr string
+
+func (e testErr) Error() string { return string(e) }

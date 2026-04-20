@@ -24,6 +24,7 @@ type IAMMockConsumerConfig = seedconfig.IAMMockConsumerConfig
 type FlexibleID = seedconfig.FlexibleID
 
 type APIClient = seedapi.APIClient
+type RetryConfig = seedapi.RetryConfig
 type ScaleResponse = seedapi.ScaleResponse
 type PlanResponse = seedapi.PlanResponse
 type TaskResponse = seedapi.TaskResponse

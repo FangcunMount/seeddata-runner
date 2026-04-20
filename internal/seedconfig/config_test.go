@@ -216,3 +216,37 @@ planSubmit:
 		t.Fatalf("expected missing mock consumer secret error, got %v", err)
 	}
 }
+
+func TestLoadDefaultsIAMMockConsumerMaxConcurrentWhenEnabled(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "seeddata.yaml")
+	content := `
+global:
+  orgId: 1
+api:
+  baseUrl: "https://qs.example.com"
+iam:
+  baseUrl: "https://iam.example.com"
+  mockConsumer:
+    enabled: true
+    sharedSecret: "top-secret"
+dailySimulation:
+  clinicianIds: ["1001"]
+  targetType: "scale"
+  targetCode: "SAS"
+  planIds: ["614333603412718126"]
+planSubmit:
+  planIds: ["614333603412718126"]
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.IAM.MockConsumer.MaxConcurrent != 1 {
+		t.Fatalf("unexpected default mock-consumer maxConcurrent: %d", cfg.IAM.MockConsumer.MaxConcurrent)
+	}
+}

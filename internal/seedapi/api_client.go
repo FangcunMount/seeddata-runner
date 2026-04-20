@@ -88,6 +88,14 @@ func (c *APIClient) BaseURL() string {
 	return c.baseURL
 }
 
+// SetHTTPTimeout updates the underlying HTTP client timeout.
+func (c *APIClient) SetHTTPTimeout(timeout time.Duration) {
+	if c == nil || c.httpClient == nil || timeout <= 0 {
+		return
+	}
+	c.httpClient.Timeout = timeout
+}
+
 // SetTokenRefresher sets a callback to refresh token when needed.
 func (c *APIClient) SetTokenRefresher(fn func(context.Context) (string, error)) {
 	c.refresher = fn

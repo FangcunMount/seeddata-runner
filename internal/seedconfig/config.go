@@ -79,9 +79,10 @@ type IAMGRPCTLSConfig struct {
 }
 
 type IAMMockConsumerConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	SharedSecret string `yaml:"sharedSecret"`
-	EndpointPath string `yaml:"endpointPath"`
+	Enabled       bool   `yaml:"enabled"`
+	SharedSecret  string `yaml:"sharedSecret"`
+	EndpointPath  string `yaml:"endpointPath"`
+	MaxConcurrent int    `yaml:"maxConcurrent"`
 }
 
 type RetryConfig = seedapi.RetryConfig
@@ -272,6 +273,9 @@ func (cfg *IAMConfig) Normalize() {
 	cfg.MockConsumer.EndpointPath = strings.TrimSpace(cfg.MockConsumer.EndpointPath)
 	if cfg.MockConsumer.EndpointPath == "" {
 		cfg.MockConsumer.EndpointPath = "/api/v1/internal/authn/mock-consumers/ensure"
+	}
+	if cfg.MockConsumer.Enabled && cfg.MockConsumer.MaxConcurrent <= 0 {
+		cfg.MockConsumer.MaxConcurrent = 1
 	}
 }
 

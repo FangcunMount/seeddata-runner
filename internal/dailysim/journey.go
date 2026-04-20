@@ -19,6 +19,7 @@ import (
 	sdkerrors "github.com/FangcunMount/iam-contracts/pkg/sdk/errors"
 	"github.com/FangcunMount/iam-contracts/pkg/sdk/identity"
 	toolchain "github.com/FangcunMount/seeddata-runner/internal/chain"
+	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 )
 
 const (
@@ -33,6 +34,13 @@ const (
 	dailySimulationDeviceIDPrefix   = "seeddata-daily"
 	seedAssessmentPollTimeout       = 5 * time.Minute
 	seedAssessmentPollInterval      = 2 * time.Second
+	dailySimulationMockIAMTimeout   = 15 * time.Second
+	dailySimulationMockIAMRetryMax  = 1
+)
+
+var (
+	dailySimulationMockIAMRetryMinDelay = 500 * time.Millisecond
+	dailySimulationMockIAMRetryMaxDelay = 2 * time.Second
 )
 
 type dailySimulationIAMBundle struct {
@@ -123,6 +131,7 @@ type dailySimulationJourneyState struct {
 	journeyTarget    dailySimulationJourneyTarget
 	guardianUserID   string
 	guardianToken    string
+	mockIAMLimiter   chan struct{}
 	userClient       *APIClient
 	collectionClient *APIClient
 	child            *IAMChildResponse
@@ -182,17 +191,25 @@ func simulateDailyUser(
 	clinicianID string,
 	entry *AssessmentEntryResponse,
 	target *dailySimulationResolvedTarget,
+	mockIAMLimiter chan struct{},
 ) (dailySimulationOutcome, error) {
 	state := &dailySimulationJourneyState{
-		deps:          deps,
-		iamBundle:     iamBundle,
-		cfg:           cfg,
-		profile:       profile,
-		clinicianID:   clinicianID,
-		entry:         entry,
-		target:        target,
-		planID:        selectDailySimulationPlanID(cfg, profile.RunDate, profile.Index),
-		journeyTarget: resolveDailySimulationJourneyTarget(cfg, profile.RunDate, profile.Index),
+		deps:           deps,
+		iamBundle:      iamBundle,
+		cfg:            cfg,
+		profile:        profile,
+		clinicianID:    clinicianID,
+		entry:          entry,
+		target:         target,
+		mockIAMLimiter: mockIAMLimiter,
+		planID:         selectDailySimulationPlanID(cfg, profile.RunDate, profile.Index),
+		journeyTarget:  resolveDailySimulationJourneyTarget(cfg, profile.RunDate, profile.Index),
+	}
+	if state.entry == nil {
+		return state.outcome, fmt.Errorf("daily simulation entry is nil")
+	}
+	if state.target == nil {
+		return state.outcome, fmt.Errorf("daily simulation target is nil")
 	}
 
 	state.outcome.JourneyTarget = string(state.journeyTarget)
@@ -237,6 +254,11 @@ func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *daily
 		err            error
 	)
 	if dailySimulationUsesIAMMockConsumer(state.deps.Config.IAM) {
+		release, err := acquireDailySimulationMockIAMLimiter(ctx, state.mockIAMLimiter)
+		if err != nil {
+			return toolchain.Decision{}, err
+		}
+		defer release()
 		guardianUserID, guardianToken, userCreated, err = ensureDailySimulationGuardianMockConsumer(
 			ctx,
 			state.deps,
@@ -260,7 +282,11 @@ func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *daily
 	state.guardianToken = guardianToken
 	state.outcome.UserCreated = userCreated
 
-	state.userClient = NewAPIClient(state.deps.APIClient.BaseURL(), guardianToken, state.deps.Logger)
+	iamBaseURL, err := resolveDailySimulationIAMBaseURL(state.deps.Config.IAM)
+	if err != nil {
+		return toolchain.Decision{}, err
+	}
+	state.userClient = NewAPIClient(iamBaseURL, guardianToken, state.deps.Logger)
 	state.userClient.SetRetryConfig(state.deps.Config.API.Retry)
 	state.collectionClient = NewAPIClient(state.deps.CollectionClient.BaseURL(), guardianToken, state.deps.Logger)
 	state.collectionClient.SetRetryConfig(state.deps.Config.API.Retry)
@@ -268,9 +294,15 @@ func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *daily
 }
 
 func dailySimulationStageEnsureChild(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
+	if state.userClient == nil {
+		return toolchain.Decision{}, fmt.Errorf("guardian IAM client is not initialized")
+	}
 	child, childCreated, err := ensureDailySimulationChild(ctx, state.userClient, state.cfg, state.profile)
 	if err != nil {
 		return toolchain.Decision{}, err
+	}
+	if child == nil || strings.TrimSpace(child.ID) == "" {
+		return toolchain.Decision{}, fmt.Errorf("ensure iam child returned empty child")
 	}
 	state.child = child
 	state.outcome.ChildCreated = childCreated
@@ -278,6 +310,12 @@ func dailySimulationStageEnsureChild(ctx context.Context, state *dailySimulation
 }
 
 func dailySimulationStageEnsureTestee(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
+	if state.collectionClient == nil {
+		return toolchain.Decision{}, fmt.Errorf("collection client is not initialized")
+	}
+	if state.child == nil || strings.TrimSpace(state.child.ID) == "" {
+		return toolchain.Decision{}, fmt.Errorf("iam child is not initialized")
+	}
 	testee, testeeCreated, err := ensureDailySimulationTestee(
 		ctx,
 		state.collectionClient,
@@ -289,6 +327,9 @@ func dailySimulationStageEnsureTestee(ctx context.Context, state *dailySimulatio
 	if err != nil {
 		return toolchain.Decision{}, err
 	}
+	if testee == nil || strings.TrimSpace(testee.ID) == "" {
+		return toolchain.Decision{}, fmt.Errorf("ensure testee returned empty testee")
+	}
 	state.testee = testee
 	state.outcome.TesteeCreated = testeeCreated
 	return state.nextDecision(dailySimulationJourneyStageTesteeProfile), nil
@@ -297,6 +338,9 @@ func dailySimulationStageEnsureTestee(ctx context.Context, state *dailySimulatio
 func dailySimulationStageEnrollPlan(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
 	if strings.TrimSpace(state.planID) == "" {
 		return toolchain.Decision{}, fmt.Errorf("dailySimulation.planIds resolved empty plan")
+	}
+	if state.testee == nil || strings.TrimSpace(state.testee.ID) == "" {
+		return toolchain.Decision{}, fmt.Errorf("testee is not initialized before plan enrollment")
 	}
 	if _, err := state.deps.APIClient.EnrollTesteeInPlan(ctx, EnrollTesteeRequest{
 		PlanID:    state.planID,
@@ -310,6 +354,15 @@ func dailySimulationStageEnrollPlan(ctx context.Context, state *dailySimulationJ
 }
 
 func dailySimulationStageEnsureEntryAccess(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
+	if state.entry == nil || strings.TrimSpace(state.entry.ID) == "" || strings.TrimSpace(state.entry.Token) == "" {
+		return toolchain.Decision{}, fmt.Errorf("assessment entry is not initialized")
+	}
+	if state.testee == nil || strings.TrimSpace(state.testee.ID) == "" {
+		return toolchain.Decision{}, fmt.Errorf("testee is not initialized before entry access")
+	}
+	if state.child == nil || strings.TrimSpace(state.child.ID) == "" {
+		return toolchain.Decision{}, fmt.Errorf("iam child is not initialized before entry access")
+	}
 	hasCreator, err := hasAssessmentEntryCreatorRelation(ctx, state.deps.APIClient, state.testee.ID, state.entry.ID)
 	if err != nil {
 		return toolchain.Decision{}, err
@@ -348,6 +401,12 @@ func dailySimulationStageEnsureEntryAccess(ctx context.Context, state *dailySimu
 }
 
 func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
+	if state.target == nil || strings.TrimSpace(state.target.QuestionnaireCode) == "" {
+		return toolchain.Decision{}, fmt.Errorf("questionnaire target is not initialized")
+	}
+	if state.testee == nil || strings.TrimSpace(state.testee.ID) == "" {
+		return toolchain.Decision{}, fmt.Errorf("testee is not initialized before answersheet submission")
+	}
 	existingAnswerSheet, err := findDailySimulationAnswerSheet(
 		ctx,
 		state.deps.APIClient,
@@ -514,9 +573,9 @@ func logDailySimulationOutcome(
 		"testee_id", testeeID,
 		"clinician_id", clinicianID,
 		"plan_id", outcome.PlanID,
-		"entry_id", entry.ID,
-		"target_type", target.TargetType,
-		"target_code", target.TargetCode,
+		"entry_id", dailySimulationEntryID(entry),
+		"target_type", dailySimulationTargetType(target),
+		"target_code", dailySimulationTargetCode(target),
 		"user_created", outcome.UserCreated,
 		"child_created", outcome.ChildCreated,
 		"testee_created", outcome.TesteeCreated,
@@ -537,6 +596,27 @@ func dailySimulationTesteeID(testee *TesteeResponse) string {
 		return ""
 	}
 	return strings.TrimSpace(testee.ID)
+}
+
+func dailySimulationEntryID(entry *AssessmentEntryResponse) string {
+	if entry == nil {
+		return ""
+	}
+	return strings.TrimSpace(entry.ID)
+}
+
+func dailySimulationTargetType(target *dailySimulationResolvedTarget) string {
+	if target == nil {
+		return ""
+	}
+	return strings.TrimSpace(target.TargetType)
+}
+
+func dailySimulationTargetCode(target *dailySimulationResolvedTarget) string {
+	if target == nil {
+		return ""
+	}
+	return strings.TrimSpace(target.TargetCode)
 }
 
 func ensureDailySimulationEntryAndTarget(
@@ -802,7 +882,7 @@ func ensureDailySimulationGuardianMockConsumer(
 
 	password := normalizeDailySimulationPassword(cfg.UserPassword)
 	client := NewAPIClient(baseURL, "", deps.Logger)
-	client.SetRetryConfig(deps.Config.API.Retry)
+	configureDailySimulationMockIAMClient(client)
 
 	ensureResp, err := client.EnsureIAMMockConsumer(ctx, endpointPath, EnsureIAMMockConsumerRequest{
 		Name:     profile.GuardianName,
@@ -824,7 +904,7 @@ func ensureDailySimulationGuardianMockConsumer(
 	tenantID := resolveDailySimulationTenantID(deps.Config.IAM, deps.Config.Global.OrgID)
 	deviceID := fmt.Sprintf("%s-%s-%03d", dailySimulationDeviceIDPrefix, profile.RunDate.Format("20060102"), profile.Index+1)
 
-	token, err := tryDailySimulationGuardianLogin(ctx, loginURL, tenantID, deviceID, profile.GuardianEmail, profile.GuardianPhone, password, deps.Logger)
+	token, err := tryDailySimulationGuardianLoginWithRetry(ctx, loginURL, tenantID, deviceID, profile.GuardianEmail, profile.GuardianPhone, password, deps.Logger)
 	if err != nil {
 		return "", "", false, fmt.Errorf("login guardian %s after ensuring mock-consumer: %w", profile.GuardianEmail, err)
 	}
@@ -911,6 +991,86 @@ func tryDailySimulationGuardianLogin(
 		lastErr = fmt.Errorf("no available guardian login username")
 	}
 	return "", lastErr
+}
+
+func tryDailySimulationGuardianLoginWithRetry(
+	ctx context.Context,
+	loginURL, tenantID, deviceID, email, phone, password string,
+	logger log.Logger,
+) (string, error) {
+	const maxAttempts = 2
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		token, err := tryDailySimulationGuardianLogin(ctx, loginURL, tenantID, deviceID, email, phone, password, logger)
+		if err == nil {
+			return token, nil
+		}
+		lastErr = err
+		if attempt+1 >= maxAttempts || !shouldRetryDailySimulationIAMLogin(err) {
+			break
+		}
+		delay := dailySimulationIAMBackoffDelay(attempt, dailySimulationMockIAMRetryMinDelay, dailySimulationMockIAMRetryMaxDelay)
+		if waitErr := scheduler.Wait(ctx, delay); waitErr != nil {
+			return "", waitErr
+		}
+	}
+	return "", lastErr
+}
+
+func shouldRetryDailySimulationIAMLogin(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if message == "" {
+		return false
+	}
+	return strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "status=429") ||
+		strings.Contains(message, "status=502") ||
+		strings.Contains(message, "status=503") ||
+		strings.Contains(message, "status=504")
+}
+
+func dailySimulationIAMBackoffDelay(attempt int, minDelay, maxDelay time.Duration) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	delay := minDelay << attempt
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+	return delay
+}
+
+func configureDailySimulationMockIAMClient(client *APIClient) {
+	if client == nil {
+		return
+	}
+	client.SetHTTPTimeout(dailySimulationMockIAMTimeout)
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries: dailySimulationMockIAMRetryMax,
+		MinDelay:   dailySimulationMockIAMRetryMinDelay.String(),
+		MaxDelay:   dailySimulationMockIAMRetryMaxDelay.String(),
+	})
+}
+
+func acquireDailySimulationMockIAMLimiter(ctx context.Context, limiter chan struct{}) (func(), error) {
+	if limiter == nil {
+		return func() {}, nil
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case limiter <- struct{}{}:
+		return func() {
+			select {
+			case <-limiter:
+			default:
+			}
+		}, nil
+	}
 }
 
 func ensureDailySimulationChild(

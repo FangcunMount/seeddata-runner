@@ -142,8 +142,9 @@ func runDailySimulationBatch(
 	workers := normalizeDailySimulationWorkers(cfg.Workers, count)
 
 	var (
-		iamBundle *dailySimulationIAMBundle
-		err       error
+		iamBundle      *dailySimulationIAMBundle
+		mockIAMLimiter chan struct{}
+		err            error
 	)
 	// mock-consumer 模式走内部 REST + 现有密码登录，不再初始化 IAM gRPC bundle。
 	if !dailySimulationUsesIAMMockConsumer(deps.Config.IAM) {
@@ -151,6 +152,8 @@ func runDailySimulationBatch(
 		if err != nil {
 			return err
 		}
+	} else {
+		mockIAMLimiter = newDailySimulationMockIAMLimiter(deps.Config.IAM)
 	}
 	defer func() {
 		if iamBundle != nil && iamBundle.client != nil {
@@ -207,6 +210,7 @@ func runDailySimulationBatch(
 					scenario.ClinicianID,
 					scenario.Entry,
 					scenario.Target,
+					mockIAMLimiter,
 				)
 				// 如果模拟用户失败，则记录失败
 				if simErr != nil {
@@ -278,6 +282,17 @@ func runDailySimulationBatch(
 		return fmt.Errorf("%s completed with %d failures", progressLabel, atomic.LoadInt64(&counters.failed))
 	}
 	return nil
+}
+
+func newDailySimulationMockIAMLimiter(cfg IAMConfig) chan struct{} {
+	if !dailySimulationUsesIAMMockConsumer(cfg) {
+		return nil
+	}
+	maxConcurrent := cfg.MockConsumer.MaxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
+	return make(chan struct{}, maxConcurrent)
 }
 
 // resolveDailySimulationBatchCount 解析每日模拟用户批量数量

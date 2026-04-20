@@ -226,3 +226,22 @@ func TestResolveDailySimulationBatchCountClampsToRemainingQuota(t *testing.T) {
 		t.Fatalf("expected count to be clamped to remaining quota, got %d", count)
 	}
 }
+
+func TestNewDailySimulationMockIAMLimiter(t *testing.T) {
+	if limiter := newDailySimulationMockIAMLimiter(IAMConfig{}); limiter != nil {
+		t.Fatalf("expected nil limiter when mock-consumer mode is disabled")
+	}
+
+	limiter := newDailySimulationMockIAMLimiter(IAMConfig{
+		MockConsumer: IAMMockConsumerConfig{
+			Enabled:       true,
+			MaxConcurrent: 2,
+		},
+	})
+	if limiter == nil {
+		t.Fatalf("expected limiter when mock-consumer mode is enabled")
+	}
+	if got := cap(limiter); got != 2 {
+		t.Fatalf("unexpected limiter capacity: %d", got)
+	}
+}
