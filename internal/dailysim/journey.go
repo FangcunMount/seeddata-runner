@@ -203,7 +203,7 @@ func simulateDailyUser(
 		target:         target,
 		mockIAMLimiter: mockIAMLimiter,
 		planID:         selectDailySimulationPlanID(cfg, profile.RunDate, profile.Index),
-		journeyTarget:  resolveDailySimulationJourneyTarget(cfg, profile.RunDate, profile.Index),
+		journeyTarget:  resolveDailySimulationJourneyTargetForMode(cfg, deps.Config.IAM, profile.RunDate, profile.Index),
 	}
 	if state.entry == nil {
 		return state.outcome, fmt.Errorf("daily simulation entry is nil")
@@ -526,6 +526,18 @@ func resolveDailySimulationJourneyTarget(cfg DailySimulationConfig, runDate time
 	default:
 		return dailySimulationJourneySubmitAnswer
 	}
+}
+
+func resolveDailySimulationJourneyTargetForMode(
+	cfg DailySimulationConfig,
+	iamCfg IAMConfig,
+	runDate time.Time,
+	index int,
+) dailySimulationJourneyTarget {
+	if dailySimulationUsesIAMMockConsumer(iamCfg) {
+		return dailySimulationJourneySubmitAnswer
+	}
+	return resolveDailySimulationJourneyTarget(cfg, runDate, index)
 }
 
 func normalizeDailySimulationJourneyMix(cfg DailySimulationJourneyMixConfig) DailySimulationJourneyMixConfig {

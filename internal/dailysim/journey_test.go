@@ -2,6 +2,9 @@ package dailysim
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -36,6 +39,23 @@ func TestResolveDailySimulationJourneyTargetDefaultsToSubmit(t *testing.T) {
 	target := resolveDailySimulationJourneyTarget(DailySimulationConfig{}, time.Date(2026, 4, 19, 0, 0, 0, 0, time.Local), 1)
 	if target != dailySimulationJourneySubmitAnswer {
 		t.Fatalf("expected default target %q, got %q", dailySimulationJourneySubmitAnswer, target)
+	}
+}
+
+func TestResolveDailySimulationJourneyTargetForMockConsumerAlwaysSubmits(t *testing.T) {
+	cfg := DailySimulationConfig{
+		JourneyMix: DailySimulationJourneyMixConfig{
+			RegisterOnlyWeight: 20,
+			CreateTesteeWeight: 20,
+			ResolveEntryWeight: 20,
+			SubmitAnswerWeight: 40,
+		},
+	}
+	target := resolveDailySimulationJourneyTargetForMode(cfg, IAMConfig{
+		MockConsumer: IAMMockConsumerConfig{Enabled: true},
+	}, time.Date(2026, 4, 19, 0, 0, 0, 0, time.Local), 3)
+	if target != dailySimulationJourneySubmitAnswer {
+		t.Fatalf("expected mock-consumer mode to always submit answer, got %q", target)
 	}
 }
 
@@ -100,6 +120,57 @@ func TestShouldRetryDailySimulationIAMLogin(t *testing.T) {
 	}
 	if shouldRetryDailySimulationIAMLogin(assertErr("iam login failed: status=401 body=unauthorized")) {
 		t.Fatalf("expected 401 not to be retryable")
+	}
+}
+
+func TestEnsureDailySimulationTesteeDoesNotSendSeedTagByDefault(t *testing.T) {
+	var captured CollectionCreateTesteeRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/testees/exists":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"exists":false,"testee_id":""}}`))
+			return
+		case "/api/v1/testees":
+			if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"id":"testee-1","name":"王子轩"}}`))
+			return
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "", nil)
+	childGender := uint8(1)
+	profile := dailySimulationProfile{
+		GuardianName: "王敏",
+		ChildName:    "王子轩",
+		ChildDOB:     "2014-04-20",
+		ChildGender:  1,
+	}
+	child := &IAMChildResponse{
+		ID:        "child-1",
+		LegalName: "王子轩",
+		Gender:    &childGender,
+		DOB:       "2014-04-20",
+	}
+
+	testee, created, err := ensureDailySimulationTestee(context.Background(), client, "guardian-1", DailySimulationConfig{}, profile, child)
+	if err != nil {
+		t.Fatalf("ensure testee: %v", err)
+	}
+	if !created {
+		t.Fatalf("expected created testee")
+	}
+	if testee == nil || testee.ID != "testee-1" {
+		t.Fatalf("unexpected testee response: %+v", testee)
+	}
+	if len(captured.Tags) != 0 {
+		t.Fatalf("expected no default testee tags, got %v", captured.Tags)
 	}
 }
 

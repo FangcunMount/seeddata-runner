@@ -77,18 +77,16 @@ dailySimulation:
   userEmailDomain: "fangcunmount.com"
   guardianRelation: "guardian"
   testeeSource: "daily_simulation"
-  testeeTags:
-    - "seed"
-    - "daily-simulation"
+  testeeTags: []
   isKeyFocus: false
   planIds:
     - "614333603412718126"
     - "614187067651404334"
   journeyMix:
-    registerOnlyWeight: 15  # 只注册账号
-    createTesteeWeight: 20  # 创建受试者
-    resolveEntryWeight: 15  # 解析入口
-    submitAnswerWeight: 50  # 提交答卷
+    registerOnlyWeight: 15  # 非 mock-consumer 模式下可只注册账号
+    createTesteeWeight: 20  # 非 mock-consumer 模式下可只创建受试者
+    resolveEntryWeight: 15  # 非 mock-consumer 模式下可解析入口后停止
+    submitAnswerWeight: 50  # mock-consumer 模式会强制走到提交答卷
 
 planSubmit:
   planIds:
