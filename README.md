@@ -163,7 +163,7 @@ sudo systemctl cat seeddata-runner.service
 ```bash
 cd /path/to/seeddata-runner
 go build -o ./bin/seeddata ./cmd/seeddata
-sudo install -m 0755 ./bin/seeddata /opt/seeddata-runner/bin/seeddata
+sudo install -m 0755 ./bin/seeddata
 sudo systemctl restart seeddata-runner
 sudo systemctl status seeddata-runner --no-pager
 sudo journalctl -u seeddata-runner -n 100 --no-pager
