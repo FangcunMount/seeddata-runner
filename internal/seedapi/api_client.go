@@ -943,10 +943,11 @@ type QuestionnaireDetailResponse struct {
 
 // QuestionResponse 问题响应（collection-server）
 type QuestionResponse struct {
-	Code    string           `json:"code"`
-	Type    string           `json:"type"`
-	Title   string           `json:"title"`
-	Options []OptionResponse `json:"options"`
+	Code            string                   `json:"code"`
+	Type            string                   `json:"type"`
+	Title           string                   `json:"title"`
+	Options         []OptionResponse         `json:"options"`
+	ValidationRules []ValidationRuleResponse `json:"validation_rules,omitempty"`
 }
 
 // OptionResponse 选项响应（collection-server）
@@ -954,6 +955,12 @@ type OptionResponse struct {
 	Code    string `json:"code"`
 	Content string `json:"content"`
 	Score   int32  `json:"score"`
+}
+
+// ValidationRuleResponse 问题校验规则响应（collection-server）。
+type ValidationRuleResponse struct {
+	RuleType    string `json:"rule_type"`
+	TargetValue string `json:"target_value"`
 }
 
 // SubmitAnswerSheetRequest 提交答卷请求（collection-server）

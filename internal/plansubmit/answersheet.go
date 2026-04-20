@@ -159,11 +159,19 @@ func toToolQuestion(question QuestionResponse) toolanswersheet.Question {
 			Score:   option.Score,
 		})
 	}
+	validationRules := make([]toolanswersheet.ValidationRule, 0, len(question.ValidationRules))
+	for _, rule := range question.ValidationRules {
+		validationRules = append(validationRules, toolanswersheet.ValidationRule{
+			RuleType:    rule.RuleType,
+			TargetValue: rule.TargetValue,
+		})
+	}
 	return toolanswersheet.Question{
-		Code:    question.Code,
-		Type:    question.Type,
-		Title:   question.Title,
-		Options: options,
+		Code:            question.Code,
+		Type:            question.Type,
+		Title:           question.Title,
+		Options:         options,
+		ValidationRules: validationRules,
 	}
 }
 

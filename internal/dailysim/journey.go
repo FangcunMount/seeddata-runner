@@ -460,6 +460,14 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 		"answers:" + state.profile.RunDate.Format("20060102") + ":" + strconv.Itoa(state.profile.Index) + ":" + state.target.QuestionnaireCode,
 	)
 	answers := buildAnswers(questionnaireDetail, rng)
+	invalidAnswers := validateAnswers(questionnaireDetail, answers)
+	if len(invalidAnswers) > 0 {
+		return toolchain.Decision{}, fmt.Errorf(
+			"generated invalid answers for questionnaire %s: %v",
+			state.target.QuestionnaireCode,
+			invalidAnswers,
+		)
+	}
 	submitResp, err := state.collectionClient.SubmitAnswerSheet(ctx, SubmitAnswerSheetRequest{
 		QuestionnaireCode:    state.target.QuestionnaireCode,
 		QuestionnaireVersion: state.target.QuestionnaireVersion,

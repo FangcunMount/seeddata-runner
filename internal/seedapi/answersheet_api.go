@@ -9,9 +9,30 @@ import (
 	"time"
 )
 
+type collectionSubmitAnswer struct {
+	QuestionCode string `json:"question_code"`
+	QuestionType string `json:"question_type"`
+	Score        uint32 `json:"score,omitempty"`
+	Value        string `json:"value"`
+}
+
+type collectionSubmitAnswerSheetRequest struct {
+	QuestionnaireCode    string                   `json:"questionnaire_code"`
+	QuestionnaireVersion string                   `json:"questionnaire_version"`
+	Title                string                   `json:"title"`
+	TesteeID             uint64                   `json:"testee_id"`
+	TaskID               string                   `json:"task_id,omitempty"`
+	Answers              []collectionSubmitAnswer `json:"answers"`
+}
+
 // SubmitAnswerSheet 提交答卷（collection-server）。
 func (c *APIClient) SubmitAnswerSheet(ctx context.Context, req SubmitAnswerSheetRequest) (*SubmitAnswerSheetResponse, error) {
-	resp, err := c.doRequest(ctx, "POST", "/api/v1/answersheets", req)
+	wireReq, err := toCollectionSubmitAnswerSheetRequest(req)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/answersheets", wireReq)
 	if err != nil {
 		return nil, err
 	}
@@ -27,6 +48,50 @@ func (c *APIClient) SubmitAnswerSheet(ctx context.Context, req SubmitAnswerSheet
 	}
 
 	return &submitResp, nil
+}
+
+func toCollectionSubmitAnswerSheetRequest(req SubmitAnswerSheetRequest) (collectionSubmitAnswerSheetRequest, error) {
+	answers := make([]collectionSubmitAnswer, 0, len(req.Answers))
+	for _, answer := range req.Answers {
+		value, err := marshalCollectionAnswerValue(answer.Value)
+		if err != nil {
+			return collectionSubmitAnswerSheetRequest{}, fmt.Errorf(
+				"marshal collection answer value for question %s: %w",
+				answer.QuestionCode,
+				err,
+			)
+		}
+		answers = append(answers, collectionSubmitAnswer{
+			QuestionCode: answer.QuestionCode,
+			QuestionType: answer.QuestionType,
+			Score:        answer.Score,
+			Value:        value,
+		})
+	}
+
+	return collectionSubmitAnswerSheetRequest{
+		QuestionnaireCode:    req.QuestionnaireCode,
+		QuestionnaireVersion: req.QuestionnaireVersion,
+		Title:                req.Title,
+		TesteeID:             req.TesteeID,
+		TaskID:               req.TaskID,
+		Answers:              answers,
+	}, nil
+}
+
+func marshalCollectionAnswerValue(value interface{}) (string, error) {
+	switch typed := value.(type) {
+	case string:
+		return typed, nil
+	case nil:
+		return "", nil
+	default:
+		data, err := json.Marshal(typed)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
 }
 
 // SubmitAnswerSheetAdmin 管理员提交答卷（apiserver）。
