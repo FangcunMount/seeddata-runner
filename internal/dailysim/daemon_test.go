@@ -9,7 +9,7 @@ import (
 
 func TestResolveDailySimulationBatchCountStableRange(t *testing.T) {
 	cfg := DailySimulationConfig{
-		CountMin: 10,
+		CountMin: 20,
 		CountMax: 50,
 	}
 	runDate := time.Date(2026, 4, 17, 0, 0, 0, 0, time.Local)
@@ -25,8 +25,8 @@ func TestResolveDailySimulationBatchCountStableRange(t *testing.T) {
 	if first != second {
 		t.Fatalf("expected stable count for same date, got %d and %d", first, second)
 	}
-	if first < 10 || first > 50 {
-		t.Fatalf("expected count within [10,50], got %d", first)
+	if first < 20 || first > 50 {
+		t.Fatalf("expected count within [20,50], got %d", first)
 	}
 }
 
@@ -224,6 +224,65 @@ func TestResolveDailySimulationBatchCountClampsToRemainingQuota(t *testing.T) {
 	}
 	if count != 7 {
 		t.Fatalf("expected count to be clamped to remaining quota, got %d", count)
+	}
+}
+
+func TestMatchDailySimulationExistingTesteesByIndex(t *testing.T) {
+	cfg := DailySimulationConfig{
+		TesteeSource: "daily_simulation",
+		TesteeTags:   []string{"seed"},
+	}
+	runDate := time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local)
+	firstProfile := buildDailySimulationProfile(cfg, runDate, 0)
+	secondProfile := buildDailySimulationProfile(cfg, runDate, 1)
+	firstBirthday, err := parseDailySimulationDOB(firstProfile.ChildDOB)
+	if err != nil {
+		t.Fatalf("parse first birthday: %v", err)
+	}
+	secondBirthday, err := parseDailySimulationDOB(secondProfile.ChildDOB)
+	if err != nil {
+		t.Fatalf("parse second birthday: %v", err)
+	}
+
+	items := []*ApiserverTesteeResponse{
+		{
+			ID:        "t-1",
+			Name:      firstProfile.ChildName,
+			Gender:    dailySimulationProfileGender(firstProfile.ChildGender),
+			Birthday:  firstBirthday,
+			Tags:      []string{"seed"},
+			Source:    "daily_simulation",
+			CreatedAt: runDate.Add(2 * time.Hour),
+		},
+		{
+			ID:        "ignored-other-day",
+			Name:      secondProfile.ChildName,
+			Gender:    dailySimulationProfileGender(secondProfile.ChildGender),
+			Birthday:  secondBirthday,
+			Tags:      []string{"seed"},
+			Source:    "daily_simulation",
+			CreatedAt: runDate.Add(-2 * time.Hour),
+		},
+		{
+			ID:        "ignored-wrong-source",
+			Name:      secondProfile.ChildName,
+			Gender:    dailySimulationProfileGender(secondProfile.ChildGender),
+			Birthday:  secondBirthday,
+			Tags:      []string{"seed"},
+			Source:    "manual",
+			CreatedAt: runDate.Add(3 * time.Hour),
+		},
+	}
+
+	matched := matchDailySimulationExistingTesteesByIndex(cfg, runDate, 2, items)
+	if len(matched) != 1 {
+		t.Fatalf("expected 1 matched testee, got %d", len(matched))
+	}
+	if got := matched[1]; got == nil || got.ID != "t-1" {
+		t.Fatalf("expected index 1 to match testee t-1, got %+v", got)
+	}
+	if got := matched[2]; got != nil {
+		t.Fatalf("expected index 2 to remain unmatched, got %+v", got)
 	}
 }
 

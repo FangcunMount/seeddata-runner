@@ -36,7 +36,7 @@ iam:
       insecureSkipVerify: false
 
 dailySimulation:
-  countMin: 10
+  countMin: 20
   countMax: 50
   countPerRun: 20
   dailyMaxUsers: 120

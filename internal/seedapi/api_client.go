@@ -486,26 +486,32 @@ type EnrollTesteeRequest struct {
 
 // ApiserverTesteeResponse 受试者响应（apiserver）
 type ApiserverTesteeResponse struct {
-	ID        string     `json:"id"`
-	OrgID     string     `json:"org_id,omitempty"`
-	ProfileID *string    `json:"profile_id,omitempty"`
-	Name      string     `json:"name"`
-	Gender    string     `json:"gender,omitempty"`
-	Birthday  *time.Time `json:"birthday,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
+	ID         string     `json:"id"`
+	OrgID      string     `json:"org_id,omitempty"`
+	ProfileID  *string    `json:"profile_id,omitempty"`
+	IAMChildID *string    `json:"iam_child_id,omitempty"`
+	Name       string     `json:"name"`
+	Gender     string     `json:"gender,omitempty"`
+	Birthday   *time.Time `json:"birthday,omitempty"`
+	Tags       []string   `json:"tags,omitempty"`
+	Source     string     `json:"source,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 func (r *ApiserverTesteeResponse) UnmarshalJSON(data []byte) error {
 	type alias struct {
-		ID        string  `json:"id"`
-		OrgID     string  `json:"org_id,omitempty"`
-		ProfileID *string `json:"profile_id,omitempty"`
-		Name      string  `json:"name"`
-		Gender    string  `json:"gender,omitempty"`
-		Birthday  *string `json:"birthday,omitempty"`
-		CreatedAt string  `json:"created_at"`
-		UpdatedAt string  `json:"updated_at"`
+		ID         string   `json:"id"`
+		OrgID      string   `json:"org_id,omitempty"`
+		ProfileID  *string  `json:"profile_id,omitempty"`
+		IAMChildID *string  `json:"iam_child_id,omitempty"`
+		Name       string   `json:"name"`
+		Gender     string   `json:"gender,omitempty"`
+		Birthday   *string  `json:"birthday,omitempty"`
+		Tags       []string `json:"tags,omitempty"`
+		Source     string   `json:"source,omitempty"`
+		CreatedAt  string   `json:"created_at"`
+		UpdatedAt  string   `json:"updated_at"`
 	}
 
 	var raw alias
@@ -529,9 +535,12 @@ func (r *ApiserverTesteeResponse) UnmarshalJSON(data []byte) error {
 	r.ID = raw.ID
 	r.OrgID = raw.OrgID
 	r.ProfileID = raw.ProfileID
+	r.IAMChildID = raw.IAMChildID
 	r.Name = raw.Name
 	r.Gender = raw.Gender
 	r.Birthday = birthday
+	r.Tags = append([]string(nil), raw.Tags...)
+	r.Source = raw.Source
 	r.CreatedAt = createdAt
 	r.UpdatedAt = updatedAt
 	return nil

@@ -135,6 +135,7 @@ type dailySimulationJourneyState struct {
 	userClient       *APIClient
 	collectionClient *APIClient
 	child            *IAMChildResponse
+	existingTestee   *ApiserverTesteeResponse
 	testee           *TesteeResponse
 	outcome          dailySimulationOutcome
 }
@@ -192,6 +193,7 @@ func simulateDailyUser(
 	entry *AssessmentEntryResponse,
 	target *dailySimulationResolvedTarget,
 	mockIAMLimiter chan struct{},
+	existingTestee *ApiserverTesteeResponse,
 ) (dailySimulationOutcome, error) {
 	state := &dailySimulationJourneyState{
 		deps:           deps,
@@ -202,6 +204,7 @@ func simulateDailyUser(
 		entry:          entry,
 		target:         target,
 		mockIAMLimiter: mockIAMLimiter,
+		existingTestee: existingTestee,
 		planID:         selectDailySimulationPlanID(cfg, profile.RunDate, profile.Index),
 		journeyTarget:  resolveDailySimulationJourneyTargetForMode(cfg, deps.Config.IAM, profile.RunDate, profile.Index),
 	}
@@ -247,6 +250,11 @@ func simulateDailyUser(
 }
 
 func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
+	if state.existingTestee != nil {
+		state.collectionClient = state.deps.CollectionClient
+		return state.nextDecision(dailySimulationJourneyStageGuardianAccount), nil
+	}
+
 	var (
 		guardianUserID string
 		guardianToken  string
@@ -294,6 +302,9 @@ func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *daily
 }
 
 func dailySimulationStageEnsureChild(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
+	if state.existingTestee != nil {
+		return toolchain.Next(), nil
+	}
 	if state.userClient == nil {
 		return toolchain.Decision{}, fmt.Errorf("guardian IAM client is not initialized")
 	}
@@ -310,6 +321,18 @@ func dailySimulationStageEnsureChild(ctx context.Context, state *dailySimulation
 }
 
 func dailySimulationStageEnsureTestee(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
+	if state.existingTestee != nil {
+		testeeID := strings.TrimSpace(state.existingTestee.ID)
+		if testeeID == "" {
+			return toolchain.Decision{}, fmt.Errorf("existing testee id is empty")
+		}
+		state.testee = &TesteeResponse{
+			ID:   testeeID,
+			Name: strings.TrimSpace(state.existingTestee.Name),
+		}
+		state.outcome.TesteeCreated = false
+		return state.nextDecision(dailySimulationJourneyStageTesteeProfile), nil
+	}
 	if state.collectionClient == nil {
 		return toolchain.Decision{}, fmt.Errorf("collection client is not initialized")
 	}
@@ -360,7 +383,10 @@ func dailySimulationStageEnsureEntryAccess(ctx context.Context, state *dailySimu
 	if state.testee == nil || strings.TrimSpace(state.testee.ID) == "" {
 		return toolchain.Decision{}, fmt.Errorf("testee is not initialized before entry access")
 	}
-	if state.child == nil || strings.TrimSpace(state.child.ID) == "" {
+	if state.child == nil && state.existingTestee == nil {
+		return toolchain.Decision{}, fmt.Errorf("daily simulation child/testee profile is not initialized before entry access")
+	}
+	if state.child != nil && strings.TrimSpace(state.child.ID) == "" {
 		return toolchain.Decision{}, fmt.Errorf("iam child is not initialized before entry access")
 	}
 	hasCreator, err := hasAssessmentEntryCreatorRelation(ctx, state.deps.APIClient, state.testee.ID, state.entry.ID)
@@ -376,20 +402,11 @@ func dailySimulationStageEnsureEntryAccess(ctx context.Context, state *dailySimu
 	}
 	state.outcome.EntryResolved = true
 
-	childID := parseID(state.child.ID)
-	if childID == 0 {
-		return toolchain.Decision{}, fmt.Errorf("invalid child id %q", state.child.ID)
-	}
-	birthday, err := parseDailySimulationDOB(state.child.DOB)
+	req, err := buildDailySimulationEntryIntakeRequest(state)
 	if err != nil {
-		return toolchain.Decision{}, fmt.Errorf("parse child dob %q: %w", state.child.DOB, err)
+		return toolchain.Decision{}, err
 	}
-	intakeResp, err := state.deps.APIClient.IntakeAssessmentEntry(ctx, state.entry.Token, IntakeAssessmentEntryRequest{
-		ProfileID: &childID,
-		Name:      state.child.LegalName,
-		Gender:    dailySimulationAPIGender(state.child.Gender),
-		Birthday:  birthday,
-	})
+	intakeResp, err := state.deps.APIClient.IntakeAssessmentEntry(ctx, state.entry.Token, req)
 	if err != nil {
 		return toolchain.Decision{}, err
 	}
@@ -407,15 +424,21 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 	if state.testee == nil || strings.TrimSpace(state.testee.ID) == "" {
 		return toolchain.Decision{}, fmt.Errorf("testee is not initialized before answersheet submission")
 	}
-	existingAnswerSheet, err := findDailySimulationAnswerSheet(
-		ctx,
-		state.deps.APIClient,
-		state.target.QuestionnaireCode,
-		state.guardianUserID,
-		state.testee.ID,
+	var (
+		existingAnswerSheet *AdminAnswerSheetListItem
+		err                 error
 	)
-	if err != nil {
-		return toolchain.Decision{}, err
+	if strings.TrimSpace(state.guardianUserID) != "" {
+		existingAnswerSheet, err = findDailySimulationAnswerSheet(
+			ctx,
+			state.deps.APIClient,
+			state.target.QuestionnaireCode,
+			state.guardianUserID,
+			state.testee.ID,
+		)
+		if err != nil {
+			return toolchain.Decision{}, err
+		}
 	}
 	existingAssessmentID, err := findDailySimulationAssessment(
 		ctx,
@@ -426,6 +449,13 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 	)
 	if err != nil {
 		return toolchain.Decision{}, err
+	}
+	assessmentClient := state.collectionClient
+	if assessmentClient == nil {
+		assessmentClient = state.deps.CollectionClient
+	}
+	if assessmentClient == nil {
+		return toolchain.Decision{}, fmt.Errorf("assessment client is not initialized")
 	}
 	if strings.TrimSpace(existingAssessmentID) != "" {
 		state.outcome.AssessmentID = existingAssessmentID
@@ -438,7 +468,7 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 		return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
 	}
 	if existingAnswerSheet != nil && state.target.RequiresAssessment {
-		assessmentID, waitErr := waitForDailySimulationAssessment(ctx, state.collectionClient, existingAnswerSheet.ID)
+		assessmentID, waitErr := waitForDailySimulationAssessment(ctx, assessmentClient, existingAnswerSheet.ID)
 		if waitErr == nil {
 			state.outcome.AnswerSheetID = existingAnswerSheet.ID
 			state.outcome.AssessmentID = assessmentID
@@ -468,26 +498,100 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 			invalidAnswers,
 		)
 	}
-	submitResp, err := state.collectionClient.SubmitAnswerSheet(ctx, SubmitAnswerSheetRequest{
+	submitReq := SubmitAnswerSheetRequest{
 		QuestionnaireCode:    state.target.QuestionnaireCode,
 		QuestionnaireVersion: state.target.QuestionnaireVersion,
 		Title:                state.target.QuestionnaireTitle,
 		TesteeID:             testeeID,
 		Answers:              answers,
-	})
+	}
+	var submitResp *SubmitAnswerSheetResponse
+	if state.existingTestee != nil {
+		submitResp, err = state.deps.APIClient.SubmitAnswerSheetAdmin(ctx, buildAdminSubmitAnswerSheetRequest(submitReq))
+	} else {
+		if state.collectionClient == nil {
+			return toolchain.Decision{}, fmt.Errorf("collection client is not initialized")
+		}
+		submitResp, err = state.collectionClient.SubmitAnswerSheet(ctx, submitReq)
+	}
 	if err != nil {
 		return toolchain.Decision{}, err
 	}
 	state.outcome.AnswerSheetID = submitResp.ID
 
 	if state.target.RequiresAssessment {
-		assessmentID, err := waitForDailySimulationAssessment(ctx, state.collectionClient, submitResp.ID)
+		assessmentID, err := waitForDailySimulationAssessment(ctx, assessmentClient, submitResp.ID)
 		if err != nil {
 			return toolchain.Decision{}, err
 		}
 		state.outcome.AssessmentID = assessmentID
 	}
 	return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
+}
+
+func buildDailySimulationEntryIntakeRequest(state *dailySimulationJourneyState) (IntakeAssessmentEntryRequest, error) {
+	if state == nil {
+		return IntakeAssessmentEntryRequest{}, fmt.Errorf("daily simulation state is nil")
+	}
+	if state.child != nil && strings.TrimSpace(state.child.ID) != "" {
+		childID := parseID(state.child.ID)
+		if childID == 0 {
+			return IntakeAssessmentEntryRequest{}, fmt.Errorf("invalid child id %q", state.child.ID)
+		}
+		birthday, err := parseDailySimulationDOB(state.child.DOB)
+		if err != nil {
+			return IntakeAssessmentEntryRequest{}, fmt.Errorf("parse child dob %q: %w", state.child.DOB, err)
+		}
+		return IntakeAssessmentEntryRequest{
+			ProfileID: &childID,
+			Name:      state.child.LegalName,
+			Gender:    dailySimulationAPIGender(state.child.Gender),
+			Birthday:  birthday,
+		}, nil
+	}
+	if state.existingTestee != nil {
+		profileID, err := dailySimulationExistingTesteeProfileID(state.existingTestee)
+		if err != nil {
+			return IntakeAssessmentEntryRequest{}, err
+		}
+		return IntakeAssessmentEntryRequest{
+			ProfileID: profileID,
+			Name:      strings.TrimSpace(state.existingTestee.Name),
+			Gender:    dailySimulationExistingTesteeAPIGender(state.existingTestee.Gender),
+			Birthday:  state.existingTestee.Birthday,
+		}, nil
+	}
+	return IntakeAssessmentEntryRequest{}, fmt.Errorf("daily simulation child/testee is not initialized before entry intake")
+}
+
+func dailySimulationExistingTesteeProfileID(testee *ApiserverTesteeResponse) (*uint64, error) {
+	if testee == nil {
+		return nil, fmt.Errorf("existing testee is nil")
+	}
+	if testee.ProfileID != nil {
+		if profileID := parseID(strings.TrimSpace(*testee.ProfileID)); profileID > 0 {
+			return &profileID, nil
+		}
+	}
+	if testee.IAMChildID != nil {
+		if profileID := parseID(strings.TrimSpace(*testee.IAMChildID)); profileID > 0 {
+			return &profileID, nil
+		}
+	}
+	return nil, fmt.Errorf("existing testee %s missing profile id", strings.TrimSpace(testee.ID))
+}
+
+func dailySimulationExistingTesteeAPIGender(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "male":
+		return "male"
+	case "2", "female":
+		return "female"
+	case "3", "unknown", "other":
+		return "unknown"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
 }
 
 func (state *dailySimulationJourneyState) nextDecision(stage dailySimulationJourneyStage) toolchain.Decision {

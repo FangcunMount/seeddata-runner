@@ -174,6 +174,36 @@ func TestEnsureDailySimulationTesteeDoesNotSendSeedTagByDefault(t *testing.T) {
 	}
 }
 
+func TestBuildDailySimulationEntryIntakeRequestUsesExistingTesteeProfileID(t *testing.T) {
+	profileID := "615969735435104814"
+	birthday := time.Date(2014, 4, 20, 0, 0, 0, 0, time.Local)
+
+	req, err := buildDailySimulationEntryIntakeRequest(&dailySimulationJourneyState{
+		existingTestee: &ApiserverTesteeResponse{
+			ID:        "testee-1",
+			ProfileID: &profileID,
+			Name:      "王子轩",
+			Gender:    "male",
+			Birthday:  &birthday,
+		},
+	})
+	if err != nil {
+		t.Fatalf("build intake request: %v", err)
+	}
+	if req.ProfileID == nil || *req.ProfileID != 615969735435104814 {
+		t.Fatalf("unexpected profile id: %+v", req.ProfileID)
+	}
+	if req.Name != "王子轩" {
+		t.Fatalf("unexpected name: %q", req.Name)
+	}
+	if req.Gender != "male" {
+		t.Fatalf("unexpected gender: %q", req.Gender)
+	}
+	if req.Birthday == nil || !req.Birthday.Equal(birthday) {
+		t.Fatalf("unexpected birthday: %+v", req.Birthday)
+	}
+}
+
 func assertErr(message string) error {
 	return testErr(message)
 }
