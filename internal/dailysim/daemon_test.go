@@ -412,7 +412,8 @@ func TestListDailySimulationTesteesByOrgUsesApiserverMaxPageSize(t *testing.T) {
 	}))
 	defer server.Close()
 
-	items, err := listDailySimulationTesteesByOrg(context.Background(), seedapi.NewAPIClient(server.URL, "", nil), 1)
+	runDate := time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local)
+	items, err := listDailySimulationTesteesByOrg(context.Background(), seedapi.NewAPIClient(server.URL, "", nil), 1, runDate)
 	if err != nil {
 		t.Fatalf("listDailySimulationTesteesByOrg returned error: %v", err)
 	}
@@ -425,6 +426,12 @@ func TestListDailySimulationTesteesByOrgUsesApiserverMaxPageSize(t *testing.T) {
 	for idx, query := range requests {
 		if got := query.Get("page_size"); got != "100" {
 			t.Fatalf("request %d used unexpected page_size %q", idx+1, got)
+		}
+		if got := query.Get("created_start_date"); got != "2026-04-20" {
+			t.Fatalf("request %d used unexpected created_start_date %q", idx+1, got)
+		}
+		if got := query.Get("created_end_date"); got != "2026-04-20" {
+			t.Fatalf("request %d used unexpected created_end_date %q", idx+1, got)
 		}
 	}
 }

@@ -132,6 +132,12 @@ func seedDailySimulationDaemon(ctx context.Context, deps *dependencies) error {
 		if err != nil {
 			return err
 		}
+		deps.Logger.Infow("Daily simulation daemon starting scheduled batch",
+			"run_date", decision.RunDate.Format("2006-01-02"),
+			"slot_time", decision.SlotTime.Format(time.RFC3339),
+			"count", count,
+			"remaining_daily_quota", decision.RemainingQuota,
+		)
 
 		if err := runDailySimulationBatch(ctx, deps, cfg, decision.RunDate, count, "daily_simulation_daemon"); err != nil {
 			deps.Logger.Warnw("Daily simulation daemon batch failed",
@@ -501,7 +507,7 @@ func loadDailySimulationExistingTesteesByIndex(
 	if !dailySimulationUsesIAMMockConsumer(deps.Config.IAM) || count <= 0 {
 		return map[int]*ApiserverTesteeResponse{}, nil
 	}
-	items, err := listDailySimulationTesteesByOrg(ctx, deps.APIClient, deps.Config.Global.OrgID)
+	items, err := listDailySimulationTesteesByOrg(ctx, deps.APIClient, deps.Config.Global.OrgID, runDate)
 	if err != nil {
 		return nil, err
 	}
@@ -512,6 +518,7 @@ func listDailySimulationTesteesByOrg(
 	ctx context.Context,
 	client *APIClient,
 	orgID int64,
+	runDate time.Time,
 ) ([]*ApiserverTesteeResponse, error) {
 	if client == nil {
 		return nil, fmt.Errorf("daily simulation api client is nil")
@@ -520,7 +527,7 @@ func listDailySimulationTesteesByOrg(
 	page := 1
 	items := make([]*ApiserverTesteeResponse, 0, pageSize)
 	for {
-		resp, err := client.ListTesteesByOrg(ctx, orgID, page, pageSize)
+		resp, err := client.ListTesteesByOrgCreatedOnDate(ctx, orgID, runDate, page, pageSize)
 		if err != nil {
 			return nil, fmt.Errorf("list testees by org %d page %d: %w", orgID, page, err)
 		}

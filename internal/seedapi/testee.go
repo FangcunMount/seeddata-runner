@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // CreateCollectionTestee 创建 collection 受试者。
@@ -38,6 +39,25 @@ func (c *APIClient) TesteeExistsByIAMChildID(ctx context.Context, iamChildID str
 // ListTesteesByOrg 获取受试者列表（apiserver）。
 func (c *APIClient) ListTesteesByOrg(ctx context.Context, orgID int64, page, pageSize int) (*ApiserverTesteeListResponse, error) {
 	path := fmt.Sprintf("/api/v1/testees?org_id=%d&page=%d&page_size=%d", orgID, page, pageSize)
+	return c.listTesteesByOrgPath(ctx, path, orgID, page, pageSize)
+}
+
+// ListTesteesByOrgCreatedOnDate 获取指定日期创建的受试者列表（apiserver）。
+func (c *APIClient) ListTesteesByOrgCreatedOnDate(ctx context.Context, orgID int64, day time.Time, page, pageSize int) (*ApiserverTesteeListResponse, error) {
+	day = day.In(time.Local)
+	date := day.Format("2006-01-02")
+	path := fmt.Sprintf(
+		"/api/v1/testees?org_id=%d&page=%d&page_size=%d&created_start_date=%s&created_end_date=%s",
+		orgID,
+		page,
+		pageSize,
+		urlQueryEscape(date),
+		urlQueryEscape(date),
+	)
+	return c.listTesteesByOrgPath(ctx, path, orgID, page, pageSize)
+}
+
+func (c *APIClient) listTesteesByOrgPath(ctx context.Context, path string, orgID int64, page, pageSize int) (*ApiserverTesteeListResponse, error) {
 	resp, err := c.doRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("list testees: org_id=%d page=%d page_size=%d: %w", orgID, page, pageSize, err)
