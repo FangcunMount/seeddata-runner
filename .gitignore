@@ -1,0 +1,12 @@
+bin/
+tmp/
+.seeddata-cache/
+*.log
+logs/*.log
+!.gitkeep
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
