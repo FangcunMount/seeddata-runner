@@ -1,123 +1,228 @@
-# QS Seeddata Runner
+# Seeddata Runner
 
-`seeddata-runner` 是和 `qs-server`、`iam-contracts` 同层的独立 Go module，用来承载 mock 用户生成和 plan open-task 提交。
+`seeddata-runner` 是一个独立的 Go module，用来为 QS 环境持续制造更接近真实使用轨迹的 seed data。它不再提供按 step 执行的一次性脚本，而是由一个 supervisor 进程并发托管两条常驻 daemon：
 
-进程启动后会并发运行两条后台流水：
+- `daily_simulation_daemon`：每天生成一批模拟用户，完成注册、建档、绑定量表入口、加入 plan、填写答卷等流程。
+- `plan_submit_open_tasks_daemon`：持续扫描指定 plan 下已经进入 `opened` 状态的任务，并代替用户提交答卷。
 
-1. `daily_simulation_daemon`
-2. `plan_submit_open_tasks_daemon`
+这个仓库只负责“模拟用户行为”和“补齐已打开任务的答卷提交”。plan 的创建、调度、打开、过期等生命周期仍由业务侧其他服务负责。
 
-职责边界固定为：
+## 运行模型
 
-- 每天 mock 一批新用户，走完扫码、注册、建档、分配 clinician、填写答卷
-- 持续扫描指定 plan 当前已进入 `opened` 的 task，并模拟用户完成答卷
+`cmd/seeddata` 的启动流程固定如下：
 
-plan 生命周期仍由 `worker` 内建 `plan_scheduler` 驱动。seeddata 不负责创建 task、推进 pending、过期 task，也不再承载历史修补脚本。
+1. 解析 CLI 参数，只支持 `--config` 和 `--verbose`
+2. 加载 `seeddata.yaml`
+3. 初始化 API client / collection client
+4. 优先使用 `api.token`；如果为空，则使用 IAM 凭据换取 token
+5. 并发启动 daily simulation 与 plan submit 两条 daemon
 
-## 推荐入口
+两个 daemon 共享同一个进程。任意一条退出报错，supervisor 就会退出；收到 `SIGINT` / `SIGTERM` 时会整体停止。
+
+## 快速开始
+
+先准备配置文件：
+
+- 复制或修改 [configs/seeddata.yaml](./configs/seeddata.yaml)
+- 填好 `api.baseUrl`
+- 选择一种认证方式：
+  - 直接提供 `api.token`
+  - 或提供 `iam.*` 凭据，并让 runner 启动时自动换取 token
+
+推荐通过脚本启动：
 
 ```bash
 cd seeddata-runner
 ./scripts/run_seeddata_daemon.sh
 ```
 
-## 直接运行
+脚本支持以下环境变量覆盖：
+
+- `SEEDDATA_CONFIG`：配置文件路径，默认 `./configs/seeddata.yaml`
+- `SEEDDATA_GO`：Go 可执行文件，默认 `go`
+- `SEEDDATA_LOG_FILE`：日志文件路径，默认 `./logs/seeddata-daemon.log`
+
+也可以直接运行：
 
 ```bash
 cd seeddata-runner
-go run ./cmd/seeddata --config ./configs/seeddata.yaml
+go run ./cmd/seeddata --config ./configs/seeddata.yaml --verbose
 ```
 
-CLI 只保留：
+`--verbose` 会把日志级别提升到 `debug`。
 
-- `--config`
-- `--verbose`
+## 认证与依赖
 
-行为约束：
+运行时依赖主要分为三类：
 
+- `api.baseUrl`：业务 API 地址，必填
+- `api.collectionBaseUrl`：采集/问卷相关 API 地址；为空时会回退到 `api.baseUrl`
+- `iam.*`：当 `api.token` 为空时，用于登录并自动刷新 token
+
+凭据优先级如下：
+
+1. `api.token`
+2. 环境变量 `IAM_USERNAME` / `IAM_PASSWORD`
+3. 配置文件中的 `iam.username` / `iam.password`
+
+如果 daily simulation 需要新建 guardian / child / testee，还要求 `iam.grpc.address` 可用；否则无法走 IAM 侧身份创建流程。
+
+## 配置总览
+
+配置结构固定为五段：
+
+| 段落 | 作用 |
+| --- | --- |
+| `global` | 默认机构 ID、默认标签前缀 |
+| `api` | 业务 API、采集 API、重试策略、静态 token |
+| `iam` | IAM 登录与 gRPC 配置 |
+| `dailySimulation` | 每日模拟用户生成策略 |
+| `planSubmit` | opened task 答卷提交策略 |
+
+其中 `dailySimulation` 和 `planSubmit` 是必填段；`api.baseUrl` 也是运行时硬要求。
+
+## Daily Simulation
+
+`dailySimulation` 用于构造“像真实用户漏斗一样”的新增数据，核心行为如下：
+
+- 按计划时间触发批量生成
+- 每个用户会确定性地选择一个 plan 和一个 journey 目标
+- 旅程可在注册、建 testee、解析入口、提交答卷几个阶段提前停止
+- 成功批次会写入 `stateFile`，用于限制每日总量并避免重复执行已完成的 slot
+
+关键字段如下：
+
+| 字段 | 说明 |
+| --- | --- |
+| `countPerRun` | 固定每轮生成数量；当 `countMin` / `countMax` 都为 0 时生效 |
+| `countMin` / `countMax` | 每轮随机生成数量区间；设置后优先于 `countPerRun` |
+| `dailyMaxUsers` | 当天成功新增用户上限；`<= 0` 表示不限制 |
+| `workers` | 并发 worker 数 |
+| `runAt` | 兼容单次调度模式，每天固定时刻跑一次 |
+| `windowStartAt` / `windowEndAt` / `interval` | 窗口调度模式，在时间窗口内按固定间隔反复触发 |
+| `retryDelay` | 一轮失败后的重试等待时间 |
+| `stateFile` | daemon 状态文件，默认 `.seeddata-cache/daily-simulation-daemon-state.json` |
+| `clinicianIds` | 可用医生范围；当 `entryId` 为空时必填 |
+| `focusCliniciansPerRunMin` / `focusCliniciansPerRunMax` | 每轮从 `clinicianIds` 中抽取多少位医生参与本轮模拟；不配时默认使用全部医生 |
+| `entryId` | 指定现成 assessment entry；设置后优先复用这个入口，并忽略 `clinicianIds` 选入口的逻辑 |
+| `targetType` / `targetCode` / `targetVersion` | 当未指定 `entryId` 时，用于定位或创建 assessment entry |
+| `planIds` | 必填；每个模拟用户会从这里确定性选一个 plan 加入 |
+| `journeyMix` | 控制四种旅程深度的权重分布 |
+| `userPassword` / `userPhonePrefix` / `userEmailDomain` | 模拟 guardian 账号生成规则 |
+| `guardianRelation` / `testeeSource` / `testeeTags` / `isKeyFocus` | 创建 testee 时写入的业务属性 |
+
+`journeyMix` 支持四种目标：
+
+- `registerOnlyWeight`
+- `createTesteeWeight`
+- `resolveEntryWeight`
+- `submitAnswerWeight`
+
+如果四项权重都不填，默认全部走 `submitAnswerWeight=100`。
+
+当 `entryId` 为空时，runner 会：
+
+1. 从本轮选中的 clinician 范围里寻找匹配 `targetType + targetCode + targetVersion` 的 assessment entry
+2. 若找到了但已停用，则自动重新激活
+3. 若没有找到，则自动创建一个新 entry
+
+## Plan Submit
+
+`planSubmit` 只处理“已经 opened 的任务”，不会参与 plan 调度本身。
+
+关键字段如下：
+
+| 字段 | 说明 |
+| --- | --- |
+| `planIds` | 必填；持续扫描这些 plan |
+| `workers` | 并发提交 opened task 的 worker 数 |
+| `idleInterval` | 本轮没有活跃 opened task 时，下次轮询等待时间 |
+| `activeInterval` | 本轮发现 opened task 并执行提交后，下次轮询等待时间 |
+
+启动时，每个 plan 会预先加载一次 plan、scale 和 questionnaire 元数据，之后进入连续轮询。
+
+## 最小示例
+
+下面是一份保留关键字段的最小配置骨架：
+
+```yaml
+global:
+  orgId: 1
+
+api:
+  baseUrl: "https://qs.example.com"
+  collectionBaseUrl: "https://collect.example.com"
+  token: ""
+
+iam:
+  baseUrl: "https://iam.example.com"
+  loginUrl: "https://iam.example.com/api/v1/authn/login"
+  username: ""
+  password: ""
+  tenantId: "1"
+  grpc:
+    address: "iam-apiserver:9090"
+
+dailySimulation:
+  countPerRun: 20
+  dailyMaxUsers: 120
+  workers: 6
+  windowStartAt: "10:00"
+  windowEndAt: "18:00"
+  interval: "30m"
+  retryDelay: "30m"
+  clinicianIds:
+    - "614995509882401326"
+  targetType: "scale"
+  targetCode: "3adyDE"
+  planIds:
+    - "614333603412718126"
+  journeyMix:
+    submitAnswerWeight: 100
+
+planSubmit:
+  planIds:
+    - "614333603412718126"
+  workers: 1
+  idleInterval: "30s"
+  activeInterval: "5s"
+```
+
+完整示例见 [configs/seeddata.yaml](./configs/seeddata.yaml)。
+
+## CLI 约束
+
+当前 CLI 明确只有一个 supervisor 入口，不再支持历史上的 step 式执行：
+
+- 支持 `--config`
+- 支持 `--verbose`
 - 不支持 `--steps`
-- 不支持只运行单个 seed step
-- `planSubmit.planIds` 必须在配置文件中提供
-- `planSubmit.idleInterval` / `planSubmit.activeInterval` 控制 open-task submit daemon 的轮询间隔
+- 不支持按单个 seed step 运行
+- 不再包含历史 backfill / fixup 工具入口
 
-## 配置
+## 项目结构
 
-默认配置文件只保留 supervisor 需要的五段：
+主要目录如下：
 
-- `global`
-- `api`
-- `iam`
-- `dailySimulation`
-- `planSubmit`
+- [cmd/seeddata](./cmd/seeddata)：唯一进程入口与 supervisor
+- [configs](./configs)：配置样例
+- [scripts](./scripts)：启动脚本
+- [internal/dailysim](./internal/dailysim)：每日模拟用户 daemon
+- [internal/plansubmit](./internal/plansubmit)：opened task 提交 daemon
+- [internal/seedconfig](./internal/seedconfig)：配置加载、默认值、校验
+- [internal/seedruntime](./internal/seedruntime)：日志、signal、client 初始化
+- [internal/seedapi](./internal/seedapi) / [internal/seediauth](./internal/seediauth)：API 与 IAM 访问封装
 
-参考文件：
+## 开发与验证
 
-- [configs/seeddata.yaml](./configs/seeddata.yaml)
+常用命令：
 
-如果不希望把 IAM 登录名和密码写进配置文件，可以直接使用环境变量覆盖：
+```bash
+go test ./...
+```
 
-- `IAM_USERNAME`
-- `IAM_PASSWORD`
-
-当 `api.token` 为空时，runner 会优先使用环境变量中的 IAM 凭据；未提供环境变量时，再回退到 `iam.username` / `iam.password`。
-
-`dailySimulation` 当前支持两种调度语义：
-
-- 旧模式：只配置 `runAt`，每天跑一次
-- 新模式：配置 `windowStartAt`、`windowEndAt`、`interval`、`dailyMaxUsers`，在时间窗口内按固定间隔跑，并限制当日新增用户上限
-
-`planSubmit` 当前支持的关键字段：
-
-- `planIds`
-- `workers`
-- `idleInterval`
-- `activeInterval`
-
-默认轮询间隔：
-
-- `idleInterval: 30s`
-- `activeInterval: 5s`
-
-## 代码结构
-
-入口层只保留：
+如果只想检查 CLI 或配置解析，也可以从这些文件开始：
 
 - [cmd/seeddata/main.go](./cmd/seeddata/main.go)
-- [cmd/seeddata/seed_daily_simulation_daemon.go](./cmd/seeddata/seed_daily_simulation_daemon.go)
-- [cmd/seeddata/seed_plan_submit_open_tasks_daemon.go](./cmd/seeddata/seed_plan_submit_open_tasks_daemon.go)
-
-真正的业务实现下沉到模块内的 `internal/*`：
-
-- `internal/seedconfig`
-- `internal/seedruntime`
-- `internal/dailysim`
-- `internal/plansubmit`
-- `internal/seedprofile`
-- `internal/seedapi`
-- `internal/seediauth`
-- `internal/progress`
-- `internal/chain`
-- `internal/answersheet`
-
-## 已移除
-
-以下 step 与一次性工具已移除，不再支持：
-
-- `staff`
-- `clinician`
-- `assign_testees`
-- `testee_fixup_created_at`
-- `actor_fixup_timestamps`
-- `assessment_entries`
-- `assessment_entry_flow`
-- `assessment_by_entry`
-- `journey_rebuild_history`
-- `assessment`
-- `plan`
-- `plan_create_tasks`
-- `plan_fixup_timestamps`
-- `statistics_backfill`
-- `assessment_retime_timestamps`
-- `assessment_entry_fixup_timestamps`
-- `cmd/tools/backfill-pending-assessments`
-- `cmd/tools/redis-stats-ttl-fix`
+- [internal/seedconfig/config.go](./internal/seedconfig/config.go)
+- [scripts/run_seeddata_daemon.sh](./scripts/run_seeddata_daemon.sh)
