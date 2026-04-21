@@ -1,6 +1,12 @@
 package seedapi
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func TestDecodeResponseDataAssessmentEntryListSupportsFormattedTime(t *testing.T) {
 	resp := &Response{
@@ -54,5 +60,46 @@ func TestDecodeResponseDataRejectsInvalidFlexibleTime(t *testing.T) {
 	var result ApiserverTesteeResponse
 	if err := decodeResponseData(resp, &result); err == nil {
 		t.Fatal("expected decodeResponseData to fail for invalid created_at")
+	}
+}
+
+func TestRegisterIAMChildAcceptsCreatedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+		if r.URL.Path != "/api/v1/identity/children/register" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+
+		var req IAMChildRegisterRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Relation != "other" {
+			t.Fatalf("unexpected relation %q", req.Relation)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"child":{"id":"child-1","legal_name":"王子轩","dob":"2014-04-20"}}}`))
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "", nil)
+	resp, err := client.RegisterIAMChild(context.Background(), IAMChildRegisterRequest{
+		LegalName: "王子轩",
+		Gender:    1,
+		DOB:       "2014-04-20",
+		Relation:  "other",
+	})
+	if err != nil {
+		t.Fatalf("RegisterIAMChild returned error: %v", err)
+	}
+	if resp == nil || resp.Child == nil {
+		t.Fatalf("expected child response, got %+v", resp)
+	}
+	if resp.Child.ID != "child-1" {
+		t.Fatalf("unexpected child id %q", resp.Child.ID)
 	}
 }

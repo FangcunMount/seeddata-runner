@@ -177,6 +177,48 @@ func TestEnsureDailySimulationTesteeDoesNotSendSeedTagByDefault(t *testing.T) {
 	}
 }
 
+func TestEnsureDailySimulationChildNormalizesLegacyGuardianRelation(t *testing.T) {
+	var captured IAMChildRegisterRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/identity/me/children":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"total":0,"items":[]}}`))
+		case "/api/v1/identity/children/register":
+			if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"child":{"id":"child-1","legal_name":"王子轩","dob":"2014-04-20"}}}`))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "", nil)
+	child, created, err := ensureDailySimulationChild(context.Background(), client, DailySimulationConfig{
+		GuardianRelation: "guardian",
+	}, dailySimulationProfile{
+		ChildName:   "王子轩",
+		ChildDOB:    "2014-04-20",
+		ChildGender: 1,
+	})
+	if err != nil {
+		t.Fatalf("ensure child: %v", err)
+	}
+	if !created {
+		t.Fatalf("expected child to be created")
+	}
+	if child == nil || child.ID != "child-1" {
+		t.Fatalf("unexpected child response: %+v", child)
+	}
+	if captured.Relation != seedconfig.DefaultDailySimulationGuardianRelation {
+		t.Fatalf("unexpected relation %q", captured.Relation)
+	}
+}
+
 func TestBuildDailySimulationEntryIntakeRequestUsesExistingTesteeProfileID(t *testing.T) {
 	profileID := "615969735435104814"
 	birthday := time.Date(2014, 4, 20, 0, 0, 0, 0, time.Local)
@@ -250,11 +292,11 @@ func TestResolveDailySimulationCanonicalTesteeIDUsesProfileLookup(t *testing.T) 
 
 func TestWaitForDailySimulationAssessmentFallsBackToAssessmentList(t *testing.T) {
 	const (
-		answerSheetID      = "615984776595124782"
-		testeeID           = "615969746222854702"
-		assessmentID       = "615984705628090926"
-		questionnaireCode  = "3adyDE"
-		questionnaireVer   = "6.0.1"
+		answerSheetID     = "615984776595124782"
+		testeeID          = "615969746222854702"
+		assessmentID      = "615984705628090926"
+		questionnaireCode = "3adyDE"
+		questionnaireVer  = "6.0.1"
 	)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

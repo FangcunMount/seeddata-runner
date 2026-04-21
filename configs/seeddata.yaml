@@ -75,7 +75,7 @@ dailySimulation:
   userPassword: "DailySim@123"
   userPhonePrefix: "+86199"
   userEmailDomain: "fangcunmount.com"
-  guardianRelation: "guardian"
+  guardianRelation: "other"
   testeeSource: "daily_simulation"
   testeeTags: []
   isKeyFocus: false

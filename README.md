@@ -234,7 +234,7 @@ sudo systemctl restart seeddata-runner
 | `planIds` | 必填；每个模拟用户会从这里确定性选一个 plan 加入 |
 | `journeyMix` | 控制四种旅程深度的权重分布 |
 | `userPassword` / `userPhonePrefix` / `userEmailDomain` | 模拟 guardian 账号生成规则 |
-| `guardianRelation` / `testeeSource` / `testeeTags` / `isKeyFocus` | 创建 testee 时写入的业务属性 |
+| `guardianRelation` / `testeeSource` / `testeeTags` / `isKeyFocus` | 创建 testee 时写入的业务属性；`guardianRelation` 需使用 IAM 当前词表 `self / parent / grandparent / other`，legacy `guardian` 会自动归一化为 `other` |
 
 `journeyMix` 支持四种目标：
 

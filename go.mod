@@ -4,8 +4,7 @@ go 1.24.0
 
 require (
 	github.com/FangcunMount/component-base v0.5.3
-	github.com/FangcunMount/iam-contracts v0.1.10
-	github.com/brianvoe/gofakeit/v7 v7.14.1
+	github.com/FangcunMount/iam-contracts v0.1.11
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mozillazg/go-pinyin v0.21.0
 	golang.org/x/sync v0.18.0

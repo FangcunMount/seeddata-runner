@@ -1135,7 +1135,7 @@ func (c *APIClient) doRequestWithHeadersRetryTimeoutAndLimit(
 			return nil, fmt.Errorf("read response: %w", readErr)
 		}
 
-		if resp.StatusCode == http.StatusOK {
+		if isHTTPSuccess(resp.StatusCode) {
 			var apiResp Response
 			if err := json.Unmarshal(respBody, &apiResp); err != nil {
 				bodyStr := string(respBody)
@@ -1213,6 +1213,10 @@ func (c *APIClient) doRequestWithHeadersRetryTimeoutAndLimit(
 	}
 
 	return nil, fmt.Errorf("request failed after retries: url=%s", url)
+}
+
+func isHTTPSuccess(statusCode int) bool {
+	return statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices
 }
 
 func (c *APIClient) EnsureIAMMockConsumer(

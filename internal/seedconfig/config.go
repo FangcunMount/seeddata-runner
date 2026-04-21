@@ -12,20 +12,21 @@ import (
 )
 
 const (
-	DefaultDailySimulationCountPerRun = 10
-	DefaultDailySimulationWorkers     = 4
-	DefaultDailySimulationRunAt       = "10:00"
-	DefaultDailySimulationWindowEndAt = "18:00"
-	DefaultDailySimulationInterval    = "30m"
-	DefaultDailySimulationRetryDelay  = "30m"
-	DefaultDailySimulationStateFile   = ".seeddata-cache/daily-simulation-daemon-state.json"
-	DefaultDailySimulationPhonePrefix = "+86199"
-	DefaultDailySimulationEmailDomain = "fangcunmount.com"
-	DefaultDailySimulationPassword    = "DailySim@123"
-	DefaultDailySimulationSource      = "daily_simulation"
-	DefaultPlanSubmitWorkers          = 1
-	DefaultPlanSubmitIdleInterval     = "30s"
-	DefaultPlanSubmitActiveInterval   = "5s"
+	DefaultDailySimulationCountPerRun      = 10
+	DefaultDailySimulationWorkers          = 4
+	DefaultDailySimulationRunAt            = "10:00"
+	DefaultDailySimulationWindowEndAt      = "18:00"
+	DefaultDailySimulationInterval         = "30m"
+	DefaultDailySimulationRetryDelay       = "30m"
+	DefaultDailySimulationStateFile        = ".seeddata-cache/daily-simulation-daemon-state.json"
+	DefaultDailySimulationPhonePrefix      = "+86199"
+	DefaultDailySimulationEmailDomain      = "fangcunmount.com"
+	DefaultDailySimulationPassword         = "DailySim@123"
+	DefaultDailySimulationGuardianRelation = "other"
+	DefaultDailySimulationSource           = "daily_simulation"
+	DefaultPlanSubmitWorkers               = 1
+	DefaultPlanSubmitIdleInterval          = "30s"
+	DefaultPlanSubmitActiveInterval        = "5s"
 )
 
 // Config 定义整个种子数据配置结构
@@ -352,6 +353,7 @@ func (cfg *DailySimulationConfig) Normalize() {
 	if strings.TrimSpace(cfg.UserPassword) == "" {
 		cfg.UserPassword = DefaultDailySimulationPassword
 	}
+	cfg.GuardianRelation = NormalizeDailySimulationGuardianRelation(cfg.GuardianRelation)
 	if strings.TrimSpace(cfg.TesteeSource) == "" {
 		cfg.TesteeSource = DefaultDailySimulationSource
 	}
@@ -383,6 +385,9 @@ func (cfg DailySimulationConfig) Validate() error {
 	}
 	if len(cfg.PlanIDs) == 0 {
 		return fmt.Errorf("dailySimulation.planIds is required")
+	}
+	if !isValidDailySimulationGuardianRelation(cfg.GuardianRelation) {
+		return fmt.Errorf("dailySimulation.guardianRelation must be one of self,parent,grandparent,other")
 	}
 	if cfg.CountMin < 0 || cfg.CountMax < 0 || cfg.CountPerRun < 0 || cfg.DailyMaxUsers < 0 {
 		return fmt.Errorf("dailySimulation counts must be >= 0")
@@ -502,4 +507,27 @@ func flexibleIDsToStrings(ids []FlexibleID) []string {
 		values = append(values, id.String())
 	}
 	return values
+}
+
+// NormalizeDailySimulationGuardianRelation folds legacy values into the
+// canonical IAM relation vocabulary used by the identity service.
+func NormalizeDailySimulationGuardianRelation(raw string) string {
+	relation := strings.ToLower(strings.TrimSpace(raw))
+	switch relation {
+	case "":
+		return DefaultDailySimulationGuardianRelation
+	case "guardian":
+		return DefaultDailySimulationGuardianRelation
+	default:
+		return relation
+	}
+}
+
+func isValidDailySimulationGuardianRelation(relation string) bool {
+	switch NormalizeDailySimulationGuardianRelation(relation) {
+	case "self", "parent", "grandparent", "other":
+		return true
+	default:
+		return false
+	}
 }

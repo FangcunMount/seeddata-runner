@@ -52,6 +52,9 @@ planSubmit:
 	if cfg.DailySimulation.RunAt != DefaultDailySimulationRunAt {
 		t.Fatalf("unexpected default runAt: %q", cfg.DailySimulation.RunAt)
 	}
+	if cfg.DailySimulation.GuardianRelation != DefaultDailySimulationGuardianRelation {
+		t.Fatalf("unexpected default guardianRelation: %q", cfg.DailySimulation.GuardianRelation)
+	}
 }
 
 func TestLoadRequiresPlanSubmitPlanID(t *testing.T) {
@@ -248,5 +251,62 @@ planSubmit:
 	}
 	if cfg.IAM.MockConsumer.MaxConcurrent != 1 {
 		t.Fatalf("unexpected default mock-consumer maxConcurrent: %d", cfg.IAM.MockConsumer.MaxConcurrent)
+	}
+}
+
+func TestLoadNormalizesLegacyGuardianRelation(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "seeddata.yaml")
+	content := `
+global:
+  orgId: 1
+api:
+  baseUrl: "https://qs.example.com"
+dailySimulation:
+  clinicianIds: ["1001"]
+  targetType: "scale"
+  targetCode: "SAS"
+  guardianRelation: "guardian"
+  planIds: ["614333603412718126"]
+planSubmit:
+  planIds: ["614333603412718126"]
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.DailySimulation.GuardianRelation != DefaultDailySimulationGuardianRelation {
+		t.Fatalf("unexpected normalized guardianRelation: %q", cfg.DailySimulation.GuardianRelation)
+	}
+}
+
+func TestLoadRejectsInvalidGuardianRelation(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "seeddata.yaml")
+	content := `
+global:
+  orgId: 1
+api:
+  baseUrl: "https://qs.example.com"
+dailySimulation:
+  clinicianIds: ["1001"]
+  targetType: "scale"
+  targetCode: "SAS"
+  guardianRelation: "uncle"
+  planIds: ["614333603412718126"]
+planSubmit:
+  planIds: ["614333603412718126"]
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(configPath)
+	if err == nil || !strings.Contains(err.Error(), "dailySimulation.guardianRelation must be one of self,parent,grandparent,other") {
+		t.Fatalf("expected invalid guardianRelation error, got %v", err)
 	}
 }

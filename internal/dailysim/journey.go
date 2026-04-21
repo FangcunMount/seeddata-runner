@@ -21,6 +21,7 @@ import (
 	"github.com/FangcunMount/iam-contracts/pkg/sdk/identity"
 	toolchain "github.com/FangcunMount/seeddata-runner/internal/chain"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
+	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 )
 
 const (
@@ -1291,10 +1292,7 @@ func ensureDailySimulationChild(
 		return child, false, nil
 	}
 
-	relation := strings.TrimSpace(cfg.GuardianRelation)
-	if relation == "" {
-		relation = "guardian"
-	}
+	relation := seedconfig.NormalizeDailySimulationGuardianRelation(cfg.GuardianRelation)
 	registerResp, err := iamClient.RegisterIAMChild(ctx, IAMChildRegisterRequest{
 		LegalName: profile.ChildName,
 		Gender:    profile.ChildGender,
