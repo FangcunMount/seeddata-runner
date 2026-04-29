@@ -2,7 +2,7 @@
 
 ## 模块定位
 
-`seeddata-runner` 是和 `qs-server`、`iam-contracts` 同层的独立 module，负责模拟真实用户行为，不属于 `qs-server` 主模块运行时。
+`seeddata-runner` 是和 `qs-server`、`iam` 同层的独立 module，负责模拟真实用户行为，不属于 `qs-server` 主模块运行时。
 
 它启动后固定并发跑两条后台任务：
 
