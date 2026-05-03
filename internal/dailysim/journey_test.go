@@ -181,16 +181,16 @@ func TestEnsureDailySimulationChildNormalizesLegacyGuardianRelation(t *testing.T
 	var captured IAMChildRegisterRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/identity/me/children":
+		case "/api/v2/identity/me/profiles":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"total":0,"items":[]}}`))
-		case "/api/v1/identity/children/register":
+		case "/api/v2/identity/profiles":
 			if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
 				t.Fatalf("decode request: %v", err)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"child":{"id":"child-1","legal_name":"王子轩","dob":"2014-04-20"}}}`))
+			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"profile":{"id":"child-1","legalName":"王子轩","dob":"2014-04-20"}}}`))
 		default:
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}

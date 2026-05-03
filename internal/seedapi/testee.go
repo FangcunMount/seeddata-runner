@@ -100,9 +100,9 @@ func (c *APIClient) GetTesteeByProfileID(ctx context.Context, orgID int64, profi
 	return &testeeResp, nil
 }
 
-// ListIAMMyChildren 获取当前 IAM 用户名下 children。
+// ListIAMMyChildren 获取当前 IAM 用户名下儿童档案。
 func (c *APIClient) ListIAMMyChildren(ctx context.Context, limit, offset int) (*IAMChildPageResponse, error) {
-	path := fmt.Sprintf("/api/v1/identity/me/children?limit=%d&offset=%d", limit, offset)
+	path := fmt.Sprintf("/api/v2/identity/me/profiles?limit=%d&offset=%d", limit, offset)
 	resp, err := c.doRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -115,9 +115,9 @@ func (c *APIClient) ListIAMMyChildren(ctx context.Context, limit, offset int) (*
 	return &listResp, nil
 }
 
-// RegisterIAMChild 注册当前 IAM 用户的 child。
+// RegisterIAMChild 创建当前 IAM 用户的儿童档案。
 func (c *APIClient) RegisterIAMChild(ctx context.Context, req IAMChildRegisterRequest) (*IAMChildRegisterResponse, error) {
-	resp, err := c.doRequest(ctx, "POST", "/api/v1/identity/children/register", req)
+	resp, err := c.doRequest(ctx, "POST", "/api/v2/identity/profiles", req)
 	if err != nil {
 		return nil, err
 	}

@@ -887,6 +887,24 @@ type IAMChildRegisterResponse struct {
 	Child *IAMChildResponse `json:"child"`
 }
 
+func (r *IAMChildRegisterResponse) UnmarshalJSON(data []byte) error {
+	type alias struct {
+		Child   *IAMChildResponse `json:"child"`
+		Profile *IAMChildResponse `json:"profile"`
+	}
+
+	var raw alias
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	r.Child = raw.Child
+	if r.Child == nil {
+		r.Child = raw.Profile
+	}
+	return nil
+}
+
 type EnsureIAMMockConsumerRequest struct {
 	Name     string            `json:"name"`
 	Phone    string            `json:"phone"`

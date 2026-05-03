@@ -68,7 +68,7 @@ func TestRegisterIAMChildAcceptsCreatedResponse(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("unexpected method %s", r.Method)
 		}
-		if r.URL.Path != "/api/v1/identity/children/register" {
+		if r.URL.Path != "/api/v2/identity/profiles" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
 
@@ -82,7 +82,7 @@ func TestRegisterIAMChildAcceptsCreatedResponse(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"child":{"id":"child-1","legal_name":"王子轩","dob":"2014-04-20"}}}`))
+		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"profile":{"id":"child-1","legalName":"王子轩","dob":"2014-04-20"}}}`))
 	}))
 	defer server.Close()
 
