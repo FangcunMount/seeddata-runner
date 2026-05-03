@@ -6,22 +6,22 @@ import (
 	"hash/fnv"
 	"math/rand"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
-	authnv1 "github.com/FangcunMount/iam/api/grpc/iam/authn/v1"
-	identityv1 "github.com/FangcunMount/iam/api/grpc/iam/identity/v1"
-	sdk "github.com/FangcunMount/iam/pkg/sdk"
-	auth "github.com/FangcunMount/iam/pkg/sdk/auth/client"
-	sdkerrors "github.com/FangcunMount/iam/pkg/sdk/errors"
-	"github.com/FangcunMount/iam/pkg/sdk/identity"
+	authnv2 "github.com/FangcunMount/iam/v2/api/grpc/iam/authn/v2"
+	identityv2 "github.com/FangcunMount/iam/v2/api/grpc/iam/identity/v2"
+	sdk "github.com/FangcunMount/iam/v2/pkg/sdk"
+	auth "github.com/FangcunMount/iam/v2/pkg/sdk/auth/client"
+	sdkerrors "github.com/FangcunMount/iam/v2/pkg/sdk/errors"
+	"github.com/FangcunMount/iam/v2/pkg/sdk/identity"
 	toolchain "github.com/FangcunMount/seeddata-runner/internal/chain"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
+	"github.com/FangcunMount/seeddata-runner/internal/seediauth"
 )
 
 const (
@@ -1050,7 +1050,7 @@ func ensureDailySimulationGuardianAccount(
 		return userID, token, created, nil
 	}
 
-	if _, regErr := iamBundle.auth.RegisterOperationAccount(ctx, &authnv1.RegisterOperationAccountRequest{
+	if _, regErr := iamBundle.auth.CreateOperationAccount(ctx, &authnv2.CreateOperationAccountRequest{
 		ExistingUserId: userID,
 		Name:           profile.GuardianName,
 		Phone:          profile.GuardianPhone,
@@ -1129,7 +1129,7 @@ func ensureDailySimulationIAMUser(
 		return userID, false, nil
 	}
 
-	resp, err := iamBundle.identity.CreateUser(ctx, &identityv1.CreateUserRequest{
+	resp, err := iamBundle.identity.CreateUser(ctx, &identityv2.CreateUserRequest{
 		Nickname: profile.GuardianName,
 		Phone:    profile.GuardianPhone,
 		Email:    profile.GuardianEmail,
@@ -1157,7 +1157,7 @@ func findDailySimulationIAMUser(
 	iamBundle *dailySimulationIAMBundle,
 	phone, email string,
 ) (string, error) {
-	resp, err := iamBundle.identity.SearchUsers(ctx, &identityv1.SearchUsersRequest{
+	resp, err := iamBundle.identity.SearchUsers(ctx, &identityv2.SearchUsersRequest{
 		Phones: []string{normalizePhone(phone)},
 		Emails: []string{normalizeEmail(email)},
 	})
@@ -1561,19 +1561,14 @@ func resolveDailySimulationRunDate(raw string) (time.Time, error) {
 }
 
 func resolveDailySimulationIAMLoginURL(cfg IAMConfig) (string, error) {
-	if strings.TrimSpace(cfg.LoginURL) != "" {
-		return strings.TrimSpace(cfg.LoginURL), nil
-	}
-	base := strings.TrimSpace(cfg.BaseURL)
-	if base == "" {
-		return "", fmt.Errorf("iam.loginUrl or iam.baseUrl is required for daily_simulation")
-	}
-	parsed, err := url.Parse(base)
+	loginURL, err := seediauth.ResolveLoginURL(seediauth.Config{
+		BaseURL:  cfg.BaseURL,
+		LoginURL: cfg.LoginURL,
+	})
 	if err != nil {
-		return "", fmt.Errorf("parse iam.baseUrl %q: %w", base, err)
+		return "", fmt.Errorf("iam.loginUrl or iam.baseUrl is required for daily_simulation: %w", err)
 	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/api/v1/authn/login"
-	return parsed.String(), nil
+	return loginURL, nil
 }
 
 func resolveDailySimulationIAMBaseURL(cfg IAMConfig) (string, error) {
@@ -1587,7 +1582,7 @@ func resolveDailySimulationIAMBaseURL(cfg IAMConfig) (string, error) {
 func resolveDailySimulationIAMMockConsumerEndpointPath(cfg IAMConfig) string {
 	path := strings.TrimSpace(cfg.MockConsumer.EndpointPath)
 	if path == "" {
-		return "/api/v1/internal/authn/mock-consumers/ensure"
+		return "/api/v2/internal/authn/mock-consumers/ensure"
 	}
 	if strings.HasPrefix(path, "/") {
 		return path

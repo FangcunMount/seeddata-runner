@@ -89,7 +89,7 @@ func TestShouldStopDailySimulationJourneyAfter(t *testing.T) {
 
 func TestResolveDailySimulationIAMMockConsumerEndpointPathDefaults(t *testing.T) {
 	got := resolveDailySimulationIAMMockConsumerEndpointPath(IAMConfig{})
-	if got != "/api/v1/internal/authn/mock-consumers/ensure" {
+	if got != "/api/v2/internal/authn/mock-consumers/ensure" {
 		t.Fatalf("unexpected default endpoint path: %q", got)
 	}
 }

@@ -273,7 +273,7 @@ func (cfg *IAMConfig) Normalize() {
 	cfg.MockConsumer.SharedSecret = strings.TrimSpace(cfg.MockConsumer.SharedSecret)
 	cfg.MockConsumer.EndpointPath = strings.TrimSpace(cfg.MockConsumer.EndpointPath)
 	if cfg.MockConsumer.EndpointPath == "" {
-		cfg.MockConsumer.EndpointPath = "/api/v1/internal/authn/mock-consumers/ensure"
+		cfg.MockConsumer.EndpointPath = "/api/v2/internal/authn/mock-consumers/ensure"
 	}
 	if cfg.MockConsumer.Enabled && cfg.MockConsumer.MaxConcurrent <= 0 {
 		cfg.MockConsumer.MaxConcurrent = 1

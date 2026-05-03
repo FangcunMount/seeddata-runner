@@ -1,10 +1,10 @@
 module github.com/FangcunMount/seeddata-runner
 
-go 1.24.0
+go 1.25.9
 
 require (
-	github.com/FangcunMount/component-base v0.5.3
-	github.com/FangcunMount/iam v0.0.0
+	github.com/FangcunMount/component-base v0.6.1
+	github.com/FangcunMount/iam/v2 v2.0.0
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mozillazg/go-pinyin v0.21.0
 	golang.org/x/sync v0.19.0
@@ -35,5 +35,3 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	k8s.io/klog v1.0.0 // indirect
 )
-
-replace github.com/FangcunMount/iam => ../iam

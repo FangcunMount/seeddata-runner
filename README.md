@@ -281,7 +281,7 @@ api:
 
 iam:
   baseUrl: "https://iam.example.com"
-  loginUrl: "https://iam.example.com/api/v1/authn/login"
+  loginUrl: "https://iam.example.com/api/v2/authn/login"
   username: ""
   password: ""
   tenantId: "1"

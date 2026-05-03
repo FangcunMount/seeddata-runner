@@ -17,7 +17,7 @@ func TestEnsureIAMMockConsumerSendsSharedSecretAndDecodesResponse(t *testing.T) 
 		if r.Method != http.MethodPost {
 			t.Fatalf("unexpected method: %s", r.Method)
 		}
-		if r.URL.Path != "/api/v1/internal/authn/mock-consumers/ensure" {
+		if r.URL.Path != "/api/v2/internal/authn/mock-consumers/ensure" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if got := r.Header.Get("X-IAM-Seed-Secret"); got != "test-secret" {
@@ -47,7 +47,7 @@ func TestEnsureIAMMockConsumerSendsSharedSecretAndDecodesResponse(t *testing.T) 
 	defer server.Close()
 
 	client := NewAPIClient(server.URL, "", log.New(log.NewOptions()))
-	resp, err := client.EnsureIAMMockConsumer(context.Background(), "/api/v1/internal/authn/mock-consumers/ensure", EnsureIAMMockConsumerRequest{
+	resp, err := client.EnsureIAMMockConsumer(context.Background(), "/api/v2/internal/authn/mock-consumers/ensure", EnsureIAMMockConsumerRequest{
 		Name:     "Guardian",
 		Phone:    "+8619904200001",
 		Email:    "guardian@example.com",

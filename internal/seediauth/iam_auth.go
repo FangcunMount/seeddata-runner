@@ -8,12 +8,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
+	"github.com/FangcunMount/iam/v2/pkg/sdk/auth/loginv2"
 )
+
+const defaultIAMLoginPath = "/api/v2/authn/login"
 
 type Config struct {
 	BaseURL  string
@@ -23,26 +27,36 @@ type Config struct {
 	TenantID string
 }
 
-type iamLoginRequest struct {
-	Method      string          `json:"method"`
-	Credentials json.RawMessage `json:"credentials"`
-	DeviceID    string          `json:"device_id"`
-}
-
-type iamLoginCredentials struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	TenantID uint64 `json:"tenant_id,omitempty"`
-}
-
 type iamLoginResponse struct {
-	Code    int             `json:"code"`
+	Code    *int            `json:"code"`
 	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data"`
 }
 
 func FetchTokenFromIAM(ctx context.Context, cfg Config, logger log.Logger) (string, error) {
-	return FetchTokenFromIAMWithPassword(ctx, cfg.LoginURL, cfg.Username, cfg.Password, cfg.TenantID, "seeddata", logger)
+	loginURL, err := ResolveLoginURL(cfg)
+	if err != nil {
+		return "", err
+	}
+	return FetchTokenFromIAMWithPassword(ctx, loginURL, cfg.Username, cfg.Password, cfg.TenantID, "seeddata", logger)
+}
+
+func ResolveLoginURL(cfg Config) (string, error) {
+	if strings.TrimSpace(cfg.LoginURL) != "" {
+		return strings.TrimSpace(cfg.LoginURL), nil
+	}
+	base := strings.TrimSpace(cfg.BaseURL)
+	if base == "" {
+		return "", fmt.Errorf("iam login url is empty")
+	}
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("parse iam base url %q: %w", base, err)
+	}
+	parsed.Path = appendIAMLoginPath(parsed.Path)
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
 }
 
 func FetchTokenFromIAMWithPassword(
@@ -69,20 +83,20 @@ func FetchTokenFromIAMWithPassword(
 		parsedTenantID = parsed
 	}
 
-	credBytes, err := json.Marshal(iamLoginCredentials{
-		Username: username,
-		Password: password,
-		TenantID: parsedTenantID,
-	})
-	if err != nil {
-		return "", fmt.Errorf("marshal iam credentials: %w", err)
+	loginReq := loginv2.LoginRequest{
+		AuthMethod: loginv2.AuthMethodPassword,
+		MethodPayload: loginv2.PasswordPayload{
+			Username: username,
+			Password: password,
+			TenantID: parsedTenantID,
+		},
+		DeviceID: deviceID,
+	}
+	if err := loginReq.Validate(); err != nil {
+		return "", fmt.Errorf("validate iam login request: %w", err)
 	}
 
-	reqBody, err := json.Marshal(iamLoginRequest{
-		Method:      "password",
-		Credentials: credBytes,
-		DeviceID:    deviceID,
-	})
+	reqBody, err := json.Marshal(loginReq)
 	if err != nil {
 		return "", fmt.Errorf("marshal iam login request: %w", err)
 	}
@@ -92,6 +106,7 @@ func FetchTokenFromIAMWithPassword(
 		return "", fmt.Errorf("create iam request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
@@ -113,18 +128,10 @@ func FetchTokenFromIAMWithPassword(
 		return "", fmt.Errorf("iam login failed: status=%d body=%s", resp.StatusCode, bodyStr)
 	}
 
-	var respWrapper iamLoginResponse
-	if err := json.Unmarshal(body, &respWrapper); err != nil {
-		return "", fmt.Errorf("unmarshal iam response: %w", err)
-	}
-	if respWrapper.Code != 0 {
-		return "", fmt.Errorf("iam login error: code=%d message=%s", respWrapper.Code, respWrapper.Message)
-	}
-
-	token := extractTokenFromIAMData(respWrapper.Data)
-	if token == "" {
+	token, err := extractTokenFromIAMResponse(body)
+	if err != nil {
 		logger.Warnw("IAM login response missing token field")
-		return "", fmt.Errorf("iam login response missing token")
+		return "", err
 	}
 
 	identity := parseSeedTokenIdentity(token)
@@ -138,6 +145,43 @@ func FetchTokenFromIAMWithPassword(
 	)
 
 	return token, nil
+}
+
+func appendIAMLoginPath(path string) string {
+	path = strings.TrimRight(strings.TrimSpace(path), "/")
+	switch {
+	case path == "":
+		return defaultIAMLoginPath
+	case strings.HasSuffix(path, defaultIAMLoginPath):
+		return path
+	case strings.HasSuffix(path, "/api/v2"):
+		return path + "/authn/login"
+	default:
+		return path + defaultIAMLoginPath
+	}
+}
+
+func extractTokenFromIAMResponse(body []byte) (string, error) {
+	var respWrapper iamLoginResponse
+	if err := json.Unmarshal(body, &respWrapper); err != nil {
+		return "", fmt.Errorf("unmarshal iam response: %w", err)
+	}
+
+	isEnvelope := respWrapper.Code != nil || respWrapper.Message != "" || len(respWrapper.Data) > 0
+	if isEnvelope {
+		if respWrapper.Code != nil && *respWrapper.Code != 0 {
+			return "", fmt.Errorf("iam login error: code=%d message=%s", *respWrapper.Code, respWrapper.Message)
+		}
+		if token := extractTokenFromIAMData(respWrapper.Data); token != "" {
+			return token, nil
+		}
+		return "", fmt.Errorf("iam login response missing token")
+	}
+
+	if token := extractTokenFromIAMData(body); token != "" {
+		return token, nil
+	}
+	return "", fmt.Errorf("iam login response missing token")
 }
 
 type seedTokenIdentity struct {

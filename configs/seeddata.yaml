@@ -13,14 +13,14 @@ api:
 
 iam:
   baseUrl: "https://iam.fangcunmount.cn"
-  loginUrl: "https://iam.fangcunmount.cn/api/v1/authn/login"
+  loginUrl: "https://iam.fangcunmount.cn/api/v2/authn/login"
   username: ""
   password: ""
   tenantId: "1"
   mockConsumer:
     enabled: true
     sharedSecret: "N&#$Xds8sz72s0!8wkzsdcbWCnfJ6S5"
-    endpointPath: "/api/v1/internal/authn/mock-consumers/ensure"
+    endpointPath: "/api/v2/internal/authn/mock-consumers/ensure"
     # 保护 IAM 网关：mock C 端建号/登录默认串行执行，必要时可按机器能力调大。
     maxConcurrent: 1
   grpc:
@@ -36,17 +36,17 @@ iam:
       insecureSkipVerify: false
 
 dailySimulation:
-  countMin: 20
-  countMax: 50
-  countPerRun: 20
-  dailyMaxUsers: 120
-  workers: 6
-  runDate: ""
-  runAt: "10:00" # 兼容单次调度；设置 windowStartAt/windowEndAt/interval 后按窗口模式执行
-  windowStartAt: "10:00"
-  windowEndAt: "23:00"
-  interval: "30m"
-  retryDelay: "30m"
+  countMin: 20        # 每日模拟最小用户数
+  countMax: 100       # 每日模拟最大用户数
+  countPerRun: 20     # 每轮模拟用户数，建议不超过 dailyMaxUsers/workers
+  dailyMaxUsers: 120  # 每日模拟用户数上限，超过后当天不再执行模拟；建议设置为 countMax 的整数倍以保证模拟效果，同时也要考虑 IAM 承受能力
+  workers: 6          # 模拟并发数，建议不超过 10，以免 IAM 压力过大
+  runDate: ""         # 模拟日期，格式 "YYYY-MM-DD"，默认为当天；设置后仅模拟指定日期，适用于补数据或测试
+  runAt: "10:00"      # 兼容单次调度；设置 windowStartAt/windowEndAt/interval 后按窗口模式执行
+  windowStartAt: "10:00"  # 模拟时间窗口开始时间，格式 "HH:mm"
+  windowEndAt: "23:00"    # 模拟时间窗口结束时间，格式 "HH:mm"
+  interval: "30m"         # 模拟时间窗口内每轮执行间隔，格式支持 Go Duration，如 "30m"、"1h15m" 等；设置后按窗口模式执行
+  retryDelay: "30m"       # 模拟失败重试间隔，格式支持 Go Duration，如 "30m"、"1h15m" 等；设置后模拟失败时会在间隔后重试，直到 runDate 结束
   stateFile: ".seeddata-cache/daily-simulation-daemon-state.json"
   clinicianIds:
     - 614995509882401326
