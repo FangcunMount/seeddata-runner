@@ -299,6 +299,10 @@ func runDailySimulationBatchWithOptions(
 	if len(scenarios) == 0 {
 		return fmt.Errorf("%s resolved zero scenarios", progressLabel)
 	}
+	additionalTargets, err := resolveDailySimulationAdditionalTargetsForRun(ctx, deps, cfg)
+	if err != nil {
+		return err
+	}
 
 	existingTesteesByIndex := options.ExistingTesteesByIndex
 	if existingTesteesByIndex == nil {
@@ -379,8 +383,14 @@ func runDailySimulationBatchWithOptions(
 					continue
 				}
 				scenario := scenarios[idx%len(scenarios)]
+				selectedAdditionalTargets := selectDailySimulationAdditionalTargetsForTestee(
+					additionalTargets,
+					cfg,
+					runDate,
+					profile.Index,
+				)
 				// 模拟每日模拟用户
-				outcome, simErr := simulateDailyUser(
+				outcome, simErr := simulateDailyUserWithAdditionalTargets(
 					ctx,
 					deps,
 					iamBundle,
@@ -389,6 +399,7 @@ func runDailySimulationBatchWithOptions(
 					scenario.ClinicianID,
 					scenario.Entry,
 					scenario.Target,
+					selectedAdditionalTargets,
 					mockIAMLimiter,
 					existingTestee,
 				)
@@ -403,6 +414,7 @@ func runDailySimulationBatchWithOptions(
 						"clinician_id", scenario.ClinicianID,
 						"entry_id", scenario.Entry.ID,
 						"target_code", scenario.Target.TargetCode,
+						"additional_target_codes", dailySimulationResolvedTargetCodes(selectedAdditionalTargets),
 						"journey_target", outcome.JourneyTarget,
 						"error", simErr.Error(),
 					)
@@ -703,7 +715,7 @@ func normalizeDailySimulationExistingTesteeGender(value string) string {
 	}
 }
 
-// resolveDailySimulationScenariosForRun 解析每日模拟用户场景
+// resolveDailySimulationScenariosForRun 解析每日模拟用户入口场景。
 func resolveDailySimulationScenariosForRun(
 	ctx context.Context,
 	deps *dependencies,
@@ -744,6 +756,69 @@ func resolveDailySimulationScenariosForRun(
 		})
 	}
 	return scenarios, nil
+}
+
+func resolveDailySimulationAdditionalTargetsForRun(
+	ctx context.Context,
+	deps *dependencies,
+	cfg DailySimulationConfig,
+) ([]*dailySimulationResolvedTarget, error) {
+	codes := collectDailySimulationAdditionalTargetCodes(cfg)
+	if len(codes) == 0 || cfg.AdditionalTargetMaxCount <= 0 {
+		return nil, nil
+	}
+	targets := make([]*dailySimulationResolvedTarget, 0, len(codes))
+	for _, code := range codes {
+		target, err := resolveDailySimulationTarget(ctx, deps.CollectionClient, cfg.TargetType, code, cfg.TargetVersion)
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
+}
+
+func selectDailySimulationAdditionalTargetsForTestee(
+	targets []*dailySimulationResolvedTarget,
+	cfg DailySimulationConfig,
+	runDate time.Time,
+	index int,
+) []*dailySimulationResolvedTarget {
+	if len(targets) == 0 || cfg.AdditionalTargetMaxCount <= 0 {
+		return nil
+	}
+	rng := newDailySimulationRand(fmt.Sprintf(
+		"additional-targets:%s:%d",
+		runDate.Format("20060102"),
+		index,
+	))
+	maxCount := cfg.AdditionalTargetMaxCount
+	if maxCount > len(targets) {
+		maxCount = len(targets)
+	}
+	count := 1 + rng.Intn(maxCount)
+	if count >= len(targets) {
+		return append([]*dailySimulationResolvedTarget(nil), targets...)
+	}
+	order := rng.Perm(len(targets))
+	selected := make([]*dailySimulationResolvedTarget, 0, count)
+	for _, targetIndex := range order[:count] {
+		selected = append(selected, targets[targetIndex])
+	}
+	return selected
+}
+
+func dailySimulationResolvedTargetCodes(targets []*dailySimulationResolvedTarget) []string {
+	codes := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if target == nil {
+			continue
+		}
+		if code := strings.TrimSpace(target.TargetCode); code != "" {
+			codes = append(codes, code)
+		}
+	}
+	return codes
 }
 
 // selectDailySimulationClinicianIDsForRun 选择每日模拟用户临床ID
@@ -810,6 +885,27 @@ func collectDailySimulationClinicianIDs(ids []FlexibleID) []string {
 		}
 		seen[value] = struct{}{}
 		collected = append(collected, value)
+	}
+	return collected
+}
+
+// collectDailySimulationAdditionalTargetCodes 收集每日模拟额外填报量表编码。
+func collectDailySimulationAdditionalTargetCodes(cfg DailySimulationConfig) []string {
+	collected := make([]string, 0, len(cfg.AdditionalTargetCodes))
+	seen := make(map[string]struct{}, len(cfg.AdditionalTargetCodes))
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, exists := seen[value]; exists {
+			return
+		}
+		seen[value] = struct{}{}
+		collected = append(collected, value)
+	}
+	for _, code := range cfg.AdditionalTargetCodes {
+		add(code)
 	}
 	return collected
 }

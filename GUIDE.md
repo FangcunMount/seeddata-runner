@@ -75,6 +75,7 @@ go run ./cmd/seeddata --config ./configs/seeddata.yaml
 - `dailySimulation.runAt` 是兼容的单次调度入口；如果未设置窗口字段，则每天只跑一次
 - `dailySimulation.windowStartAt` / `dailySimulation.windowEndAt` / `dailySimulation.interval` 定义窗口内固定间隔调度
 - `dailySimulation.dailyMaxUsers` 限制当天成功新增用户总数
+- `dailySimulation.targetCode` 仍然是单个入口量表；`additionalTargetCodes` / `additionalTargetMaxCount` 用于入口完成后为每个 testee 随机追加填报 1..N 个量表
 - `dailySimulation.*` 的默认值由配置加载阶段统一补齐，daemon 不再各自做零散 normalize
 
 如果 daily simulation 需要限制医生范围，优先使用 `dailySimulation.clinicianIds`。

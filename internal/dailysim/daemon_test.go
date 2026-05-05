@@ -89,6 +89,40 @@ func TestSelectDailySimulationPlanIDStable(t *testing.T) {
 	}
 }
 
+func TestSelectDailySimulationAdditionalTargetsForTesteeStableSubset(t *testing.T) {
+	cfg := DailySimulationConfig{
+		AdditionalTargetMaxCount: 2,
+	}
+	runDate := time.Date(2026, 4, 19, 0, 0, 0, 0, time.Local)
+	targets := []*dailySimulationResolvedTarget{
+		{TargetCode: "SAS"},
+		{TargetCode: "PHQ9"},
+		{TargetCode: "GAD7"},
+	}
+
+	first := selectDailySimulationAdditionalTargetsForTestee(targets, cfg, runDate, 7)
+	second := selectDailySimulationAdditionalTargetsForTestee(targets, cfg, runDate, 7)
+	if len(first) < 1 || len(first) > 2 {
+		t.Fatalf("expected selected targets within [1,2], got %d", len(first))
+	}
+	if len(second) != len(first) {
+		t.Fatalf("expected stable selected count, got %d and %d", len(first), len(second))
+	}
+	for idx := range first {
+		if first[idx].TargetCode != second[idx].TargetCode {
+			t.Fatalf("expected stable target selection at %d: %s vs %s", idx, first[idx].TargetCode, second[idx].TargetCode)
+		}
+	}
+	seen := make(map[string]struct{}, len(first))
+	for _, target := range first {
+		code := target.TargetCode
+		if _, exists := seen[code]; exists {
+			t.Fatalf("expected unique selected target code, got duplicate %s", code)
+		}
+		seen[code] = struct{}{}
+	}
+}
+
 func TestNextDailySimulationDaemonRun(t *testing.T) {
 	t.Run("legacy single run schedule", func(t *testing.T) {
 		schedule := dailySimulationSchedule{

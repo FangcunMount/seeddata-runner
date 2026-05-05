@@ -190,6 +190,68 @@ planSubmit:
 	}
 }
 
+func TestLoadAcceptsDailySimulationAdditionalTargetCodes(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "seeddata.yaml")
+	content := `
+global:
+  orgId: 1
+api:
+  baseUrl: "https://qs.example.com"
+dailySimulation:
+  clinicianIds: ["1001"]
+  targetType: "scale"
+  targetCode: "SAS"
+  additionalTargetCodes: ["PHQ9", "GAD7", "PHQ9"]
+  additionalTargetMaxCount: 2
+  planIds: ["614333603412718126"]
+planSubmit:
+  planIds: ["614333603412718126"]
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got, want := cfg.DailySimulation.AdditionalTargetCodes, []string{"PHQ9", "GAD7"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("unexpected additional target codes: %#v", got)
+	}
+	if cfg.DailySimulation.AdditionalTargetMaxCount != 2 {
+		t.Fatalf("unexpected additional target max count: %d", cfg.DailySimulation.AdditionalTargetMaxCount)
+	}
+}
+
+func TestLoadRejectsDailySimulationAdditionalTargetMaxCountGreaterThanCodes(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "seeddata.yaml")
+	content := `
+global:
+  orgId: 1
+api:
+  baseUrl: "https://qs.example.com"
+dailySimulation:
+  clinicianIds: ["1001"]
+  targetType: "scale"
+  targetCode: "SAS"
+  additionalTargetCodes: ["PHQ9", "GAD7"]
+  additionalTargetMaxCount: 3
+  planIds: ["614333603412718126"]
+planSubmit:
+  planIds: ["614333603412718126"]
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(configPath)
+	if err == nil || !strings.Contains(err.Error(), "dailySimulation.additionalTargetMaxCount must be <= number of additional target codes") {
+		t.Fatalf("expected invalid additionalTargetMaxCount error, got %v", err)
+	}
+}
+
 func TestLoadRequiresIAMMockConsumerSharedSecretWhenEnabled(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "seeddata.yaml")

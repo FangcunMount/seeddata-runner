@@ -70,8 +70,10 @@ dailySimulation:
   focusCliniciansPerRunMax: 5 # 每日模拟医生数量最大值
   entryId: ""
   targetType: "scale"
-  targetCode: "3adyDE"
+  targetCode: "3adyDE" # 入口量表；每个 testee 仍然只拿一个入口
   targetVersion: ""
+  additionalTargetCodes: ["zOO4eG", "WFIRSP", "IPIP_BF50", "bJFKi3", "mbdoeV", "tuixuu", "sJFa2R", "tssl35", "zOO4eG"] # 入口填完后可额外填报的量表编码池，例如 ["PHQ9", "GAD7"]
+  additionalTargetMaxCount: 3 # 每个 testee 从 additionalTargetCodes 中随机抽取 1..N 个填报；0 表示不额外填报
   userPassword: "DailySim@123"
   userPhonePrefix: "+86199"
   userEmailDomain: "fangcunmount.com"

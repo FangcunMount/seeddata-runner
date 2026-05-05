@@ -197,6 +197,34 @@ func simulateDailyUser(
 	mockIAMLimiter chan struct{},
 	existingTestee *ApiserverTesteeResponse,
 ) (dailySimulationOutcome, error) {
+	return simulateDailyUserWithAdditionalTargets(
+		ctx,
+		deps,
+		iamBundle,
+		cfg,
+		profile,
+		clinicianID,
+		entry,
+		target,
+		nil,
+		mockIAMLimiter,
+		existingTestee,
+	)
+}
+
+func simulateDailyUserWithAdditionalTargets(
+	ctx context.Context,
+	deps *dependencies,
+	iamBundle *dailySimulationIAMBundle,
+	cfg DailySimulationConfig,
+	profile dailySimulationProfile,
+	clinicianID string,
+	entry *AssessmentEntryResponse,
+	target *dailySimulationResolvedTarget,
+	additionalTargets []*dailySimulationResolvedTarget,
+	mockIAMLimiter chan struct{},
+	existingTestee *ApiserverTesteeResponse,
+) (dailySimulationOutcome, error) {
 	state := &dailySimulationJourneyState{
 		deps:           deps,
 		iamBundle:      iamBundle,
@@ -239,11 +267,52 @@ func simulateDailyUser(
 		}
 	}
 
-	return state.outcome, logDailySimulationOutcome(
+	if err := logDailySimulationOutcome(
 		deps,
 		profile,
 		clinicianID,
 		entry,
+		target,
+		dailySimulationTesteeID(state.testee),
+		state.guardianUserID,
+		state.outcome,
+	); err != nil {
+		return state.outcome, err
+	}
+	if state.journeyTarget != dailySimulationJourneySubmitAnswer {
+		return state.outcome, nil
+	}
+	for _, additionalTarget := range additionalTargets {
+		if err := simulateDailyUserAdditionalTarget(ctx, deps, profile, state, additionalTarget); err != nil {
+			return state.outcome, err
+		}
+	}
+	return state.outcome, nil
+}
+
+func simulateDailyUserAdditionalTarget(
+	ctx context.Context,
+	deps *dependencies,
+	profile dailySimulationProfile,
+	state *dailySimulationJourneyState,
+	target *dailySimulationResolvedTarget,
+) error {
+	if target == nil {
+		return fmt.Errorf("daily simulation target is nil")
+	}
+	state.target = target
+	state.outcome.AnswerSheetID = ""
+	state.outcome.AssessmentID = ""
+	state.outcome.SkippedSubmission = false
+
+	if _, err := dailySimulationStageSubmitAnswerSheet(ctx, state); err != nil {
+		return err
+	}
+	return logDailySimulationOutcome(
+		deps,
+		profile,
+		state.clinicianID,
+		state.entry,
 		target,
 		dailySimulationTesteeID(state.testee),
 		state.guardianUserID,

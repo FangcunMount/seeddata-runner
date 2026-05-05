@@ -230,7 +230,8 @@ sudo systemctl restart seeddata-runner
 | `clinicianIds` | 可用医生范围；当 `entryId` 为空时必填 |
 | `focusCliniciansPerRunMin` / `focusCliniciansPerRunMax` | 每轮从 `clinicianIds` 中抽取多少位医生参与本轮模拟；不配时默认使用全部医生 |
 | `entryId` | 指定现成 assessment entry；设置后优先复用这个入口，并忽略 `clinicianIds` 选入口的逻辑 |
-| `targetType` / `targetCode` / `targetVersion` | 当未指定 `entryId` 时，用于定位或创建 assessment entry |
+| `targetType` / `targetCode` / `targetVersion` | 当未指定 `entryId` 时，用于定位或创建 assessment entry；每个 testee 仍然只拿这一个入口 |
+| `additionalTargetCodes` / `additionalTargetMaxCount` | 入口填完后额外填报的量表池，以及每个 testee 从池子里随机抽取 `1..additionalTargetMaxCount` 个量表；`additionalTargetMaxCount=0` 表示不额外填报 |
 | `planIds` | 必填；每个模拟用户会从这里确定性选一个 plan 加入 |
 | `journeyMix` | 控制四种旅程深度的权重分布 |
 | `userPassword` / `userPhonePrefix` / `userEmailDomain` | 模拟 guardian 账号生成规则 |
@@ -300,6 +301,8 @@ dailySimulation:
     - "614995509882401326"
   targetType: "scale"
   targetCode: "3adyDE"
+  additionalTargetCodes: []
+  additionalTargetMaxCount: 0
   planIds:
     - "614333603412718126"
   journeyMix:

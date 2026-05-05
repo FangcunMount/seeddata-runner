@@ -160,6 +160,8 @@ type DailySimulationConfig struct {
 	TargetType               string                          `yaml:"targetType"`
 	TargetCode               string                          `yaml:"targetCode"`
 	TargetVersion            string                          `yaml:"targetVersion"`
+	AdditionalTargetCodes    []string                        `yaml:"additionalTargetCodes"`
+	AdditionalTargetMaxCount int                             `yaml:"additionalTargetMaxCount"`
 	UserPassword             string                          `yaml:"userPassword"`
 	UserPhonePrefix          string                          `yaml:"userPhonePrefix"`
 	UserEmailDomain          string                          `yaml:"userEmailDomain"`
@@ -313,6 +315,8 @@ func (cfg DailySimulationConfig) IsZero() bool {
 		strings.TrimSpace(cfg.TargetType) == "" &&
 		strings.TrimSpace(cfg.TargetCode) == "" &&
 		strings.TrimSpace(cfg.TargetVersion) == "" &&
+		len(cfg.AdditionalTargetCodes) == 0 &&
+		cfg.AdditionalTargetMaxCount == 0 &&
 		strings.TrimSpace(cfg.UserPassword) == "" &&
 		strings.TrimSpace(cfg.UserPhonePrefix) == "" &&
 		strings.TrimSpace(cfg.UserEmailDomain) == "" &&
@@ -363,6 +367,10 @@ func (cfg *DailySimulationConfig) Normalize() {
 	cfg.UserEmailDomain = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(cfg.UserEmailDomain)), "@")
 	cfg.UserPhonePrefix = strings.TrimSpace(cfg.UserPhonePrefix)
 	cfg.UserPassword = strings.TrimSpace(cfg.UserPassword)
+	cfg.TargetType = strings.TrimSpace(cfg.TargetType)
+	cfg.TargetCode = strings.TrimSpace(cfg.TargetCode)
+	cfg.TargetVersion = strings.TrimSpace(cfg.TargetVersion)
+	cfg.AdditionalTargetCodes = normalizeDailySimulationCodes(cfg.AdditionalTargetCodes)
 	cfg.TesteeSource = strings.TrimSpace(cfg.TesteeSource)
 	cfg.RunAt = strings.TrimSpace(cfg.RunAt)
 	cfg.WindowStartAt = strings.TrimSpace(cfg.WindowStartAt)
@@ -382,6 +390,12 @@ func (cfg DailySimulationConfig) Validate() error {
 	}
 	if strings.TrimSpace(cfg.TargetCode) == "" {
 		return fmt.Errorf("dailySimulation.targetCode is required")
+	}
+	if cfg.AdditionalTargetMaxCount < 0 {
+		return fmt.Errorf("dailySimulation.additionalTargetMaxCount must be >= 0")
+	}
+	if cfg.AdditionalTargetMaxCount > len(cfg.AdditionalTargetCodes) {
+		return fmt.Errorf("dailySimulation.additionalTargetMaxCount must be <= number of additional target codes")
 	}
 	if len(cfg.PlanIDs) == 0 {
 		return fmt.Errorf("dailySimulation.planIds is required")
@@ -419,6 +433,26 @@ func (cfg DailySimulationConfig) Validate() error {
 
 func (cfg DailySimulationJourneyMixConfig) totalWeight() int {
 	return cfg.RegisterOnlyWeight + cfg.CreateTesteeWeight + cfg.ResolveEntryWeight + cfg.SubmitAnswerWeight
+}
+
+func normalizeDailySimulationCodes(codes []string) []string {
+	collected := make([]string, 0, len(codes))
+	seen := make(map[string]struct{}, len(codes))
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, exists := seen[value]; exists {
+			return
+		}
+		seen[value] = struct{}{}
+		collected = append(collected, value)
+	}
+	for _, code := range codes {
+		add(code)
+	}
+	return collected
 }
 
 func (cfg PlanSubmitConfig) IsZero() bool {
