@@ -70,6 +70,8 @@ go run ./cmd/seeddata --config ./configs/seeddata.yaml
 
 - `planSubmit.planIds` 是 open-task submit daemon 的目标 plan 集合
 - `planSubmit.workers` 控制 open-task submit 并发
+- `planSubmit.completionPercent` 控制每天最多完成当天 task 的比例，默认 `100`
+- `planSubmit` 只会提交 `source` 等于 `dailySimulation.testeeSource` 的 testee task，避免影响正常业务 testee
 - `planSubmit.idleInterval` 控制 open-task submit 空闲轮询间隔
 - `planSubmit.activeInterval` 控制 open-task submit 在发现 opened task 后的下一轮轮询间隔
 - `dailySimulation.runAt` 是兼容的单次调度入口；如果未设置窗口字段，则每天只跑一次

@@ -20,6 +20,7 @@ type APIClient = seedapi.APIClient
 type ScaleResponse = seedapi.ScaleResponse
 type PlanResponse = seedapi.PlanResponse
 type TaskResponse = seedapi.TaskResponse
+type ApiserverTesteeResponse = seedapi.ApiserverTesteeResponse
 type PlanTaskWindowResponse = seedapi.PlanTaskWindowResponse
 type ListPlanTaskWindowRequest = seedapi.ListPlanTaskWindowRequest
 type QuestionnaireDetailResponse = seedapi.QuestionnaireDetailResponse
@@ -38,12 +39,14 @@ func newSeeddataLogger(verbose bool) log.Logger {
 }
 
 type Options struct {
-	PlanIDs        []string
-	Workers        int
-	Verbose        bool
-	Continuous     bool
-	IdleInterval   time.Duration
-	ActiveInterval time.Duration
+	PlanIDs           []string
+	Workers           int
+	CompletionPercent int
+	TesteeSource      string
+	Verbose           bool
+	Continuous        bool
+	IdleInterval      time.Duration
+	ActiveInterval    time.Duration
 }
 
 type planOpenTaskSubmitOptions = Options
@@ -57,12 +60,18 @@ func optionsFromConfig(cfg *seedconfig.Config) (Options, error) {
 	if err != nil {
 		return Options{}, err
 	}
+	completionPercent := seedconfig.DefaultPlanSubmitCompletionPercent
+	if cfg.PlanSubmit.CompletionPercent != nil {
+		completionPercent = *cfg.PlanSubmit.CompletionPercent
+	}
 	return Options{
-		PlanIDs:        normalizePlanIDs(cfg.PlanSubmit.PlanIDStrings()),
-		Workers:        cfg.PlanSubmit.Workers,
-		Continuous:     true,
-		IdleInterval:   idleInterval,
-		ActiveInterval: activeInterval,
+		PlanIDs:           normalizePlanIDs(cfg.PlanSubmit.PlanIDStrings()),
+		Workers:           cfg.PlanSubmit.Workers,
+		CompletionPercent: completionPercent,
+		TesteeSource:      strings.TrimSpace(cfg.DailySimulation.TesteeSource),
+		Continuous:        true,
+		IdleInterval:      idleInterval,
+		ActiveInterval:    activeInterval,
 	}, nil
 }
 

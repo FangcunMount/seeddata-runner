@@ -40,6 +40,9 @@ planSubmit:
 	if cfg.PlanSubmit.Workers != DefaultPlanSubmitWorkers {
 		t.Fatalf("unexpected default plan workers: %d", cfg.PlanSubmit.Workers)
 	}
+	if cfg.PlanSubmit.CompletionPercent == nil || *cfg.PlanSubmit.CompletionPercent != DefaultPlanSubmitCompletionPercent {
+		t.Fatalf("unexpected default completion percent: %v", cfg.PlanSubmit.CompletionPercent)
+	}
 	if cfg.PlanSubmit.IdleInterval != DefaultPlanSubmitIdleInterval {
 		t.Fatalf("unexpected default idle interval: %q", cfg.PlanSubmit.IdleInterval)
 	}
@@ -107,6 +110,63 @@ planSubmit:
 	_, err := Load(configPath)
 	if err == nil || !strings.Contains(err.Error(), "planSubmit.idleInterval must be positive") {
 		t.Fatalf("expected invalid planSubmit.idleInterval error, got %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidPlanSubmitCompletionPercent(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "seeddata.yaml")
+	content := `
+global:
+  orgId: 1
+api:
+  baseUrl: "https://qs.example.com"
+dailySimulation:
+  clinicianIds: ["1001"]
+  targetType: "scale"
+  targetCode: "SAS"
+  planIds: ["614333603412718126"]
+planSubmit:
+  planIds: ["614333603412718126"]
+  completionPercent: 101
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(configPath)
+	if err == nil || !strings.Contains(err.Error(), "planSubmit.completionPercent must be between 0 and 100") {
+		t.Fatalf("expected invalid planSubmit.completionPercent error, got %v", err)
+	}
+}
+
+func TestLoadAcceptsZeroPlanSubmitCompletionPercent(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "seeddata.yaml")
+	content := `
+global:
+  orgId: 1
+api:
+  baseUrl: "https://qs.example.com"
+dailySimulation:
+  clinicianIds: ["1001"]
+  targetType: "scale"
+  targetCode: "SAS"
+  planIds: ["614333603412718126"]
+planSubmit:
+  planIds: ["614333603412718126"]
+  completionPercent: 0
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.PlanSubmit.CompletionPercent == nil || *cfg.PlanSubmit.CompletionPercent != 0 {
+		t.Fatalf("expected explicit zero completion percent, got %v", cfg.PlanSubmit.CompletionPercent)
 	}
 }
 

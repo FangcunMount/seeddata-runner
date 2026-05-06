@@ -96,24 +96,83 @@ func listOpenPlanTaskJobs(
 	planID string,
 	verbose bool,
 ) ([]planTaskJob, error) {
+	tasks, err := listPlanTaskWindowTasks(ctx, gateway, logger, ListPlanTaskWindowRequest{
+		PlanID: planID,
+		Status: "opened",
+	}, verbose)
+	if err != nil {
+		return nil, err
+	}
+	return appendOpenPlanTaskJobs(nil, tasks, normalizePlanID(planID), logger, verbose), nil
+}
+
+func listDailyPlanTaskJobs(
+	ctx context.Context,
+	gateway planTaskSubmitGateway,
+	logger planTaskLogger,
+	planID string,
+	completionPercent int,
+	testeeSource string,
+	now time.Time,
+	verbose bool,
+) ([]planTaskJob, error) {
 	planID = normalizePlanID(planID)
 	if planID == "" {
 		return nil, fmt.Errorf("plan-id is required")
 	}
+	if completionPercent <= 0 {
+		return nil, nil
+	}
+	if completionPercent > 100 {
+		completionPercent = 100
+	}
 
-	resourceID := planID
-	jobs := make([]planTaskJob, 0, planOpenTaskPageSize)
+	tasks, err := listPlanTaskWindowTasks(ctx, gateway, logger, ListPlanTaskWindowRequest{
+		PlanID:        planID,
+		PlannedBefore: planSubmitEndOfDay(now).Format("2006-01-02 15:04:05"),
+	}, verbose)
+	if err != nil {
+		return nil, err
+	}
+
+	dailyTasks := filterPlanSubmitTasksForDay(tasks, now, logger, verbose)
+	dailyTasks = filterPlanSubmitTasksByTesteeSource(ctx, gateway, logger, dailyTasks, testeeSource)
+	completedCount := countPlanSubmitTasksByStatus(dailyTasks, "completed")
+	targetCompletedCount := planSubmitTargetCompletedCount(len(dailyTasks), completionPercent)
+	remainingSubmitQuota := targetCompletedCount - completedCount
+	if remainingSubmitQuota <= 0 {
+		return nil, nil
+	}
+
+	jobs := appendOpenPlanTaskJobs(nil, dailyTasks, planID, logger, verbose)
+	if remainingSubmitQuota < len(jobs) {
+		jobs = jobs[:remainingSubmitQuota]
+	}
+	return jobs, nil
+}
+
+func listPlanTaskWindowTasks(
+	ctx context.Context,
+	gateway planTaskSubmitGateway,
+	logger planTaskLogger,
+	req ListPlanTaskWindowRequest,
+	verbose bool,
+) ([]TaskResponse, error) {
+	req.PlanID = normalizePlanID(req.PlanID)
+	if req.PlanID == "" {
+		return nil, fmt.Errorf("plan-id is required")
+	}
+	req.Status = normalizeTaskStatus(req.Status)
+	resourceID := req.PlanID
+	tasks := make([]TaskResponse, 0, planOpenTaskPageSize)
 	for page := 1; ; page++ {
-		req := ListPlanTaskWindowRequest{
-			PlanID:   planID,
-			Status:   "opened",
-			Page:     page,
-			PageSize: planOpenTaskPageSize,
-		}
+		pageReq := req
+		pageReq.Page = page
+		pageReq.PageSize = planOpenTaskPageSize
 
 		var windowResp *PlanTaskWindowResponse
-		err := runSeedPlanOperationWithRecovery(ctx, logger, verbose, "list_opened_plan_tasks", resourceID, func() error {
-			resp, err := gateway.ListPlanTaskWindow(ctx, req)
+		err := runSeedPlanOperationWithRecovery(ctx, logger, verbose, "list_plan_tasks_window", resourceID, func() error {
+			resp, err := gateway.ListPlanTaskWindow(ctx, pageReq)
 			if err != nil {
 				return err
 			}
@@ -127,9 +186,9 @@ func listOpenPlanTaskJobs(
 			windowResp = &PlanTaskWindowResponse{}
 		}
 
-		jobs = appendOpenPlanTaskJobs(jobs, windowResp.Tasks, planID, logger, verbose)
-		if !hasMorePlanTaskWindow(windowResp, req.Page, req.PageSize) {
-			return jobs, nil
+		tasks = append(tasks, windowResp.Tasks...)
+		if !hasMorePlanTaskWindow(windowResp, pageReq.Page, pageReq.PageSize) {
+			return tasks, nil
 		}
 	}
 }
@@ -170,6 +229,126 @@ func appendOpenPlanTaskJobs(
 		}
 	}
 	return jobs
+}
+
+func filterPlanSubmitTasksForDay(tasks []TaskResponse, now time.Time, logger planTaskLogger, verbose bool) []TaskResponse {
+	if len(tasks) == 0 {
+		return nil
+	}
+	year, month, day := now.Date()
+	filtered := make([]TaskResponse, 0, len(tasks))
+	for _, task := range tasks {
+		plannedAt, err := parsePlanSubmitTaskTime(task.PlannedAt, now.Location())
+		if err != nil {
+			if verbose {
+				logger.Debugw("Skipping plan task with invalid planned_at",
+					"task_id", task.ID,
+					"planned_at", task.PlannedAt,
+					"error", err.Error(),
+				)
+			}
+			continue
+		}
+		taskYear, taskMonth, taskDay := plannedAt.In(now.Location()).Date()
+		if taskYear == year && taskMonth == month && taskDay == day {
+			filtered = append(filtered, task)
+		}
+	}
+	sortTasksBySeq(filtered)
+	return filtered
+}
+
+func filterPlanSubmitTasksByTesteeSource(
+	ctx context.Context,
+	gateway planTaskSubmitGateway,
+	logger planTaskLogger,
+	tasks []TaskResponse,
+	testeeSource string,
+) []TaskResponse {
+	testeeSource = strings.TrimSpace(testeeSource)
+	if len(tasks) == 0 || testeeSource == "" {
+		return tasks
+	}
+
+	sourceByTesteeID := make(map[string]string)
+	filtered := make([]TaskResponse, 0, len(tasks))
+	for _, task := range tasks {
+		testeeID := strings.TrimSpace(task.TesteeID)
+		if testeeID == "" {
+			continue
+		}
+		source, exists := sourceByTesteeID[testeeID]
+		if !exists {
+			testee, err := gateway.GetTesteeByID(ctx, testeeID)
+			if err != nil {
+				logger.Warnw("Skipping plan task because testee source lookup failed",
+					"task_id", task.ID,
+					"testee_id", testeeID,
+					"error", err.Error(),
+				)
+				sourceByTesteeID[testeeID] = ""
+				continue
+			}
+			source = ""
+			if testee != nil {
+				source = strings.TrimSpace(testee.Source)
+			}
+			sourceByTesteeID[testeeID] = source
+		}
+		if source != testeeSource {
+			continue
+		}
+		filtered = append(filtered, task)
+	}
+	return filtered
+}
+
+func countPlanSubmitTasksByStatus(tasks []TaskResponse, status string) int {
+	status = normalizeTaskStatus(status)
+	count := 0
+	for _, task := range tasks {
+		if normalizeTaskStatus(task.Status) == status {
+			count++
+		}
+	}
+	return count
+}
+
+func planSubmitTargetCompletedCount(totalTasks, completionPercent int) int {
+	if totalTasks <= 0 || completionPercent <= 0 {
+		return 0
+	}
+	if completionPercent >= 100 {
+		return totalTasks
+	}
+	return (totalTasks*completionPercent + 99) / 100
+}
+
+func planSubmitEndOfDay(now time.Time) time.Time {
+	year, month, day := now.Date()
+	return time.Date(year, month, day, 23, 59, 59, 0, now.Location())
+}
+
+func parsePlanSubmitTaskTime(raw string, loc *time.Location) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, fmt.Errorf("empty time")
+	}
+	if loc == nil {
+		loc = time.Local
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05", time.RFC3339, "2006-01-02"} {
+		if layout == time.RFC3339 {
+			if parsed, err := time.Parse(layout, raw); err == nil {
+				return parsed, nil
+			}
+			continue
+		}
+		if parsed, err := time.ParseInLocation(layout, raw, loc); err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unsupported time format %q", raw)
 }
 
 func hasMorePlanTaskWindow(taskList *PlanTaskWindowResponse, page int, pageSize int) bool {

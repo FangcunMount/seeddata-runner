@@ -57,6 +57,29 @@ func (c *APIClient) ListTesteesByOrgCreatedOnDate(ctx context.Context, orgID int
 	return c.listTesteesByOrgPath(ctx, path, orgID, page, pageSize)
 }
 
+// GetTesteeByID 根据 ID 获取受试者详情（apiserver）。
+func (c *APIClient) GetTesteeByID(ctx context.Context, testeeID string) (*ApiserverTesteeResponse, error) {
+	testeeID = strings.TrimSpace(testeeID)
+	if testeeID == "" {
+		return nil, fmt.Errorf("testee_id is required")
+	}
+	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("/api/v1/testees/%s", urlQueryEscape(testeeID)), nil)
+	if err != nil {
+		return nil, fmt.Errorf("get testee: testee_id=%s: %w", testeeID, err)
+	}
+
+	dataBytes, err := json.Marshal(resp.Data)
+	if err != nil {
+		return nil, fmt.Errorf("marshal response data: %w", err)
+	}
+
+	var testeeResp ApiserverTesteeResponse
+	if err := json.Unmarshal(dataBytes, &testeeResp); err != nil {
+		return nil, fmt.Errorf("unmarshal testee response: %w", err)
+	}
+	return &testeeResp, nil
+}
+
 func (c *APIClient) listTesteesByOrgPath(ctx context.Context, path string, orgID int64, page, pageSize int) (*ApiserverTesteeListResponse, error) {
 	resp, err := c.doRequest(ctx, "GET", path, nil)
 	if err != nil {

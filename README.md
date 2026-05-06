@@ -254,7 +254,7 @@ sudo systemctl restart seeddata-runner
 
 ## Plan Submit
 
-`planSubmit` 只处理“已经 opened 的任务”，不会参与 plan 调度本身。
+`planSubmit` 只处理当天“已经 opened 的任务”，不会参与 plan 调度本身。它会先按 `planned_at <= 当天 23:59:59` 拉取任务窗口，再在本地只保留当天任务；随后按 task 的 `testee_id` 查询 testee 来源，只提交 `source == dailySimulation.testeeSource` 的任务，并用 `completionPercent` 控制当天最多完成的比例。
 
 关键字段如下：
 
@@ -262,8 +262,11 @@ sudo systemctl restart seeddata-runner
 | --- | --- |
 | `planIds` | 必填；持续扫描这些 plan |
 | `workers` | 并发提交 opened task 的 worker 数 |
+| `completionPercent` | 当天 task 目标完成比例，取值 `0..100`；默认 `100` 保持旧行为，`0` 表示不提交 |
 | `idleInterval` | 本轮没有活跃 opened task 时，下次轮询等待时间 |
 | `activeInterval` | 本轮发现 opened task 并执行提交后，下次轮询等待时间 |
+
+`planSubmit` 会复用 `dailySimulation.testeeSource` 作为安全边界，避免自动完成正常业务渠道创建的 testee 任务；如果某个 task 的 testee 来源查询失败，会跳过该 task。
 
 启动时，每个 plan 会预先加载一次 plan、scale 和 questionnaire 元数据，之后进入连续轮询。
 
@@ -312,6 +315,7 @@ planSubmit:
   planIds:
     - "614333603412718126"
   workers: 1
+  completionPercent: 50
   idleInterval: "30s"
   activeInterval: "5s"
 ```

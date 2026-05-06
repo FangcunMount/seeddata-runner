@@ -27,6 +27,7 @@ const (
 	DefaultPlanSubmitWorkers               = 1
 	DefaultPlanSubmitIdleInterval          = "30s"
 	DefaultPlanSubmitActiveInterval        = "5s"
+	DefaultPlanSubmitCompletionPercent     = 100
 )
 
 // Config 定义整个种子数据配置结构
@@ -181,10 +182,11 @@ type DailySimulationJourneyMixConfig struct {
 }
 
 type PlanSubmitConfig struct {
-	PlanIDs        []FlexibleID `yaml:"planIds"`
-	Workers        int          `yaml:"workers"`
-	IdleInterval   string       `yaml:"idleInterval"`
-	ActiveInterval string       `yaml:"activeInterval"`
+	PlanIDs           []FlexibleID `yaml:"planIds"`
+	Workers           int          `yaml:"workers"`
+	CompletionPercent *int         `yaml:"completionPercent"`
+	IdleInterval      string       `yaml:"idleInterval"`
+	ActiveInterval    string       `yaml:"activeInterval"`
 }
 
 func Load(filepath string) (*Config, error) {
@@ -458,6 +460,7 @@ func normalizeDailySimulationCodes(codes []string) []string {
 func (cfg PlanSubmitConfig) IsZero() bool {
 	return len(cfg.PlanIDs) == 0 &&
 		cfg.Workers == 0 &&
+		cfg.CompletionPercent == nil &&
 		strings.TrimSpace(cfg.IdleInterval) == "" &&
 		strings.TrimSpace(cfg.ActiveInterval) == ""
 }
@@ -469,6 +472,10 @@ func (cfg *PlanSubmitConfig) Normalize() {
 	cfg.PlanIDs = normalizeFlexibleIDs(cfg.PlanIDs)
 	if cfg.Workers <= 0 {
 		cfg.Workers = DefaultPlanSubmitWorkers
+	}
+	if cfg.CompletionPercent == nil {
+		value := DefaultPlanSubmitCompletionPercent
+		cfg.CompletionPercent = &value
 	}
 	cfg.IdleInterval = strings.TrimSpace(cfg.IdleInterval)
 	if cfg.IdleInterval == "" {
@@ -486,6 +493,12 @@ func (cfg PlanSubmitConfig) Validate() error {
 	}
 	if cfg.Workers <= 0 {
 		return fmt.Errorf("planSubmit.workers must be positive")
+	}
+	if cfg.CompletionPercent == nil {
+		return fmt.Errorf("planSubmit.completionPercent is required")
+	}
+	if *cfg.CompletionPercent < 0 || *cfg.CompletionPercent > 100 {
+		return fmt.Errorf("planSubmit.completionPercent must be between 0 and 100")
 	}
 	idleInterval, err := scheduler.ParseRelativeDuration(cfg.IdleInterval)
 	if err != nil {

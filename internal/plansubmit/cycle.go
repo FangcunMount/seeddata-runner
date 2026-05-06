@@ -1,6 +1,9 @@
 package plansubmit
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type planTaskSubmitCycle struct {
 	gateway              planTaskSubmitGateway
@@ -10,6 +13,8 @@ type planTaskSubmitCycle struct {
 	questionnaireVersion string
 	detail               *QuestionnaireDetailResponse
 	workers              int
+	completionPercent    int
+	testeeSource         string
 	tracker              *recentPlanTaskTracker
 	verbose              bool
 }
@@ -22,6 +27,8 @@ func newPlanTaskSubmitCycle(
 	questionnaireVersion string,
 	detail *QuestionnaireDetailResponse,
 	workers int,
+	completionPercent int,
+	testeeSource string,
 	tracker *recentPlanTaskTracker,
 	verbose bool,
 ) planTaskSubmitCycle {
@@ -33,6 +40,8 @@ func newPlanTaskSubmitCycle(
 		questionnaireVersion: questionnaireVersion,
 		detail:               detail,
 		workers:              workers,
+		completionPercent:    completionPercent,
+		testeeSource:         testeeSource,
 		tracker:              tracker,
 		verbose:              verbose,
 	}
@@ -68,5 +77,5 @@ func (c planTaskSubmitCycle) Execute(ctx context.Context) (*planOpenTaskSubmitSt
 }
 
 func (c planTaskSubmitCycle) listJobs(ctx context.Context) ([]planTaskJob, error) {
-	return listOpenPlanTaskJobs(ctx, c.gateway, c.logger, c.planID, c.verbose)
+	return listDailyPlanTaskJobs(ctx, c.gateway, c.logger, c.planID, c.completionPercent, c.testeeSource, time.Now(), c.verbose)
 }

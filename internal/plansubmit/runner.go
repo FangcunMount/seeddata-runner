@@ -62,6 +62,8 @@ func (r planTaskSubmitRunner) runCycle(
 		r.scaleResp.QuestionnaireVersion,
 		r.detail,
 		opts.Workers,
+		opts.CompletionPercent,
+		opts.TesteeSource,
 		r.tracker,
 		opts.Verbose,
 	)
@@ -80,6 +82,8 @@ func (r planTaskSubmitRunner) logStarted(
 		"questionnaire_code", r.scaleResp.QuestionnaireCode,
 		"questionnaire_version", r.scaleResp.QuestionnaireVersion,
 		"workers", opts.Workers,
+		"completion_percent", opts.CompletionPercent,
+		"testee_source", opts.TesteeSource,
 		"continuous", opts.Continuous,
 		"idle_interval", stateMachine.IdleInterval().String(),
 		"active_interval", stateMachine.ActiveInterval().String(),

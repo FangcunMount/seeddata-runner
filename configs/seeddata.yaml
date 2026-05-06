@@ -95,5 +95,6 @@ planSubmit:
     - "614333603412718126"
     - "614187067651404334"
   workers: 1
+  completionPercent: 45 # 每天最多完成当天 seeddata testee task 的百分比；100 表示提交所有当天 seeddata opened task
   idleInterval: "1h"    # 计划提交空闲轮询间隔
   activeInterval: "30m" # 计划提交在发现 opened task 后的下一轮轮询间隔

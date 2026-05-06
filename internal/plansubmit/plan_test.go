@@ -58,12 +58,17 @@ func TestNormalizePlanWorkers(t *testing.T) {
 }
 
 func TestOptionsFromConfigUsesPlanIDs(t *testing.T) {
+	completionPercent := 60
 	cfg := &seedconfig.Config{
+		DailySimulation: seedconfig.DailySimulationConfig{
+			TesteeSource: "daily_simulation",
+		},
 		PlanSubmit: seedconfig.PlanSubmitConfig{
-			PlanIDs:        []seedconfig.FlexibleID{"614333603412718126", "614187067651404334", "614333603412718126"},
-			Workers:        2,
-			IdleInterval:   "45s",
-			ActiveInterval: "10s",
+			PlanIDs:           []seedconfig.FlexibleID{"614333603412718126", "614187067651404334", "614333603412718126"},
+			Workers:           2,
+			CompletionPercent: &completionPercent,
+			IdleInterval:      "45s",
+			ActiveInterval:    "10s",
 		},
 	}
 
@@ -79,6 +84,12 @@ func TestOptionsFromConfigUsesPlanIDs(t *testing.T) {
 	}
 	if opts.Workers != 2 {
 		t.Fatalf("unexpected workers: %d", opts.Workers)
+	}
+	if opts.CompletionPercent != 60 {
+		t.Fatalf("unexpected completion percent: %d", opts.CompletionPercent)
+	}
+	if opts.TesteeSource != "daily_simulation" {
+		t.Fatalf("unexpected testee source: %q", opts.TesteeSource)
 	}
 	if opts.IdleInterval != 45*time.Second {
 		t.Fatalf("unexpected idle interval: %s", opts.IdleInterval)
@@ -545,6 +556,9 @@ func TestRecentPlanTaskTrackerHonorsTTL(t *testing.T) {
 
 type pagedPlanTaskSubmitGatewayStub struct {
 	taskLists           map[string][]TaskResponse
+	testeeSources       map[string]string
+	testeeLookupErrors  map[string]error
+	getTesteeByIDCalls  []string
 	listTaskWindowCalls []ListPlanTaskWindowRequest
 }
 
@@ -564,6 +578,21 @@ func (s *pagedPlanTaskSubmitGatewayStub) GetQuestionnaireDetail(ctx context.Cont
 	return nil, nil
 }
 
+func (s *pagedPlanTaskSubmitGatewayStub) GetTesteeByID(ctx context.Context, testeeID string) (*ApiserverTesteeResponse, error) {
+	testeeID = strings.TrimSpace(testeeID)
+	s.getTesteeByIDCalls = append(s.getTesteeByIDCalls, testeeID)
+	if s.testeeLookupErrors != nil {
+		if err := s.testeeLookupErrors[testeeID]; err != nil {
+			return nil, err
+		}
+	}
+	source := "daily_simulation"
+	if s.testeeSources != nil {
+		source = s.testeeSources[testeeID]
+	}
+	return &ApiserverTesteeResponse{ID: testeeID, Source: source}, nil
+}
+
 func (s *pagedPlanTaskSubmitGatewayStub) ListPlanTaskWindow(ctx context.Context, req ListPlanTaskWindowRequest) (*PlanTaskWindowResponse, error) {
 	s.listTaskWindowCalls = append(s.listTaskWindowCalls, req)
 	return buildStubTaskWindowResponse(s.taskLists, req), nil
@@ -579,6 +608,10 @@ func (s *planTaskSubmitGatewayStubWithError) GetScale(ctx context.Context, code 
 
 func (s *planTaskSubmitGatewayStubWithError) GetQuestionnaireDetail(ctx context.Context, code string) (*QuestionnaireDetailResponse, error) {
 	return nil, nil
+}
+
+func (s *planTaskSubmitGatewayStubWithError) GetTesteeByID(ctx context.Context, testeeID string) (*ApiserverTesteeResponse, error) {
+	return nil, s.err
 }
 
 func (s *planTaskSubmitGatewayStubWithError) ListPlanTaskWindow(ctx context.Context, req ListPlanTaskWindowRequest) (*PlanTaskWindowResponse, error) {
@@ -603,6 +636,9 @@ func buildStubTaskWindowResponse(taskLists map[string][]TaskResponse, req ListPl
 				continue
 			}
 			if status := normalizeTaskStatus(req.Status); status != "" && normalizeTaskStatus(task.Status) != status {
+				continue
+			}
+			if strings.TrimSpace(req.PlannedBefore) != "" && strings.TrimSpace(task.PlannedAt) > strings.TrimSpace(req.PlannedBefore) {
 				continue
 			}
 			allTasks = append(allTasks, task)
@@ -685,15 +721,146 @@ func TestListOpenPlanTaskJobsUsesPagedOpenedTasks(t *testing.T) {
 	}
 }
 
-func TestRunPlanSubmitOpenTasksCycleSubmitsOnlyFreshOpenedTasks(t *testing.T) {
+func TestListDailyPlanTaskJobsRespectsCompletionPercentQuota(t *testing.T) {
 	planID := "614333603412718126"
+	now := time.Date(2026, 5, 6, 12, 0, 0, 0, time.Local)
 	gateway := &pagedPlanTaskSubmitGatewayStub{
 		taskLists: map[string][]TaskResponse{
 			"1001": {
-				{ID: "2001", PlanID: planID, TesteeID: "1001", Seq: 1, Status: "opened"},
+				{ID: "2001", PlanID: planID, TesteeID: "1001", Seq: 1, Status: "completed", PlannedAt: "2026-05-06 09:00:00"},
 			},
 			"1002": {
-				{ID: "2002", PlanID: planID, TesteeID: "1002", Seq: 1, Status: "opened"},
+				{ID: "2002", PlanID: planID, TesteeID: "1002", Seq: 2, Status: "opened", PlannedAt: "2026-05-06 10:00:00"},
+			},
+			"1003": {
+				{ID: "2003", PlanID: planID, TesteeID: "1003", Seq: 3, Status: "opened", PlannedAt: "2026-05-06 11:00:00"},
+			},
+			"1004": {
+				{ID: "2004", PlanID: planID, TesteeID: "1004", Seq: 4, Status: "opened", PlannedAt: "2026-05-07 09:00:00"},
+			},
+		},
+	}
+
+	jobs, err := listDailyPlanTaskJobs(context.Background(), gateway, newSeeddataLogger(false), planID, 50, "daily_simulation", now, false)
+	if err != nil {
+		t.Fatalf("unexpected list error: %v", err)
+	}
+	if len(gateway.listTaskWindowCalls) != 1 {
+		t.Fatalf("expected one task-window call, got %d", len(gateway.listTaskWindowCalls))
+	}
+	if got := gateway.listTaskWindowCalls[0].PlannedBefore; got != "2026-05-06 23:59:59" {
+		t.Fatalf("unexpected planned_before: %q", got)
+	}
+	if got := gateway.listTaskWindowCalls[0].Status; got != "" {
+		t.Fatalf("expected all task statuses to be listed, got %q", got)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected one opened job after quota, got %d", len(jobs))
+	}
+	if jobs[0].task.ID != "2002" {
+		t.Fatalf("expected earliest opened task 2002, got %s", jobs[0].task.ID)
+	}
+}
+
+func TestListDailyPlanTaskJobsSkipsWhenDailyTargetAlreadyMet(t *testing.T) {
+	planID := "614333603412718126"
+	now := time.Date(2026, 5, 6, 12, 0, 0, 0, time.Local)
+	gateway := &pagedPlanTaskSubmitGatewayStub{
+		taskLists: map[string][]TaskResponse{
+			"1001": {
+				{ID: "2001", PlanID: planID, TesteeID: "1001", Seq: 1, Status: "completed", PlannedAt: "2026-05-06 09:00:00"},
+			},
+			"1002": {
+				{ID: "2002", PlanID: planID, TesteeID: "1002", Seq: 2, Status: "opened", PlannedAt: "2026-05-06 10:00:00"},
+			},
+		},
+	}
+
+	jobs, err := listDailyPlanTaskJobs(context.Background(), gateway, newSeeddataLogger(false), planID, 50, "daily_simulation", now, false)
+	if err != nil {
+		t.Fatalf("unexpected list error: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("expected no jobs after target is met, got %d", len(jobs))
+	}
+}
+
+func TestListDailyPlanTaskJobsOnlyIncludesSeeddataTestees(t *testing.T) {
+	planID := "614333603412718126"
+	now := time.Date(2026, 5, 6, 12, 0, 0, 0, time.Local)
+	gateway := &pagedPlanTaskSubmitGatewayStub{
+		taskLists: map[string][]TaskResponse{
+			"1001": {
+				{ID: "2001", PlanID: planID, TesteeID: "1001", Seq: 1, Status: "opened", PlannedAt: "2026-05-06 09:00:00"},
+			},
+			"1002": {
+				{ID: "2002", PlanID: planID, TesteeID: "1002", Seq: 2, Status: "opened", PlannedAt: "2026-05-06 10:00:00"},
+			},
+			"1003": {
+				{ID: "2003", PlanID: planID, TesteeID: "1003", Seq: 3, Status: "opened", PlannedAt: "2026-05-06 11:00:00"},
+			},
+		},
+		testeeSources: map[string]string{
+			"1001": "daily_simulation",
+			"1002": "manual",
+			"1003": "daily_simulation",
+		},
+	}
+
+	jobs, err := listDailyPlanTaskJobs(context.Background(), gateway, newSeeddataLogger(false), planID, 100, "daily_simulation", now, false)
+	if err != nil {
+		t.Fatalf("unexpected list error: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("expected two seeddata jobs, got %d", len(jobs))
+	}
+	if jobs[0].task.ID != "2001" || jobs[1].task.ID != "2003" {
+		t.Fatalf("unexpected seeddata task ids: %s, %s", jobs[0].task.ID, jobs[1].task.ID)
+	}
+}
+
+func TestListDailyPlanTaskJobsSkipsUnverifiedTesteeSource(t *testing.T) {
+	planID := "614333603412718126"
+	now := time.Date(2026, 5, 6, 12, 0, 0, 0, time.Local)
+	gateway := &pagedPlanTaskSubmitGatewayStub{
+		taskLists: map[string][]TaskResponse{
+			"1001": {
+				{ID: "2001", PlanID: planID, TesteeID: "1001", Seq: 1, Status: "opened", PlannedAt: "2026-05-06 09:00:00"},
+			},
+			"1002": {
+				{ID: "2002", PlanID: planID, TesteeID: "1002", Seq: 2, Status: "opened", PlannedAt: "2026-05-06 10:00:00"},
+			},
+		},
+		testeeSources: map[string]string{
+			"1002": "daily_simulation",
+		},
+		testeeLookupErrors: map[string]error{
+			"1001": errors.New("lookup failed"),
+		},
+	}
+
+	jobs, err := listDailyPlanTaskJobs(context.Background(), gateway, newSeeddataLogger(false), planID, 100, "daily_simulation", now, false)
+	if err != nil {
+		t.Fatalf("unexpected list error: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected only verified seeddata job, got %d", len(jobs))
+	}
+	if jobs[0].task.ID != "2002" {
+		t.Fatalf("expected task_id=2002, got %s", jobs[0].task.ID)
+	}
+}
+
+func TestRunPlanSubmitOpenTasksCycleSubmitsOnlyFreshOpenedTasks(t *testing.T) {
+	planID := "614333603412718126"
+	plannedAt := time.Now().Format("2006-01-02 15:04:05")
+	gateway := &pagedPlanTaskSubmitGatewayStub{
+		taskLists: map[string][]TaskResponse{
+			"1001": {
+				{ID: "2001", PlanID: planID, TesteeID: "1001", Seq: 1, Status: "opened", PlannedAt: plannedAt},
+			},
+			"1002": {
+				{ID: "2002", PlanID: planID, TesteeID: "1002", Seq: 1, Status: "opened", PlannedAt: plannedAt},
 			},
 		},
 	}
@@ -725,6 +892,8 @@ func TestRunPlanSubmitOpenTasksCycleSubmitsOnlyFreshOpenedTasks(t *testing.T) {
 		"1.0.0",
 		detail,
 		2,
+		100,
+		"daily_simulation",
 		tracker,
 		false,
 	)
@@ -764,6 +933,8 @@ func TestPlanTaskSubmitCycleRecordsListLoadFailure(t *testing.T) {
 		"1.0.0",
 		&QuestionnaireDetailResponse{Code: "QNR-001", Version: "1.0.0"},
 		1,
+		100,
+		"daily_simulation",
 		nil,
 		false,
 	)

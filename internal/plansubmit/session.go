@@ -11,6 +11,7 @@ type planTaskSubmitGateway interface {
 	GetPlan(ctx context.Context, planID string) (*PlanResponse, error)
 	GetScale(ctx context.Context, code string) (*ScaleResponse, error)
 	GetQuestionnaireDetail(ctx context.Context, code string) (*QuestionnaireDetailResponse, error)
+	GetTesteeByID(ctx context.Context, testeeID string) (*ApiserverTesteeResponse, error)
 	ListPlanTaskWindow(ctx context.Context, req ListPlanTaskWindowRequest) (*PlanTaskWindowResponse, error)
 }
 
@@ -43,6 +44,11 @@ func (g *apiPlanTaskSubmitGateway) GetScale(ctx context.Context, code string) (*
 // GetQuestionnaireDetail 获取问卷详情
 func (g *apiPlanTaskSubmitGateway) GetQuestionnaireDetail(ctx context.Context, code string) (*QuestionnaireDetailResponse, error) {
 	return g.client.GetQuestionnaireDetail(ctx, code)
+}
+
+// GetTesteeByID 获取受试者详情
+func (g *apiPlanTaskSubmitGateway) GetTesteeByID(ctx context.Context, testeeID string) (*ApiserverTesteeResponse, error) {
+	return g.client.GetTesteeByID(ctx, testeeID)
 }
 
 // ListPlanTaskWindow 查询任务窗口
