@@ -36,11 +36,11 @@ func TestEnsureIAMMockConsumerSendsSharedSecretAndDecodesResponse(t *testing.T) 
 			Code:    0,
 			Message: "success",
 			Data: EnsureIAMMockConsumerResponse{
-				UserID:       "1001",
-				AccountID:    "2002",
-				LoginID:      "guardian@example.com",
-				IsNewUser:    true,
-				IsNewAccount: true,
+				UserID:          "1001",
+				LoginIdentityID: "2002",
+				LoginID:         "guardian@example.com",
+				IsNewUser:       true,
+				IsNewIdentity:   true,
 			},
 		})
 	}))
@@ -56,7 +56,7 @@ func TestEnsureIAMMockConsumerSendsSharedSecretAndDecodesResponse(t *testing.T) 
 	if err != nil {
 		t.Fatalf("EnsureIAMMockConsumer returned error: %v", err)
 	}
-	if resp.UserID != "1001" || resp.AccountID != "2002" {
+	if resp.UserID != "1001" || resp.LoginIdentityID != "2002" {
 		t.Fatalf("unexpected response: %#v", resp)
 	}
 }

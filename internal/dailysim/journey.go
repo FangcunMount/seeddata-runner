@@ -12,11 +12,8 @@ import (
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
-	authnv2 "github.com/FangcunMount/iam/v2/api/grpc/iam/authn/v2"
 	identityv2 "github.com/FangcunMount/iam/v2/api/grpc/iam/identity/v2"
 	sdk "github.com/FangcunMount/iam/v2/pkg/sdk"
-	auth "github.com/FangcunMount/iam/v2/pkg/sdk/auth/client"
-	sdkerrors "github.com/FangcunMount/iam/v2/pkg/sdk/errors"
 	"github.com/FangcunMount/iam/v2/pkg/sdk/identity"
 	toolchain "github.com/FangcunMount/seeddata-runner/internal/chain"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
@@ -48,7 +45,6 @@ var (
 type dailySimulationIAMBundle struct {
 	client   *sdk.Client
 	identity *identity.Client
-	auth     *auth.Client
 }
 
 type dailySimulationResolvedTarget struct {
@@ -1090,7 +1086,6 @@ func newDailySimulationIAMBundle(
 	return &dailySimulationIAMBundle{
 		client:   client,
 		identity: client.Identity(),
-		auth:     client.Auth(),
 	}, nil
 }
 
@@ -1102,9 +1097,12 @@ func ensureDailySimulationGuardianAccount(
 	profile dailySimulationProfile,
 ) (string, string, bool, error) {
 	password := normalizeDailySimulationPassword(cfg.UserPassword)
-	userID, created, err := ensureDailySimulationIAMUser(ctx, iamBundle, profile)
+	userID, err := findDailySimulationIAMUser(ctx, iamBundle, profile.GuardianPhone, profile.GuardianEmail)
 	if err != nil {
 		return "", "", false, err
+	}
+	if strings.TrimSpace(userID) == "" {
+		return "", "", false, fmt.Errorf("daily_simulation guardian provisioning requires iam.mockConsumer.enabled=true with IAM v2; IAM AuthN gRPC no longer exposes password account onboarding")
 	}
 
 	loginURL, err := resolveDailySimulationIAMLoginURL(deps.Config.IAM)
@@ -1116,26 +1114,10 @@ func ensureDailySimulationGuardianAccount(
 
 	token, err := tryDailySimulationGuardianLogin(ctx, loginURL, tenantID, deviceID, profile.GuardianEmail, profile.GuardianPhone, password, deps.Logger)
 	if err == nil {
-		return userID, token, created, nil
+		return userID, token, false, nil
 	}
 
-	if _, regErr := iamBundle.auth.CreateOperationAccount(ctx, &authnv2.CreateOperationAccountRequest{
-		ExistingUserId: userID,
-		Name:           profile.GuardianName,
-		Phone:          profile.GuardianPhone,
-		Email:          profile.GuardianEmail,
-		ScopedTenantId: tenantID,
-		OperaLoginId:   profile.GuardianEmail,
-		Password:       password,
-	}); regErr != nil && !sdkerrors.IsAlreadyExists(regErr) {
-		return "", "", false, fmt.Errorf("register guardian account for user %s: %w", userID, regErr)
-	}
-
-	token, err = tryDailySimulationGuardianLogin(ctx, loginURL, tenantID, deviceID, profile.GuardianEmail, profile.GuardianPhone, password, deps.Logger)
-	if err != nil {
-		return "", "", false, fmt.Errorf("login guardian %s after ensuring account: %w", profile.GuardianEmail, err)
-	}
-	return userID, token, created, nil
+	return "", "", false, fmt.Errorf("login existing guardian %s: %w; IAM v2 password onboarding is only available through iam.mockConsumer REST ensure", profile.GuardianEmail, err)
 }
 
 func ensureDailySimulationGuardianMockConsumer(
@@ -1183,42 +1165,6 @@ func ensureDailySimulationGuardianMockConsumer(
 		return "", "", false, fmt.Errorf("login guardian %s after ensuring mock-consumer: %w", profile.GuardianEmail, err)
 	}
 	return strings.TrimSpace(ensureResp.UserID), token, ensureResp.IsNewUser, nil
-}
-
-func ensureDailySimulationIAMUser(
-	ctx context.Context,
-	iamBundle *dailySimulationIAMBundle,
-	profile dailySimulationProfile,
-) (string, bool, error) {
-	userID, err := findDailySimulationIAMUser(ctx, iamBundle, profile.GuardianPhone, profile.GuardianEmail)
-	if err != nil {
-		return "", false, err
-	}
-	if strings.TrimSpace(userID) != "" {
-		return userID, false, nil
-	}
-
-	resp, err := iamBundle.identity.CreateUser(ctx, &identityv2.CreateUserRequest{
-		Nickname: profile.GuardianName,
-		Phone:    profile.GuardianPhone,
-		Email:    profile.GuardianEmail,
-	})
-	if err != nil {
-		if sdkerrors.IsAlreadyExists(err) {
-			userID, lookupErr := findDailySimulationIAMUser(ctx, iamBundle, profile.GuardianPhone, profile.GuardianEmail)
-			if lookupErr != nil {
-				return "", false, lookupErr
-			}
-			if strings.TrimSpace(userID) != "" {
-				return userID, false, nil
-			}
-		}
-		return "", false, fmt.Errorf("create guardian iam user %s: %w", profile.GuardianEmail, err)
-	}
-	if resp == nil || resp.GetUser() == nil || strings.TrimSpace(resp.GetUser().GetId()) == "" {
-		return "", false, fmt.Errorf("create guardian iam user returned empty id")
-	}
-	return strings.TrimSpace(resp.GetUser().GetId()), true, nil
 }
 
 func findDailySimulationIAMUser(

@@ -182,7 +182,7 @@ sudo systemctl restart seeddata-runner
 
 - `api.baseUrl`：业务 API 地址，必填
 - `api.collectionBaseUrl`：采集/问卷相关 API 地址；为空时会回退到 `api.baseUrl`
-- `iam.*`：当 `api.token` 为空时，用于登录并自动刷新 token
+- `iam.*`：当 `api.token` 为空时，用于登录并自动刷新 token；daily simulation 新建模拟 C 端账号时还会使用 IAM v2 内部 mock-consumer REST ensure
 
 凭据优先级如下：
 
@@ -190,7 +190,7 @@ sudo systemctl restart seeddata-runner
 2. 环境变量 `IAM_USERNAME` / `IAM_PASSWORD`
 3. 配置文件中的 `iam.username` / `iam.password`
 
-如果 daily simulation 需要新建 guardian / child / testee，还要求 `iam.grpc.address` 可用；否则无法走 IAM 侧身份创建流程。
+如果 daily simulation 需要新建 guardian / child / testee，应启用 `iam.mockConsumer` 并配置 shared secret。IAM v2 已不再通过 AuthN gRPC 暴露 password account onboarding；未启用 mock-consumer 时仅能复用已经存在且可密码登录的 IAM 用户。
 
 ## 配置总览
 
@@ -200,7 +200,7 @@ sudo systemctl restart seeddata-runner
 | --- | --- |
 | `global` | 默认机构 ID、默认标签前缀 |
 | `api` | 业务 API、采集 API、重试策略、静态 token |
-| `iam` | IAM 登录与 gRPC 配置 |
+| `iam` | IAM 登录、mock-consumer 建号与可选 gRPC 配置 |
 | `dailySimulation` | 每日模拟用户生成策略 |
 | `planSubmit` | opened task 答卷提交策略 |
 
@@ -289,6 +289,11 @@ iam:
   username: ""
   password: ""
   tenantId: "1"
+  mockConsumer:
+    enabled: true
+    sharedSecret: "replace-with-iam-seed-secret"
+    endpointPath: "/api/v2/internal/authn/mock-consumers/ensure"
+    maxConcurrent: 1
   grpc:
     address: "iam-apiserver:9090"
 

@@ -4,7 +4,7 @@ go 1.25.9
 
 require (
 	github.com/FangcunMount/component-base v0.6.1
-	github.com/FangcunMount/iam/v2 v2.0.2
+	github.com/FangcunMount/iam/v2 v2.0.6
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mozillazg/go-pinyin v0.21.0
 	golang.org/x/sync v0.19.0

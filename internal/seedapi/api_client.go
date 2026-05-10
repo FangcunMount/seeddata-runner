@@ -915,11 +915,11 @@ type EnsureIAMMockConsumerRequest struct {
 }
 
 type EnsureIAMMockConsumerResponse struct {
-	UserID       string `json:"user_id"`
-	AccountID    string `json:"account_id"`
-	LoginID      string `json:"login_id"`
-	IsNewUser    bool   `json:"is_new_user"`
-	IsNewAccount bool   `json:"is_new_account"`
+	UserID          string `json:"user_id"`
+	LoginIdentityID string `json:"login_identity_id"`
+	LoginID         string `json:"login_id"`
+	IsNewUser       bool   `json:"is_new_user"`
+	IsNewIdentity   bool   `json:"is_new_identity"`
 }
 
 // CollectionCreateTesteeRequest 创建 collection 受试者请求。
