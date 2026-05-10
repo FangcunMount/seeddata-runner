@@ -1,6 +1,12 @@
 package seedapi
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 func TestDecodeResponseDataAssessmentEntryListSupportsFormattedTime(t *testing.T) {
 	resp := &Response{
@@ -54,5 +60,23 @@ func TestDecodeResponseDataRejectsInvalidFlexibleTime(t *testing.T) {
 	var result ApiserverTesteeResponse
 	if err := decodeResponseData(resp, &result); err == nil {
 		t.Fatal("expected decodeResponseData to fail for invalid created_at")
+	}
+}
+
+func TestDoRequestUnauthorizedIncludesErrorField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"token audience is invalid"}`))
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "bad-token", nil)
+	_, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/testees", nil)
+	if err == nil {
+		t.Fatal("expected unauthorized error")
+	}
+	if !strings.Contains(err.Error(), "token audience is invalid") {
+		t.Fatalf("expected error field in message, got %v", err)
 	}
 }

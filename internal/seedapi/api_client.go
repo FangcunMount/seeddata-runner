@@ -413,6 +413,34 @@ type Response struct {
 	Data    interface{} `json:"data"`
 }
 
+func responseErrorMessage(body []byte) string {
+	var apiResp Response
+	if err := json.Unmarshal(body, &apiResp); err == nil {
+		if message := strings.TrimSpace(apiResp.Message); message != "" {
+			return message
+		}
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err == nil {
+		for _, key := range []string{"message", "error", "detail"} {
+			if message := readStringField(raw, key); message != "" {
+				return message
+			}
+		}
+	}
+
+	return truncateResponseBody(body, 300)
+}
+
+func truncateResponseBody(body []byte, limit int) string {
+	value := strings.TrimSpace(string(body))
+	if limit > 0 && len(value) > limit {
+		return value[:limit] + "..."
+	}
+	return value
+}
+
 // ScaleResponse 量表响应
 type ScaleResponse struct {
 	Code                 string `json:"code"`
@@ -1088,21 +1116,12 @@ func (c *APIClient) doRequestWithHeadersRetryTimeoutAndLimit(
 		}
 
 		if resp.StatusCode == http.StatusUnauthorized {
-			var apiResp Response
-			if err := json.Unmarshal(respBody, &apiResp); err == nil {
-				if allowRefresh && c.refresher != nil {
-					if err := c.refreshToken(ctx); err == nil {
-						return c.doRequestWithHeadersRetryTimeoutAndLimit(ctx, method, path, body, headers, false, timeout, retryMax)
-					}
-				}
-				return nil, fmt.Errorf("authentication failed (401): please check your API token. message=%s", apiResp.Message)
-			}
 			if allowRefresh && c.refresher != nil {
 				if err := c.refreshToken(ctx); err == nil {
 					return c.doRequestWithHeadersRetryTimeoutAndLimit(ctx, method, path, body, headers, false, timeout, retryMax)
 				}
 			}
-			return nil, fmt.Errorf("authentication failed (401): please check your API token. url=%s", url)
+			return nil, fmt.Errorf("authentication failed (401): please check your API token. message=%s", responseErrorMessage(respBody))
 		}
 
 		if isRetryableStatus(resp.StatusCode) && attempt < retryMax {

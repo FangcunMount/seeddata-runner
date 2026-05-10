@@ -2,6 +2,7 @@ package seediauth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -77,8 +78,35 @@ func TestResolveLoginURLDefaultsToAPIV2(t *testing.T) {
 	}
 }
 
+func TestParseSeedTokenIdentityReadsIssuerAndAudience(t *testing.T) {
+	token := unsignedJWT(t, map[string]any{
+		"sub":       "subject-1",
+		"user_id":   "1001",
+		"tenant_id": "1",
+		"iss":       "https://iam.fangcunmount.cn",
+		"aud":       []string{"qs-api", "collection-api"},
+	})
+
+	identity := parseSeedTokenIdentity(token)
+	if identity.Issuer != "https://iam.fangcunmount.cn" {
+		t.Fatalf("unexpected issuer: %q", identity.Issuer)
+	}
+	if got, want := identity.Audience, []string{"qs-api", "collection-api"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("unexpected audience: %#v", got)
+	}
+}
+
 func intPtr(value int) *int {
 	return &value
+}
+
+func unsignedJWT(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal token payload: %v", err)
+	}
+	return "e30." + base64.RawURLEncoding.EncodeToString(data) + ".sig"
 }
 
 func mustRawMessage(t *testing.T, value any) json.RawMessage {

@@ -141,6 +141,8 @@ func FetchTokenFromIAMWithPassword(
 		"user_id", identity.UserID,
 		"account_id", identity.AccountID,
 		"tenant_id", identity.TenantID,
+		"issuer", identity.Issuer,
+		"audience", identity.Audience,
 		"expires_at", identity.ExpiresAt,
 	)
 
@@ -189,6 +191,8 @@ type seedTokenIdentity struct {
 	UserID    string
 	AccountID string
 	TenantID  string
+	Issuer    string
+	Audience  []string
 	ExpiresAt time.Time
 }
 
@@ -214,6 +218,8 @@ func parseSeedTokenIdentity(token string) seedTokenIdentity {
 		UserID:    readStringField(claims, "user_id"),
 		AccountID: readStringField(claims, "account_id"),
 		TenantID:  readStringField(claims, "tenant_id"),
+		Issuer:    readStringField(claims, "iss"),
+		Audience:  readStringSliceField(claims, "aud"),
 		ExpiresAt: readUnixTimeField(claims, "exp"),
 	}
 }
@@ -277,6 +283,44 @@ func readStringField(data map[string]interface{}, key string) string {
 		}
 	}
 	return ""
+}
+
+func readStringSliceField(data map[string]interface{}, key string) []string {
+	value, ok := data[key]
+	if !ok || value == nil {
+		return nil
+	}
+	switch v := value.(type) {
+	case string:
+		if str := strings.TrimSpace(v); str != "" {
+			return []string{str}
+		}
+	case []interface{}:
+		items := make([]string, 0, len(v))
+		for _, item := range v {
+			str, ok := item.(string)
+			if !ok {
+				continue
+			}
+			if str = strings.TrimSpace(str); str != "" {
+				items = append(items, str)
+			}
+		}
+		if len(items) > 0 {
+			return items
+		}
+	case []string:
+		items := make([]string, 0, len(v))
+		for _, item := range v {
+			if item = strings.TrimSpace(item); item != "" {
+				items = append(items, item)
+			}
+		}
+		if len(items) > 0 {
+			return items
+		}
+	}
+	return nil
 }
 
 func readUnixTimeField(data map[string]interface{}, key string) time.Time {
