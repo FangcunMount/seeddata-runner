@@ -1044,7 +1044,10 @@ func ensureDailySimulationGuardianMockConsumer(
 	if err != nil {
 		return "", "", false, err
 	}
-	tenantID := resolveDailySimulationTenantID(deps.Config.IAM, deps.Config.Global.OrgID)
+	// IAM mock-consumer onboarding creates a username identity in the default
+	// realm. Password login must therefore omit tenant_id; IAM will default the
+	// principal tenant before issuing the token.
+	tenantID := ""
 	deviceID := fmt.Sprintf("%s-%s-%03d", dailySimulationDeviceIDPrefix, profile.RunDate.Format("20060102"), profile.Index+1)
 
 	token, err := tryDailySimulationGuardianLoginWithRetry(ctx, loginURL, tenantID, deviceID, profile.GuardianEmail, profile.GuardianPhone, password, deps.Logger)
@@ -1089,8 +1092,11 @@ func tryDailySimulationGuardianLogin(
 			continue
 		}
 		token, err := fetchTokenFromIAMWithPassword(ctx, loginURL, username, password, tenantID, deviceID, logger)
-		if err == nil {
+		if err == nil && strings.TrimSpace(token) != "" {
 			return token, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("iam login returned empty token for username %s", username)
 		}
 		lastErr = err
 	}

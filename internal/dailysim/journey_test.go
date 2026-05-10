@@ -2,9 +2,11 @@ package dailysim
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -200,6 +202,84 @@ func TestEnsureDailySimulationTesteeNormalizesLegacyGuardianRelation(t *testing.
 	}
 }
 
+func TestEnsureDailySimulationGuardianMockConsumerLoginOmitsTenantID(t *testing.T) {
+	var capturedLogin map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v2/internal/authn/mock-consumers/ensure":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code":    0,
+				"message": "success",
+				"data": EnsureIAMMockConsumerResponse{
+					UserID:          "1001",
+					LoginIdentityID: "2001",
+					LoginID:         "guardian@example.com",
+					IsNewUser:       true,
+					IsNewIdentity:   true,
+				},
+			})
+		case "/api/v2/authn/login":
+			if err := json.NewDecoder(r.Body).Decode(&capturedLogin); err != nil {
+				t.Fatalf("decode login request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code":    0,
+				"message": "success",
+				"data": map[string]any{
+					"access_token": unsignedDailySimulationJWT(t, map[string]any{
+						"sub":       "1001",
+						"user_id":   "1001",
+						"tenant_id": "1",
+						"aud":       []string{"qs-api", "collection-api"},
+					}),
+					"token_type": "Bearer",
+					"expires_in": 900,
+				},
+			})
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	userID, token, created, err := ensureDailySimulationGuardianMockConsumer(context.Background(), &dependencies{
+		Logger: log.New(log.NewOptions()),
+		Config: &seedconfig.Config{
+			Global: seedconfig.GlobalConfig{OrgID: 1},
+			IAM: seedconfig.IAMConfig{
+				BaseURL:  server.URL,
+				LoginURL: server.URL + "/api/v2/authn/login",
+				TenantID: "1",
+				MockConsumer: seedconfig.IAMMockConsumerConfig{
+					Enabled:      true,
+					SharedSecret: "secret",
+					EndpointPath: "/api/v2/internal/authn/mock-consumers/ensure",
+				},
+			},
+		},
+	}, DailySimulationConfig{UserPassword: "DailySim@123"}, dailySimulationProfile{
+		GuardianName:  "Guardian",
+		GuardianEmail: "guardian@example.com",
+		GuardianPhone: "+8619900000001",
+		RunDate:       time.Date(2026, 5, 10, 0, 0, 0, 0, time.Local),
+	})
+	if err != nil {
+		t.Fatalf("ensure guardian mock consumer: %v", err)
+	}
+	if userID != "1001" || strings.TrimSpace(token) == "" || !created {
+		t.Fatalf("unexpected result: userID=%q token=%q created=%v", userID, token, created)
+	}
+
+	payload, ok := capturedLogin["method_payload"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected method_payload object, got %#v", capturedLogin["method_payload"])
+	}
+	if _, ok := payload["tenant_id"]; ok {
+		t.Fatalf("mock consumer login must omit tenant_id, got payload=%#v", payload)
+	}
+}
+
 func TestBuildDailySimulationAssessmentEntryRelationRequest(t *testing.T) {
 	req, err := buildDailySimulationAssessmentEntryRelationRequest(&dailySimulationJourneyState{
 		deps: &dependencies{
@@ -220,6 +300,15 @@ func TestBuildDailySimulationAssessmentEntryRelationRequest(t *testing.T) {
 	if req.SourceType != "assessment_entry" || req.SourceID == nil || *req.SourceID != 6151 {
 		t.Fatalf("unexpected relation source: %+v", req)
 	}
+}
+
+func unsignedDailySimulationJWT(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal token payload: %v", err)
+	}
+	return "e30." + base64.RawURLEncoding.EncodeToString(data) + ".sig"
 }
 
 func TestResolveDailySimulationCanonicalTesteeIDUsesCurrentTesteeID(t *testing.T) {
