@@ -79,4 +79,23 @@ func TestDoRequestUnauthorizedIncludesErrorField(t *testing.T) {
 	if !strings.Contains(err.Error(), "token audience is invalid") {
 		t.Fatalf("expected error field in message, got %v", err)
 	}
+	if !strings.Contains(err.Error(), "auth_token_present=true") {
+		t.Fatalf("expected auth token presence in message, got %v", err)
+	}
+}
+
+func TestDoRequestSendsBearerAuthorizationHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer token-1" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"message":"success","data":{}}`))
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "token-1", nil)
+	if _, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/testees", nil); err != nil {
+		t.Fatalf("doRequest returned error: %v", err)
+	}
 }

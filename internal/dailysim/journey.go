@@ -347,6 +347,10 @@ func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *daily
 	state.guardianToken = guardianToken
 	state.outcome.UserCreated = userCreated
 
+	if strings.TrimSpace(guardianToken) == "" {
+		return toolchain.Decision{}, fmt.Errorf("daily simulation guardian token is empty")
+	}
+
 	state.collectionClient = NewAPIClient(state.deps.CollectionClient.BaseURL(), guardianToken, state.deps.Logger)
 	state.collectionClient.SetRetryConfig(state.deps.Config.API.Retry)
 	return state.nextDecision(dailySimulationJourneyStageGuardianAccount), nil

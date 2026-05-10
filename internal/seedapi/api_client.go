@@ -1063,8 +1063,9 @@ func (c *APIClient) doRequestWithHeadersRetryTimeoutAndLimit(
 		}
 
 		req.Header.Set("Content-Type", "application/json")
-		if token := c.getToken(); token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
+		authToken := c.getToken()
+		if authToken != "" {
+			req.Header.Set("Authorization", "Bearer "+authToken)
 		}
 		for key, value := range headers {
 			if strings.TrimSpace(key) == "" {
@@ -1121,7 +1122,13 @@ func (c *APIClient) doRequestWithHeadersRetryTimeoutAndLimit(
 					return c.doRequestWithHeadersRetryTimeoutAndLimit(ctx, method, path, body, headers, false, timeout, retryMax)
 				}
 			}
-			return nil, fmt.Errorf("authentication failed (401): please check your API token. message=%s", responseErrorMessage(respBody))
+			return nil, fmt.Errorf(
+				"authentication failed (401): please check your API token. auth_token_present=%t token_length=%d url=%s message=%s",
+				strings.TrimSpace(authToken) != "",
+				len(strings.TrimSpace(authToken)),
+				url,
+				responseErrorMessage(respBody),
+			)
 		}
 
 		if isRetryableStatus(resp.StatusCode) && attempt < retryMax {
