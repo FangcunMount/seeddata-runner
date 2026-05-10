@@ -190,7 +190,7 @@ sudo systemctl restart seeddata-runner
 2. 环境变量 `IAM_USERNAME` / `IAM_PASSWORD`
 3. 配置文件中的 `iam.username` / `iam.password`
 
-如果 daily simulation 需要新建 guardian / child / testee，应启用 `iam.mockConsumer` 并配置 shared secret。IAM v2 已不再通过 AuthN gRPC 暴露 password account onboarding；未启用 mock-consumer 时仅能复用已经存在且可密码登录的 IAM 用户。
+如果 daily simulation 需要新建 guardian / testee，应启用 `iam.mockConsumer` 并配置 shared secret。runner 只通过 IAM 创建或确保 guardian 登录身份；受试者注册交给 qs-server `/api/v1/testees`，不再先注册 IAM profile 再携带 profile_id 注册 testee。
 
 ## 配置总览
 

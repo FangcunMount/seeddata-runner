@@ -22,20 +22,6 @@ func (c *APIClient) CreateCollectionTestee(ctx context.Context, req CollectionCr
 	return &testeeResp, nil
 }
 
-// TesteeExistsByIAMChildID 检查指定 IAM child 是否已经创建 collection testee。
-func (c *APIClient) TesteeExistsByIAMChildID(ctx context.Context, iamChildID string) (*CollectionTesteeExistsResponse, error) {
-	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("/api/v1/testees/exists?iam_child_id=%s", urlQueryEscape(strings.TrimSpace(iamChildID))), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var existsResp CollectionTesteeExistsResponse
-	if err := decodeResponseData(resp, &existsResp); err != nil {
-		return nil, fmt.Errorf("decode testee exists response: %w", err)
-	}
-	return &existsResp, nil
-}
-
 // ListTesteesByOrg 获取受试者列表（apiserver）。
 func (c *APIClient) ListTesteesByOrg(ctx context.Context, orgID int64, page, pageSize int) (*ApiserverTesteeListResponse, error) {
 	path := fmt.Sprintf("/api/v1/testees?org_id=%d&page=%d&page_size=%d", orgID, page, pageSize)
@@ -99,62 +85,9 @@ func (c *APIClient) listTesteesByOrgPath(ctx context.Context, path string, orgID
 	return &listResp, nil
 }
 
-// GetTesteeByProfileID 根据 profile_id 获取受试者详情（apiserver）。
-func (c *APIClient) GetTesteeByProfileID(ctx context.Context, orgID int64, profileID string) (*ApiserverTesteeResponse, error) {
-	path := fmt.Sprintf(
-		"/api/v1/testees/by-profile-id?org_id=%d&profile_id=%s",
-		orgID,
-		urlQueryEscape(strings.TrimSpace(profileID)),
-	)
-	resp, err := c.doRequest(ctx, "GET", path, nil)
-	if err != nil {
-		return nil, fmt.Errorf("get testee by profile_id: org_id=%d profile_id=%s: %w", orgID, strings.TrimSpace(profileID), err)
-	}
-
-	dataBytes, err := json.Marshal(resp.Data)
-	if err != nil {
-		return nil, fmt.Errorf("marshal response data: %w", err)
-	}
-
-	var testeeResp ApiserverTesteeResponse
-	if err := json.Unmarshal(dataBytes, &testeeResp); err != nil {
-		return nil, fmt.Errorf("unmarshal testee-by-profile response: %w", err)
-	}
-	return &testeeResp, nil
-}
-
-// ListIAMMyChildren 获取当前 IAM 用户名下儿童档案。
-func (c *APIClient) ListIAMMyChildren(ctx context.Context, limit, offset int) (*IAMChildPageResponse, error) {
-	path := fmt.Sprintf("/api/v2/identity/me/profiles?limit=%d&offset=%d", limit, offset)
-	resp, err := c.doRequest(ctx, "GET", path, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var listResp IAMChildPageResponse
-	if err := decodeResponseData(resp, &listResp); err != nil {
-		return nil, fmt.Errorf("decode iam children response: %w", err)
-	}
-	return &listResp, nil
-}
-
-// RegisterIAMChild 创建当前 IAM 用户的儿童档案。
-func (c *APIClient) RegisterIAMChild(ctx context.Context, req IAMChildRegisterRequest) (*IAMChildRegisterResponse, error) {
-	resp, err := c.doRequest(ctx, "POST", "/api/v2/identity/profiles", req)
-	if err != nil {
-		return nil, err
-	}
-
-	var registerResp IAMChildRegisterResponse
-	if err := decodeResponseData(resp, &registerResp); err != nil {
-		return nil, fmt.Errorf("decode iam child register response: %w", err)
-	}
-	return &registerResp, nil
-}
-
 // GetTesteeClinicians 获取受试者当前有效的从业者关系（apiserver）。
 func (c *APIClient) GetTesteeClinicians(ctx context.Context, testeeID string) (*TesteeClinicianRelationListResponse, error) {
-	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("/api/v1/testees/%s/clinicians", testeeID), nil)
+	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("/api/v1/testees/%s/clinician-relations", testeeID), nil)
 	if err != nil {
 		return nil, err
 	}

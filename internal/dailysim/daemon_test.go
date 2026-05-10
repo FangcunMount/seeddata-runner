@@ -354,6 +354,7 @@ func TestMatchDailySimulationExistingTesteesByIndex(t *testing.T) {
 			Birthday:  firstBirthday,
 			Tags:      []string{"seed"},
 			Source:    "daily_simulation",
+			Guardians: []GuardianResponse{{Phone: firstProfile.GuardianPhone}},
 			CreatedAt: runDate.Add(2 * time.Hour),
 		},
 		{
@@ -363,6 +364,7 @@ func TestMatchDailySimulationExistingTesteesByIndex(t *testing.T) {
 			Birthday:  secondBirthday,
 			Tags:      []string{"seed"},
 			Source:    "daily_simulation",
+			Guardians: []GuardianResponse{{Phone: secondProfile.GuardianPhone}},
 			CreatedAt: runDate.Add(-2 * time.Hour),
 		},
 		{
@@ -372,6 +374,7 @@ func TestMatchDailySimulationExistingTesteesByIndex(t *testing.T) {
 			Birthday:  secondBirthday,
 			Tags:      []string{"seed"},
 			Source:    "manual",
+			Guardians: []GuardianResponse{{Phone: secondProfile.GuardianPhone}},
 			CreatedAt: runDate.Add(3 * time.Hour),
 		},
 	}
@@ -385,6 +388,63 @@ func TestMatchDailySimulationExistingTesteesByIndex(t *testing.T) {
 	}
 	if got := matched[2]; got != nil {
 		t.Fatalf("expected index 2 to remain unmatched, got %+v", got)
+	}
+}
+
+func TestMatchDailySimulationExistingTesteesByIndexRequiresExpectedGuardian(t *testing.T) {
+	cfg := DailySimulationConfig{
+		TesteeSource: "daily_simulation",
+		TesteeTags:   []string{"seed"},
+	}
+	runDate := time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local)
+	profile := buildDailySimulationProfile(cfg, runDate, 0)
+	birthday, err := parseDailySimulationDOB(profile.ChildDOB)
+	if err != nil {
+		t.Fatalf("parse birthday: %v", err)
+	}
+
+	items := []*ApiserverTesteeResponse{
+		{
+			ID:        "wrong-guardian",
+			Name:      profile.ChildName,
+			Gender:    dailySimulationProfileGender(profile.ChildGender),
+			Birthday:  birthday,
+			Tags:      []string{"seed"},
+			Source:    "daily_simulation",
+			Guardians: []GuardianResponse{{Phone: "+8619904209999"}},
+			CreatedAt: runDate.Add(1 * time.Hour),
+		},
+		{
+			ID:       "multi-guardian",
+			Name:     profile.ChildName,
+			Gender:   dailySimulationProfileGender(profile.ChildGender),
+			Birthday: birthday,
+			Tags:     []string{"seed"},
+			Source:   "daily_simulation",
+			Guardians: []GuardianResponse{
+				{Phone: profile.GuardianPhone},
+				{Phone: "+8619904209998"},
+			},
+			CreatedAt: runDate.Add(2 * time.Hour),
+		},
+		{
+			ID:        "expected-guardian",
+			Name:      profile.ChildName,
+			Gender:    dailySimulationProfileGender(profile.ChildGender),
+			Birthday:  birthday,
+			Tags:      []string{"seed"},
+			Source:    "daily_simulation",
+			Guardians: []GuardianResponse{{Phone: profile.GuardianPhone}},
+			CreatedAt: runDate.Add(3 * time.Hour),
+		},
+	}
+
+	matched := matchDailySimulationExistingTesteesByIndex(cfg, runDate, 1, items)
+	if len(matched) != 1 {
+		t.Fatalf("expected 1 matched testee, got %d", len(matched))
+	}
+	if got := matched[1]; got == nil || got.ID != "expected-guardian" {
+		t.Fatalf("expected index 1 to match expected-guardian, got %+v", got)
 	}
 }
 

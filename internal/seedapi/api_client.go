@@ -486,32 +486,32 @@ type EnrollTesteeRequest struct {
 
 // ApiserverTesteeResponse 受试者响应（apiserver）
 type ApiserverTesteeResponse struct {
-	ID         string     `json:"id"`
-	OrgID      string     `json:"org_id,omitempty"`
-	ProfileID  *string    `json:"profile_id,omitempty"`
-	IAMChildID *string    `json:"iam_child_id,omitempty"`
-	Name       string     `json:"name"`
-	Gender     string     `json:"gender,omitempty"`
-	Birthday   *time.Time `json:"birthday,omitempty"`
-	Tags       []string   `json:"tags,omitempty"`
-	Source     string     `json:"source,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	ID        string             `json:"id"`
+	OrgID     string             `json:"org_id,omitempty"`
+	ProfileID *string            `json:"profile_id,omitempty"`
+	Name      string             `json:"name"`
+	Gender    string             `json:"gender,omitempty"`
+	Birthday  *time.Time         `json:"birthday,omitempty"`
+	Tags      []string           `json:"tags,omitempty"`
+	Source    string             `json:"source,omitempty"`
+	Guardians []GuardianResponse `json:"guardians,omitempty"`
+	CreatedAt time.Time          `json:"created_at"`
+	UpdatedAt time.Time          `json:"updated_at"`
 }
 
 func (r *ApiserverTesteeResponse) UnmarshalJSON(data []byte) error {
 	type alias struct {
-		ID         string   `json:"id"`
-		OrgID      string   `json:"org_id,omitempty"`
-		ProfileID  *string  `json:"profile_id,omitempty"`
-		IAMChildID *string  `json:"iam_child_id,omitempty"`
-		Name       string   `json:"name"`
-		Gender     string   `json:"gender,omitempty"`
-		Birthday   *string  `json:"birthday,omitempty"`
-		Tags       []string `json:"tags,omitempty"`
-		Source     string   `json:"source,omitempty"`
-		CreatedAt  string   `json:"created_at"`
-		UpdatedAt  string   `json:"updated_at"`
+		ID        string             `json:"id"`
+		OrgID     string             `json:"org_id,omitempty"`
+		ProfileID *string            `json:"profile_id,omitempty"`
+		Name      string             `json:"name"`
+		Gender    string             `json:"gender,omitempty"`
+		Birthday  *string            `json:"birthday,omitempty"`
+		Tags      []string           `json:"tags,omitempty"`
+		Source    string             `json:"source,omitempty"`
+		Guardians []GuardianResponse `json:"guardians,omitempty"`
+		CreatedAt string             `json:"created_at"`
+		UpdatedAt string             `json:"updated_at"`
 	}
 
 	var raw alias
@@ -535,15 +535,22 @@ func (r *ApiserverTesteeResponse) UnmarshalJSON(data []byte) error {
 	r.ID = raw.ID
 	r.OrgID = raw.OrgID
 	r.ProfileID = raw.ProfileID
-	r.IAMChildID = raw.IAMChildID
 	r.Name = raw.Name
 	r.Gender = raw.Gender
 	r.Birthday = birthday
 	r.Tags = append([]string(nil), raw.Tags...)
 	r.Source = raw.Source
+	r.Guardians = append([]GuardianResponse(nil), raw.Guardians...)
 	r.CreatedAt = createdAt
 	r.UpdatedAt = updatedAt
 	return nil
+}
+
+// GuardianResponse 受试者监护人响应（apiserver）。
+type GuardianResponse struct {
+	Name     string `json:"name"`
+	Relation string `json:"relation,omitempty"`
+	Phone    string `json:"phone,omitempty"`
 }
 
 // ApiserverTesteeListResponse 受试者列表响应（apiserver）
@@ -771,49 +778,6 @@ type AssessmentEntryIntakeResponse struct {
 	Assignment *RelationResponse        `json:"assignment,omitempty"`
 }
 
-// IAMChildResponse IAM 儿童响应。
-type IAMChildResponse struct {
-	ID        string     `json:"id"`
-	LegalName string     `json:"legalName"`
-	Gender    *uint8     `json:"gender,omitempty"`
-	DOB       string     `json:"dob,omitempty"`
-	CreatedAt *time.Time `json:"createdAt,omitempty"`
-	UpdatedAt *time.Time `json:"updatedAt,omitempty"`
-}
-
-func (r *IAMChildResponse) UnmarshalJSON(data []byte) error {
-	type alias struct {
-		ID        string  `json:"id"`
-		LegalName string  `json:"legalName"`
-		Gender    *uint8  `json:"gender,omitempty"`
-		DOB       string  `json:"dob,omitempty"`
-		CreatedAt *string `json:"createdAt,omitempty"`
-		UpdatedAt *string `json:"updatedAt,omitempty"`
-	}
-
-	var raw alias
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-
-	createdAt, err := parseFlexibleSeedNullableTime(raw.CreatedAt)
-	if err != nil {
-		return fmt.Errorf("parse createdAt: %w", err)
-	}
-	updatedAt, err := parseFlexibleSeedNullableTime(raw.UpdatedAt)
-	if err != nil {
-		return fmt.Errorf("parse updatedAt: %w", err)
-	}
-
-	r.ID = raw.ID
-	r.LegalName = raw.LegalName
-	r.Gender = raw.Gender
-	r.DOB = raw.DOB
-	r.CreatedAt = createdAt
-	r.UpdatedAt = updatedAt
-	return nil
-}
-
 func parseFlexibleSeedRequiredTime(raw string) (time.Time, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
@@ -866,45 +830,6 @@ func parseFlexibleSeedTime(raw string) (time.Time, error) {
 	return time.Time{}, err
 }
 
-// IAMChildPageResponse IAM 当前用户儿童分页响应。
-type IAMChildPageResponse struct {
-	Total  int                 `json:"total"`
-	Limit  int                 `json:"limit"`
-	Offset int                 `json:"offset"`
-	Items  []*IAMChildResponse `json:"items"`
-}
-
-// IAMChildRegisterRequest IAM 注册儿童请求。
-type IAMChildRegisterRequest struct {
-	LegalName string `json:"legalName"`
-	Gender    uint8  `json:"gender"`
-	DOB       string `json:"dob"`
-	Relation  string `json:"relation"`
-}
-
-// IAMChildRegisterResponse IAM 注册儿童响应。
-type IAMChildRegisterResponse struct {
-	Child *IAMChildResponse `json:"child"`
-}
-
-func (r *IAMChildRegisterResponse) UnmarshalJSON(data []byte) error {
-	type alias struct {
-		Child   *IAMChildResponse `json:"child"`
-		Profile *IAMChildResponse `json:"profile"`
-	}
-
-	var raw alias
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-
-	r.Child = raw.Child
-	if r.Child == nil {
-		r.Child = raw.Profile
-	}
-	return nil
-}
-
 type EnsureIAMMockConsumerRequest struct {
 	Name     string            `json:"name"`
 	Phone    string            `json:"phone"`
@@ -924,20 +849,14 @@ type EnsureIAMMockConsumerResponse struct {
 
 // CollectionCreateTesteeRequest 创建 collection 受试者请求。
 type CollectionCreateTesteeRequest struct {
-	IAMUserID  string   `json:"iam_user_id,omitempty"`
-	IAMChildID string   `json:"iam_child_id"`
-	Name       string   `json:"name"`
-	Gender     int32    `json:"gender"`
-	Birthday   string   `json:"birthday,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
-	Source     string   `json:"source,omitempty"`
-	IsKeyFocus bool     `json:"is_key_focus,omitempty"`
-}
-
-// CollectionTesteeExistsResponse collection testee exists 响应。
-type CollectionTesteeExistsResponse struct {
-	Exists   bool   `json:"exists"`
-	TesteeID string `json:"testee_id"`
+	Name         string   `json:"name"`
+	Gender       int32    `json:"gender"`
+	Birthday     string   `json:"birthday,omitempty"`
+	IDCardNumber string   `json:"id_card_number,omitempty"`
+	Relation     string   `json:"relation,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	Source       string   `json:"source,omitempty"`
+	IsKeyFocus   bool     `json:"is_key_focus,omitempty"`
 }
 
 // CollectionAssessmentDetailResponse collection 侧答卷对应测评详情。

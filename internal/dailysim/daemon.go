@@ -459,7 +459,6 @@ func runDailySimulationBatchWithOptions(
 		"workers", workers,
 		"selected_clinicians", selectedClinicians,
 		"users_created", atomic.LoadInt64(&counters.userCreated),
-		"children_created", atomic.LoadInt64(&counters.childCreated),
 		"testees_created", atomic.LoadInt64(&counters.testeeCreated),
 		"plan_enrolled", atomic.LoadInt64(&counters.enrolled),
 		"entries_resolved", atomic.LoadInt64(&counters.resolved),
@@ -676,6 +675,7 @@ func dailySimulationProfileSignature(profile dailySimulationProfile) string {
 		strings.TrimSpace(profile.ChildName),
 		strings.TrimSpace(profile.ChildDOB),
 		dailySimulationProfileGender(profile.ChildGender),
+		normalizeDailySimulationGuardianPhone(profile.GuardianPhone),
 	}, "|")
 }
 
@@ -684,11 +684,38 @@ func dailySimulationExistingTesteeSignature(item *ApiserverTesteeResponse) strin
 	if item != nil && item.Birthday != nil {
 		birthday = item.Birthday.In(time.Local).Format("2006-01-02")
 	}
+	guardianPhone, ok := dailySimulationSingleGuardianPhone(item.Guardians)
+	if !ok {
+		return ""
+	}
 	return strings.Join([]string{
 		strings.TrimSpace(item.Name),
 		birthday,
 		normalizeDailySimulationExistingTesteeGender(item.Gender),
+		guardianPhone,
 	}, "|")
+}
+
+func dailySimulationSingleGuardianPhone(guardians []GuardianResponse) (string, bool) {
+	phones := make(map[string]struct{}, len(guardians))
+	for _, guardian := range guardians {
+		phone := normalizeDailySimulationGuardianPhone(guardian.Phone)
+		if phone == "" {
+			continue
+		}
+		phones[phone] = struct{}{}
+	}
+	if len(phones) != 1 {
+		return "", false
+	}
+	for phone := range phones {
+		return phone, true
+	}
+	return "", false
+}
+
+func normalizeDailySimulationGuardianPhone(value string) string {
+	return strings.TrimSpace(value)
 }
 
 func dailySimulationProfileGender(value uint8) string {

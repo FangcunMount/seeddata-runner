@@ -32,6 +32,7 @@ type PlanTaskWindowResponse = seedapi.PlanTaskWindowResponse
 type ListPlanTaskWindowRequest = seedapi.ListPlanTaskWindowRequest
 type ApiserverTesteeResponse = seedapi.ApiserverTesteeResponse
 type ApiserverTesteeListResponse = seedapi.ApiserverTesteeListResponse
+type GuardianResponse = seedapi.GuardianResponse
 type TesteeResponse = seedapi.TesteeResponse
 type AssessmentEntryResponse = seedapi.AssessmentEntryResponse
 type AssessmentEntryListResponse = seedapi.AssessmentEntryListResponse
@@ -39,17 +40,9 @@ type RelationResponse = seedapi.RelationResponse
 type TesteeClinicianRelationResponse = seedapi.TesteeClinicianRelationResponse
 type TesteeClinicianRelationListResponse = seedapi.TesteeClinicianRelationListResponse
 type CreateAssessmentEntryRequest = seedapi.CreateAssessmentEntryRequest
-type IntakeAssessmentEntryRequest = seedapi.IntakeAssessmentEntryRequest
-type AssessmentEntryResolvedResponse = seedapi.AssessmentEntryResolvedResponse
-type AssessmentEntryIntakeResponse = seedapi.AssessmentEntryIntakeResponse
-type IAMChildResponse = seedapi.IAMChildResponse
-type IAMChildPageResponse = seedapi.IAMChildPageResponse
-type IAMChildRegisterRequest = seedapi.IAMChildRegisterRequest
-type IAMChildRegisterResponse = seedapi.IAMChildRegisterResponse
 type EnsureIAMMockConsumerRequest = seedapi.EnsureIAMMockConsumerRequest
 type EnsureIAMMockConsumerResponse = seedapi.EnsureIAMMockConsumerResponse
 type CollectionCreateTesteeRequest = seedapi.CollectionCreateTesteeRequest
-type CollectionTesteeExistsResponse = seedapi.CollectionTesteeExistsResponse
 type CollectionAssessmentDetailResponse = seedapi.CollectionAssessmentDetailResponse
 type AssignClinicianTesteeRequest = seedapi.AssignClinicianTesteeRequest
 type EnrollTesteeRequest = seedapi.EnrollTesteeRequest
@@ -92,6 +85,10 @@ func parseID(raw string) uint64 {
 
 func nullableString(value *string) string {
 	return seedruntime.NullableString(value)
+}
+
+func normalizeDailySimulationGuardianRelation(value string) string {
+	return seedconfig.NormalizeDailySimulationGuardianRelation(value)
 }
 
 func listAllClinicianAssessmentEntries(ctx context.Context, client *APIClient, clinicianID string) ([]*AssessmentEntryResponse, error) {

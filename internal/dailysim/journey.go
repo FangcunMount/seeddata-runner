@@ -17,14 +17,12 @@ import (
 	"github.com/FangcunMount/iam/v2/pkg/sdk/identity"
 	toolchain "github.com/FangcunMount/seeddata-runner/internal/chain"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
-	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 	"github.com/FangcunMount/seeddata-runner/internal/seediauth"
 )
 
 const (
 	dailySimulationDefaultCount     = 10
 	dailySimulationDefaultWorkers   = 4
-	dailySimulationChildPageLimit   = 100
 	dailySimulationAnswerSheetPage  = 100
 	dailySimulationDefaultPhonePref = "+86199"
 	dailySimulationDefaultEmailHost = "fangcunmount.com"
@@ -71,7 +69,6 @@ type dailySimulationProfile struct {
 
 type dailySimulationOutcome struct {
 	UserCreated       bool
-	ChildCreated      bool
 	TesteeCreated     bool
 	PlanEnrolled      bool
 	PlanID            string
@@ -86,7 +83,6 @@ type dailySimulationOutcome struct {
 
 type dailySimulationCounters struct {
 	userCreated       int64
-	childCreated      int64
 	testeeCreated     int64
 	enrolled          int64
 	resolved          int64
@@ -130,9 +126,7 @@ type dailySimulationJourneyState struct {
 	guardianUserID   string
 	guardianToken    string
 	mockIAMLimiter   chan struct{}
-	userClient       *APIClient
 	collectionClient *APIClient
-	child            *IAMChildResponse
 	existingTestee   *ApiserverTesteeResponse
 	testee           *TesteeResponse
 	outcome          dailySimulationOutcome
@@ -141,9 +135,6 @@ type dailySimulationJourneyState struct {
 func (c *dailySimulationCounters) add(outcome dailySimulationOutcome) {
 	if outcome.UserCreated {
 		atomic.AddInt64(&c.userCreated, 1)
-	}
-	if outcome.ChildCreated {
-		atomic.AddInt64(&c.childCreated, 1)
 	}
 	if outcome.TesteeCreated {
 		atomic.AddInt64(&c.testeeCreated, 1)
@@ -246,7 +237,6 @@ func simulateDailyUserWithAdditionalTargets(
 
 	decision, err := toolchain.Run(ctx, "daily_simulation_user", state,
 		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStageGuardianAccount), HandlerFunc: dailySimulationStageEnsureGuardianAccount},
-		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: "child_profile", HandlerFunc: dailySimulationStageEnsureChild},
 		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStageTesteeProfile), HandlerFunc: dailySimulationStageEnsureTestee},
 		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStagePlanEnrollment), HandlerFunc: dailySimulationStageEnrollPlan},
 		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStageAssessmentEntry), HandlerFunc: dailySimulationStageEnsureEntryAccess},
@@ -357,34 +347,9 @@ func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *daily
 	state.guardianToken = guardianToken
 	state.outcome.UserCreated = userCreated
 
-	iamBaseURL, err := resolveDailySimulationIAMBaseURL(state.deps.Config.IAM)
-	if err != nil {
-		return toolchain.Decision{}, err
-	}
-	state.userClient = NewAPIClient(iamBaseURL, guardianToken, state.deps.Logger)
-	state.userClient.SetRetryConfig(state.deps.Config.API.Retry)
 	state.collectionClient = NewAPIClient(state.deps.CollectionClient.BaseURL(), guardianToken, state.deps.Logger)
 	state.collectionClient.SetRetryConfig(state.deps.Config.API.Retry)
 	return state.nextDecision(dailySimulationJourneyStageGuardianAccount), nil
-}
-
-func dailySimulationStageEnsureChild(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
-	if state.existingTestee != nil {
-		return toolchain.Next(), nil
-	}
-	if state.userClient == nil {
-		return toolchain.Decision{}, fmt.Errorf("guardian IAM client is not initialized")
-	}
-	child, childCreated, err := ensureDailySimulationChild(ctx, state.userClient, state.cfg, state.profile)
-	if err != nil {
-		return toolchain.Decision{}, err
-	}
-	if child == nil || strings.TrimSpace(child.ID) == "" {
-		return toolchain.Decision{}, fmt.Errorf("ensure iam child returned empty child")
-	}
-	state.child = child
-	state.outcome.ChildCreated = childCreated
-	return toolchain.Next(), nil
 }
 
 func dailySimulationStageEnsureTestee(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
@@ -403,16 +368,11 @@ func dailySimulationStageEnsureTestee(ctx context.Context, state *dailySimulatio
 	if state.collectionClient == nil {
 		return toolchain.Decision{}, fmt.Errorf("collection client is not initialized")
 	}
-	if state.child == nil || strings.TrimSpace(state.child.ID) == "" {
-		return toolchain.Decision{}, fmt.Errorf("iam child is not initialized")
-	}
 	testee, testeeCreated, err := ensureDailySimulationTestee(
 		ctx,
 		state.collectionClient,
-		state.guardianUserID,
 		state.cfg,
 		state.profile,
-		state.child,
 	)
 	if err != nil {
 		return toolchain.Decision{}, err
@@ -450,17 +410,11 @@ func dailySimulationStageEnsureEntryAccess(ctx context.Context, state *dailySimu
 	if state.testee == nil || strings.TrimSpace(state.testee.ID) == "" {
 		return toolchain.Decision{}, fmt.Errorf("testee is not initialized before entry access")
 	}
-	if state.child == nil && state.existingTestee == nil {
-		return toolchain.Decision{}, fmt.Errorf("daily simulation child/testee profile is not initialized before entry access")
-	}
-	if state.child != nil && strings.TrimSpace(state.child.ID) == "" {
-		return toolchain.Decision{}, fmt.Errorf("iam child is not initialized before entry access")
-	}
-	hasCreator, err := hasAssessmentEntryCreatorRelation(ctx, state.deps.APIClient, state.testee.ID, state.entry.ID)
+	hasEntryRelation, err := hasAssessmentEntryRelation(ctx, state.deps.APIClient, state.testee.ID, state.entry.ID)
 	if err != nil {
 		return toolchain.Decision{}, err
 	}
-	if hasCreator {
+	if hasEntryRelation {
 		return state.nextDecision(dailySimulationJourneyStageAssessmentEntry), nil
 	}
 
@@ -469,16 +423,12 @@ func dailySimulationStageEnsureEntryAccess(ctx context.Context, state *dailySimu
 	}
 	state.outcome.EntryResolved = true
 
-	req, err := buildDailySimulationEntryIntakeRequest(state)
+	req, err := buildDailySimulationAssessmentEntryRelationRequest(state)
 	if err != nil {
 		return toolchain.Decision{}, err
 	}
-	intakeResp, err := state.deps.APIClient.IntakeAssessmentEntry(ctx, state.entry.Token, req)
-	if err != nil {
+	if _, err := state.deps.APIClient.AssignClinicianTesteeWithRelationType(ctx, "attending", req); err != nil {
 		return toolchain.Decision{}, err
-	}
-	if intakeResp.Testee != nil && strings.TrimSpace(intakeResp.Testee.ID) != "" {
-		state.testee.ID = intakeResp.Testee.ID
 	}
 	state.outcome.EntryIntaked = true
 	return state.nextDecision(dailySimulationJourneyStageAssessmentEntry), nil
@@ -612,121 +562,55 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 	return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
 }
 
-func buildDailySimulationEntryIntakeRequest(state *dailySimulationJourneyState) (IntakeAssessmentEntryRequest, error) {
+func buildDailySimulationAssessmentEntryRelationRequest(state *dailySimulationJourneyState) (AssignClinicianTesteeRequest, error) {
 	if state == nil {
-		return IntakeAssessmentEntryRequest{}, fmt.Errorf("daily simulation state is nil")
+		return AssignClinicianTesteeRequest{}, fmt.Errorf("daily simulation state is nil")
 	}
-	if state.child != nil && strings.TrimSpace(state.child.ID) != "" {
-		childID := parseID(state.child.ID)
-		if childID == 0 {
-			return IntakeAssessmentEntryRequest{}, fmt.Errorf("invalid child id %q", state.child.ID)
-		}
-		birthday, err := parseDailySimulationDOB(state.child.DOB)
-		if err != nil {
-			return IntakeAssessmentEntryRequest{}, fmt.Errorf("parse child dob %q: %w", state.child.DOB, err)
-		}
-		return IntakeAssessmentEntryRequest{
-			ProfileID: &childID,
-			Name:      state.child.LegalName,
-			Gender:    dailySimulationAPIGender(state.child.Gender),
-			Birthday:  birthday,
-		}, nil
+	if state.entry == nil {
+		return AssignClinicianTesteeRequest{}, fmt.Errorf("assessment entry is not initialized before relation assignment")
 	}
-	if state.existingTestee != nil {
-		profileID, err := dailySimulationExistingTesteeProfileID(state.existingTestee)
-		if err != nil {
-			return IntakeAssessmentEntryRequest{}, err
-		}
-		return IntakeAssessmentEntryRequest{
-			ProfileID: profileID,
-			Name:      strings.TrimSpace(state.existingTestee.Name),
-			Gender:    dailySimulationExistingTesteeAPIGender(state.existingTestee.Gender),
-			Birthday:  state.existingTestee.Birthday,
-		}, nil
+	if state.testee == nil {
+		return AssignClinicianTesteeRequest{}, fmt.Errorf("testee is not initialized before relation assignment")
 	}
-	return IntakeAssessmentEntryRequest{}, fmt.Errorf("daily simulation child/testee is not initialized before entry intake")
-}
-
-func dailySimulationExistingTesteeProfileID(testee *ApiserverTesteeResponse) (*uint64, error) {
-	if testee == nil {
-		return nil, fmt.Errorf("existing testee is nil")
+	orgID := parseID(state.entry.OrgID)
+	if orgID == 0 && state.deps != nil && state.deps.Config != nil && state.deps.Config.Global.OrgID > 0 {
+		orgID = uint64(state.deps.Config.Global.OrgID)
 	}
-	if testee.ProfileID != nil {
-		if profileID := parseID(strings.TrimSpace(*testee.ProfileID)); profileID > 0 {
-			return &profileID, nil
-		}
+	if orgID == 0 {
+		return AssignClinicianTesteeRequest{}, fmt.Errorf("assessment entry org id is empty")
 	}
-	if testee.IAMChildID != nil {
-		if profileID := parseID(strings.TrimSpace(*testee.IAMChildID)); profileID > 0 {
-			return &profileID, nil
-		}
+	clinicianID := parseID(state.entry.ClinicianID)
+	if clinicianID == 0 {
+		clinicianID = parseID(state.clinicianID)
 	}
-	return nil, fmt.Errorf("existing testee %s missing profile id", strings.TrimSpace(testee.ID))
-}
-
-func dailySimulationExistingTesteeAPIGender(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "1", "male":
-		return "male"
-	case "2", "female":
-		return "female"
-	case "3", "unknown", "other":
-		return "unknown"
-	default:
-		return strings.ToLower(strings.TrimSpace(value))
+	if clinicianID == 0 {
+		return AssignClinicianTesteeRequest{}, fmt.Errorf("assessment entry clinician id is empty")
 	}
+	testeeID := parseID(state.testee.ID)
+	if testeeID == 0 {
+		return AssignClinicianTesteeRequest{}, fmt.Errorf("invalid testee id %q", state.testee.ID)
+	}
+	entryID := parseID(state.entry.ID)
+	if entryID == 0 {
+		return AssignClinicianTesteeRequest{}, fmt.Errorf("invalid assessment entry id %q", state.entry.ID)
+	}
+	return AssignClinicianTesteeRequest{
+		OrgID:       int64(orgID),
+		ClinicianID: clinicianID,
+		TesteeID:    testeeID,
+		SourceType:  "assessment_entry",
+		SourceID:    &entryID,
+	}, nil
 }
 
 func resolveDailySimulationCanonicalTesteeID(ctx context.Context, state *dailySimulationJourneyState) (uint64, error) {
 	if state == nil || state.testee == nil {
 		return 0, fmt.Errorf("testee is not initialized before canonical resolution")
 	}
-
-	if profileID := dailySimulationProfileIDForSubmit(state); profileID != "" && state.deps != nil && state.deps.APIClient != nil && state.deps.Config != nil {
-		testeeResp, err := state.deps.APIClient.GetTesteeByProfileID(ctx, state.deps.Config.Global.OrgID, profileID)
-		if err == nil {
-			if canonicalID := parseID(testeeResp.ID); canonicalID > 0 {
-				return canonicalID, nil
-			}
-		} else if !isDailySimulationAPIHTTPStatus(err, http.StatusNotFound) {
-			return 0, err
-		}
-	}
-
-	if state.child != nil && strings.TrimSpace(state.child.ID) != "" && state.collectionClient != nil {
-		existsResp, err := state.collectionClient.TesteeExistsByIAMChildID(ctx, state.child.ID)
-		if err != nil {
-			return 0, err
-		}
-		if existsResp != nil && existsResp.Exists {
-			if canonicalID := parseID(existsResp.TesteeID); canonicalID > 0 {
-				return canonicalID, nil
-			}
-		}
-	}
-
 	if canonicalID := parseID(state.testee.ID); canonicalID > 0 {
 		return canonicalID, nil
 	}
 	return 0, fmt.Errorf("invalid canonical testee id %q", state.testee.ID)
-}
-
-func dailySimulationProfileIDForSubmit(state *dailySimulationJourneyState) string {
-	if state == nil {
-		return ""
-	}
-	if state.existingTestee != nil {
-		if state.existingTestee.ProfileID != nil && strings.TrimSpace(*state.existingTestee.ProfileID) != "" {
-			return strings.TrimSpace(*state.existingTestee.ProfileID)
-		}
-		if state.existingTestee.IAMChildID != nil && strings.TrimSpace(*state.existingTestee.IAMChildID) != "" {
-			return strings.TrimSpace(*state.existingTestee.IAMChildID)
-		}
-	}
-	if state.child != nil && strings.TrimSpace(state.child.ID) != "" {
-		return strings.TrimSpace(state.child.ID)
-	}
-	return ""
 }
 
 func isDailySimulationAPIHTTPStatus(err error, status int) bool {
@@ -847,7 +731,6 @@ func logDailySimulationOutcome(
 		"target_type", dailySimulationTargetType(target),
 		"target_code", dailySimulationTargetCode(target),
 		"user_created", outcome.UserCreated,
-		"child_created", outcome.ChildCreated,
 		"testee_created", outcome.TesteeCreated,
 		"plan_enrolled", outcome.PlanEnrolled,
 		"entry_resolved", outcome.EntryResolved,
@@ -1293,99 +1176,28 @@ func acquireDailySimulationMockIAMLimiter(ctx context.Context, limiter chan stru
 	}
 }
 
-func ensureDailySimulationChild(
-	ctx context.Context,
-	iamClient *APIClient,
-	cfg DailySimulationConfig,
-	profile dailySimulationProfile,
-) (*IAMChildResponse, bool, error) {
-	child, err := findDailySimulationChild(ctx, iamClient, profile.ChildName, profile.ChildDOB)
-	if err != nil {
-		return nil, false, err
-	}
-	if child != nil {
-		return child, false, nil
-	}
-
-	relation := seedconfig.NormalizeDailySimulationGuardianRelation(cfg.GuardianRelation)
-	registerResp, err := iamClient.RegisterIAMChild(ctx, IAMChildRegisterRequest{
-		LegalName: profile.ChildName,
-		Gender:    profile.ChildGender,
-		DOB:       profile.ChildDOB,
-		Relation:  relation,
-	})
-	if err != nil {
-		return nil, false, fmt.Errorf("register iam child %s: %w", profile.ChildName, err)
-	}
-	if registerResp == nil || registerResp.Child == nil || strings.TrimSpace(registerResp.Child.ID) == "" {
-		return nil, false, fmt.Errorf("register iam child returned empty child")
-	}
-	return registerResp.Child, true, nil
-}
-
-func findDailySimulationChild(
-	ctx context.Context,
-	iamClient *APIClient,
-	name, dob string,
-) (*IAMChildResponse, error) {
-	offset := 0
-	for {
-		pageResp, err := iamClient.ListIAMMyChildren(ctx, dailySimulationChildPageLimit, offset)
-		if err != nil {
-			return nil, fmt.Errorf("list iam my children: %w", err)
-		}
-		for _, item := range pageResp.Items {
-			if item == nil {
-				continue
-			}
-			if strings.TrimSpace(item.LegalName) == strings.TrimSpace(name) && strings.TrimSpace(item.DOB) == strings.TrimSpace(dob) {
-				return item, nil
-			}
-		}
-		offset += len(pageResp.Items)
-		if len(pageResp.Items) == 0 || offset >= pageResp.Total {
-			break
-		}
-	}
-	return nil, nil
-}
-
 func ensureDailySimulationTestee(
 	ctx context.Context,
 	collectionClient *APIClient,
-	guardianUserID string,
 	cfg DailySimulationConfig,
 	profile dailySimulationProfile,
-	child *IAMChildResponse,
 ) (*TesteeResponse, bool, error) {
-	existsResp, err := collectionClient.TesteeExistsByIAMChildID(ctx, child.ID)
-	if err != nil {
-		return nil, false, fmt.Errorf("check collection testee exists for child %s: %w", child.ID, err)
-	}
-	if existsResp != nil && existsResp.Exists && strings.TrimSpace(existsResp.TesteeID) != "" {
-		return &TesteeResponse{
-			ID:   existsResp.TesteeID,
-			Name: child.LegalName,
-		}, false, nil
-	}
-
 	testeeResp, err := collectionClient.CreateCollectionTestee(ctx, CollectionCreateTesteeRequest{
-		IAMUserID:  guardianUserID,
-		IAMChildID: child.ID,
-		Name:       child.LegalName,
-		Gender:     dailySimulationCollectionGender(child.Gender),
-		Birthday:   child.DOB,
+		Name:       profile.ChildName,
+		Gender:     int32(profile.ChildGender),
+		Birthday:   profile.ChildDOB,
+		Relation:   normalizeDailySimulationGuardianRelation(cfg.GuardianRelation),
 		Tags:       append([]string(nil), cfg.TesteeTags...),
 		Source:     normalizeDailySimulationSource(cfg.TesteeSource),
 		IsKeyFocus: cfg.IsKeyFocus,
 	})
 	if err != nil {
-		return nil, false, fmt.Errorf("create collection testee for child %s: %w", child.ID, err)
+		return nil, false, fmt.Errorf("create collection testee %s: %w", profile.ChildName, err)
 	}
 	return testeeResp, true, nil
 }
 
-func hasAssessmentEntryCreatorRelation(
+func hasAssessmentEntryRelation(
 	ctx context.Context,
 	apiClient *APIClient,
 	testeeID, entryID string,
@@ -1400,9 +1212,6 @@ func hasAssessmentEntryCreatorRelation(
 		}
 		relation := item.Relation
 		if !relation.IsActive {
-			continue
-		}
-		if strings.ToLower(strings.TrimSpace(relation.RelationType)) != "creator" {
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(relation.SourceType), "assessment_entry") {
@@ -1655,32 +1464,4 @@ func parseDailySimulationDOB(raw string) (*time.Time, error) {
 		return nil, err
 	}
 	return &parsed, nil
-}
-
-func dailySimulationCollectionGender(value *uint8) int32 {
-	if value == nil {
-		return 3
-	}
-	switch *value {
-	case 1:
-		return 1
-	case 2:
-		return 2
-	default:
-		return 3
-	}
-}
-
-func dailySimulationAPIGender(value *uint8) string {
-	if value == nil {
-		return ""
-	}
-	switch *value {
-	case 1:
-		return "male"
-	case 2:
-		return "female"
-	default:
-		return "unknown"
-	}
 }
