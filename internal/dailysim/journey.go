@@ -2,6 +2,7 @@ package dailysim
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"math/rand"
@@ -14,6 +15,7 @@ import (
 	"github.com/FangcunMount/component-base/pkg/log"
 	identityv2 "github.com/FangcunMount/iam/v2/api/grpc/iam/identity/v2"
 	sdk "github.com/FangcunMount/iam/v2/pkg/sdk"
+	sdkerrors "github.com/FangcunMount/iam/v2/pkg/sdk/errors"
 	"github.com/FangcunMount/iam/v2/pkg/sdk/identity"
 	toolchain "github.com/FangcunMount/seeddata-runner/internal/chain"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
@@ -1135,11 +1137,20 @@ func shouldRetryDailySimulationIAMLogin(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, sdkerrors.ErrRateLimited) ||
+		errors.Is(err, sdkerrors.ErrServiceUnavailable) ||
+		errors.Is(err, sdkerrors.ErrTimeout) {
+		return true
+	}
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
 	if message == "" {
 		return false
 	}
 	return strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "too many requests") ||
+		strings.Contains(message, "service unavailable") ||
+		strings.Contains(message, "bad gateway") ||
+		strings.Contains(message, "gateway timeout") ||
 		strings.Contains(message, "status=429") ||
 		strings.Contains(message, "status=502") ||
 		strings.Contains(message, "status=503") ||

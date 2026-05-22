@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
+	authsignup "github.com/FangcunMount/iam/v2/pkg/sdk/auth/signup"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 )
 
@@ -858,22 +859,8 @@ func parseFlexibleSeedTime(raw string) (time.Time, error) {
 	return time.Time{}, err
 }
 
-type EnsureIAMMockConsumerRequest struct {
-	Name     string            `json:"name"`
-	Phone    string            `json:"phone"`
-	Email    string            `json:"email"`
-	Password string            `json:"password"`
-	Profile  map[string]string `json:"profile,omitempty"`
-	Meta     map[string]string `json:"meta,omitempty"`
-}
-
-type EnsureIAMMockConsumerResponse struct {
-	UserID          string `json:"user_id"`
-	LoginIdentityID string `json:"login_identity_id"`
-	LoginID         string `json:"login_id"`
-	IsNewUser       bool   `json:"is_new_user"`
-	IsNewIdentity   bool   `json:"is_new_identity"`
-}
+type EnsureIAMMockConsumerRequest = authsignup.EnsureMockConsumerRequest
+type EnsureIAMMockConsumerResponse = authsignup.EnsureMockConsumerResult
 
 // CollectionCreateTesteeRequest 创建 collection 受试者请求。
 type CollectionCreateTesteeRequest struct {
@@ -1189,7 +1176,7 @@ func (c *APIClient) EnsureIAMMockConsumer(
 	sharedSecret string,
 ) (*EnsureIAMMockConsumerResponse, error) {
 	headers := map[string]string{
-		"X-IAM-Seed-Secret": strings.TrimSpace(sharedSecret),
+		authsignup.SeedMockSecretHeader: strings.TrimSpace(sharedSecret),
 	}
 	resp, err := c.doRequestWithHeadersRetryAndTimeout(ctx, http.MethodPost, path, req, headers, false, c.httpClient.Timeout)
 	if err != nil {

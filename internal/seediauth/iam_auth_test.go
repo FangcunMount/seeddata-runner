@@ -50,11 +50,11 @@ func TestFetchTokenFromIAMWithPasswordSendsV2PasswordPayload(t *testing.T) {
 			t.Fatalf("expected tenant_id=1, got %v", got)
 		}
 
-		_ = json.NewEncoder(w).Encode(iamLoginResponse{
-			Code: intPtr(0),
-			Data: mustRawMessage(t, map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 0,
+			"data": map[string]any{
 				"access_token": "token-1",
-			}),
+			},
 		})
 	}))
 	defer server.Close()
@@ -78,6 +78,16 @@ func TestResolveLoginURLDefaultsToAPIV2(t *testing.T) {
 	}
 }
 
+func TestLoginClientBaseURLAcceptsResolvedLoginEndpoint(t *testing.T) {
+	got, err := loginClientBaseURL("https://iam.example.com/proxy/api/v2/authn/login")
+	if err != nil {
+		t.Fatalf("loginClientBaseURL returned error: %v", err)
+	}
+	if got != "https://iam.example.com/proxy" {
+		t.Fatalf("unexpected login client base url: %s", got)
+	}
+}
+
 func TestParseSeedTokenIdentityReadsIssuerAndAudience(t *testing.T) {
 	token := unsignedJWT(t, map[string]any{
 		"sub":       "subject-1",
@@ -96,10 +106,6 @@ func TestParseSeedTokenIdentityReadsIssuerAndAudience(t *testing.T) {
 	}
 }
 
-func intPtr(value int) *int {
-	return &value
-}
-
 func unsignedJWT(t *testing.T, payload map[string]any) string {
 	t.Helper()
 	data, err := json.Marshal(payload)
@@ -107,13 +113,4 @@ func unsignedJWT(t *testing.T, payload map[string]any) string {
 		t.Fatalf("marshal token payload: %v", err)
 	}
 	return "e30." + base64.RawURLEncoding.EncodeToString(data) + ".sig"
-}
-
-func mustRawMessage(t *testing.T, value any) json.RawMessage {
-	t.Helper()
-	data, err := json.Marshal(value)
-	if err != nil {
-		t.Fatalf("marshal raw message: %v", err)
-	}
-	return data
 }

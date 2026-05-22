@@ -1,12 +1,10 @@
 package seediauth
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,12 +23,6 @@ type Config struct {
 	Username string
 	Password string
 	TenantID string
-}
-
-type iamLoginResponse struct {
-	Code    *int            `json:"code"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data"`
 }
 
 func FetchTokenFromIAM(ctx context.Context, cfg Config, logger log.Logger) (string, error) {
@@ -96,42 +88,22 @@ func FetchTokenFromIAMWithPassword(
 		return "", fmt.Errorf("validate iam login request: %w", err)
 	}
 
-	reqBody, err := json.Marshal(loginReq)
+	baseURL, err := loginClientBaseURL(loginURL)
 	if err != nil {
-		return "", fmt.Errorf("marshal iam login request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, loginURL, bytes.NewReader(reqBody))
-	if err != nil {
-		return "", fmt.Errorf("create iam request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request iam token: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read iam response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		bodyStr := string(body)
-		if len(bodyStr) > 200 {
-			bodyStr = bodyStr[:200] + "..."
-		}
-		return "", fmt.Errorf("iam login failed: status=%d body=%s", resp.StatusCode, bodyStr)
-	}
-
-	token, err := extractTokenFromIAMResponse(body)
-	if err != nil {
-		logger.Warnw("IAM login response missing token field")
 		return "", err
+	}
+	client, err := loginv2.NewClient(baseURL, loginv2.WithHTTPClient(&http.Client{Timeout: 15 * time.Second}))
+	if err != nil {
+		return "", fmt.Errorf("create iam login client: %w", err)
+	}
+	tokenPair, err := client.Login(ctx, loginReq)
+	if err != nil {
+		return "", fmt.Errorf("iam login failed: %w", err)
+	}
+	token := strings.TrimSpace(tokenPair.AccessToken)
+	if token == "" {
+		logger.Warnw("IAM login response missing access_token field")
+		return "", fmt.Errorf("iam login response missing access_token")
 	}
 
 	identity := parseSeedTokenIdentity(token)
@@ -149,6 +121,31 @@ func FetchTokenFromIAMWithPassword(
 	return token, nil
 }
 
+func loginClientBaseURL(loginURL string) (string, error) {
+	loginURL = strings.TrimSpace(loginURL)
+	if loginURL == "" {
+		return "", fmt.Errorf("iam login url is empty")
+	}
+	parsed, err := url.Parse(loginURL)
+	if err != nil {
+		return "", fmt.Errorf("parse iam login url %q: %w", loginURL, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("iam login url must be absolute")
+	}
+	path := strings.TrimRight(strings.TrimSpace(parsed.Path), "/")
+	switch {
+	case strings.HasSuffix(path, defaultIAMLoginPath):
+		path = strings.TrimSuffix(path, defaultIAMLoginPath)
+	case strings.HasSuffix(path, "/authn/login"):
+		path = strings.TrimSuffix(path, "/authn/login")
+	}
+	parsed.Path = path
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
 func appendIAMLoginPath(path string) string {
 	path = strings.TrimRight(strings.TrimSpace(path), "/")
 	switch {
@@ -161,29 +158,6 @@ func appendIAMLoginPath(path string) string {
 	default:
 		return path + defaultIAMLoginPath
 	}
-}
-
-func extractTokenFromIAMResponse(body []byte) (string, error) {
-	var respWrapper iamLoginResponse
-	if err := json.Unmarshal(body, &respWrapper); err != nil {
-		return "", fmt.Errorf("unmarshal iam response: %w", err)
-	}
-
-	isEnvelope := respWrapper.Code != nil || respWrapper.Message != "" || len(respWrapper.Data) > 0
-	if isEnvelope {
-		if respWrapper.Code != nil && *respWrapper.Code != 0 {
-			return "", fmt.Errorf("iam login error: code=%d message=%s", *respWrapper.Code, respWrapper.Message)
-		}
-		if token := extractTokenFromIAMData(respWrapper.Data); token != "" {
-			return token, nil
-		}
-		return "", fmt.Errorf("iam login response missing token")
-	}
-
-	if token := extractTokenFromIAMData(body); token != "" {
-		return token, nil
-	}
-	return "", fmt.Errorf("iam login response missing token")
 }
 
 type seedTokenIdentity struct {
@@ -233,47 +207,6 @@ func decodeSeedTokenSegment(segment string) ([]byte, error) {
 		return payload, nil
 	}
 	return base64.URLEncoding.DecodeString(segment)
-}
-
-func extractTokenFromIAMData(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-
-	var data map[string]interface{}
-	if err := json.Unmarshal(raw, &data); err != nil {
-		return ""
-	}
-
-	if token := readStringField(data, "token"); token != "" {
-		return token
-	}
-	if token := readStringField(data, "access_token"); token != "" {
-		return token
-	}
-	if token := readStringField(data, "accessToken"); token != "" {
-		return token
-	}
-
-	if tokenPair, ok := data["token_pair"].(map[string]interface{}); ok {
-		if token := readStringField(tokenPair, "access_token"); token != "" {
-			return token
-		}
-		if token := readStringField(tokenPair, "accessToken"); token != "" {
-			return token
-		}
-	}
-
-	if tokenPair, ok := data["tokenPair"].(map[string]interface{}); ok {
-		if token := readStringField(tokenPair, "access_token"); token != "" {
-			return token
-		}
-		if token := readStringField(tokenPair, "accessToken"); token != "" {
-			return token
-		}
-	}
-
-	return ""
 }
 
 func readStringField(data map[string]interface{}, key string) string {

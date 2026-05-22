@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
+	sdkerrors "github.com/FangcunMount/iam/v2/pkg/sdk/errors"
 	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 )
 
@@ -122,6 +123,9 @@ func TestShouldRetryDailySimulationIAMLogin(t *testing.T) {
 	}
 	if !shouldRetryDailySimulationIAMLogin(assertErr("iam login failed: status=502 body=bad gateway")) {
 		t.Fatalf("expected 502 to be retryable")
+	}
+	if !shouldRetryDailySimulationIAMLogin(sdkerrors.ErrServiceUnavailable) {
+		t.Fatalf("expected IAM SDK unavailable error to be retryable")
 	}
 	if shouldRetryDailySimulationIAMLogin(assertErr("iam login failed: status=401 body=unauthorized")) {
 		t.Fatalf("expected 401 not to be retryable")
