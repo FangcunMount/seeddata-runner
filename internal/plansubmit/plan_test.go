@@ -638,7 +638,11 @@ func buildStubTaskWindowResponse(taskLists map[string][]TaskResponse, req ListPl
 			if status := normalizeTaskStatus(req.Status); status != "" && normalizeTaskStatus(task.Status) != status {
 				continue
 			}
-			if strings.TrimSpace(req.PlannedBefore) != "" && strings.TrimSpace(task.PlannedAt) > strings.TrimSpace(req.PlannedBefore) {
+			plannedAt := strings.TrimSpace(task.PlannedAt)
+			if after := strings.TrimSpace(req.PlannedAfter); after != "" && plannedAt != "" && plannedAt < after {
+				continue
+			}
+			if before := strings.TrimSpace(req.PlannedBefore); before != "" && plannedAt != "" && plannedAt > before {
 				continue
 			}
 			allTasks = append(allTasks, task)
@@ -686,13 +690,15 @@ func buildStubTaskWindowResponse(taskLists map[string][]TaskResponse, req ListPl
 func TestListOpenPlanTaskJobsUsesPagedOpenedTasks(t *testing.T) {
 	planID := "614333603412718126"
 	testeeTasks := make([]TaskResponse, 0, planOpenTaskPageSize+1)
+	plannedAt := time.Now().Format("2006-01-02 15:04:05")
 	for idx := 0; idx < planOpenTaskPageSize+1; idx++ {
 		testeeTasks = append(testeeTasks, TaskResponse{
-			ID:       "task-" + strconv.Itoa(idx+1),
-			PlanID:   planID,
-			TesteeID: "1001",
-			Seq:      idx + 1,
-			Status:   "opened",
+			ID:        "task-" + strconv.Itoa(idx+1),
+			PlanID:    planID,
+			TesteeID:  "1001",
+			Seq:       idx + 1,
+			Status:    "opened",
+			PlannedAt: plannedAt,
 		})
 	}
 	testeeTasks[0].ID = "2001"
@@ -748,11 +754,14 @@ func TestListDailyPlanTaskJobsRespectsCompletionPercentQuota(t *testing.T) {
 	if len(gateway.listTaskWindowCalls) != 1 {
 		t.Fatalf("expected one task-window call, got %d", len(gateway.listTaskWindowCalls))
 	}
+	if got := gateway.listTaskWindowCalls[0].PlannedAfter; got != "2026-05-06 00:00:00" {
+		t.Fatalf("unexpected planned_after: %q", got)
+	}
 	if got := gateway.listTaskWindowCalls[0].PlannedBefore; got != "2026-05-06 23:59:59" {
 		t.Fatalf("unexpected planned_before: %q", got)
 	}
 	if got := gateway.listTaskWindowCalls[0].Status; got != "" {
-		t.Fatalf("expected all task statuses to be listed, got %q", got)
+		t.Fatalf("expected all task statuses within the daily window, got %q", got)
 	}
 	if len(jobs) != 1 {
 		t.Fatalf("expected one opened job after quota, got %d", len(jobs))

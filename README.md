@@ -254,7 +254,7 @@ sudo systemctl restart seeddata-runner
 
 ## Plan Submit
 
-`planSubmit` 只处理当天“已经 opened 的任务”，不会参与 plan 调度本身。它会先按 `planned_at <= 当天 23:59:59` 拉取任务窗口，再在本地只保留当天任务；随后按 task 的 `testee_id` 查询 testee 来源，只提交 `source == dailySimulation.testeeSource` 的任务，并用 `completionPercent` 控制当天最多完成的比例。
+`planSubmit` 只处理当天“已经 opened 的任务”，不会参与 plan 调度本身。它会按 `planned_after = 当天 00:00:00` 且 `planned_before = 当天 23:59:59` 拉取任务窗口（需要 qs-apiserver 支持 `planned_after`），再在本地校验当天任务；随后按 task 的 `testee_id` 查询 testee 来源，只提交 `source == dailySimulation.testeeSource` 的任务，并用 `completionPercent` 控制当天最多完成的比例。
 
 关键字段如下：
 

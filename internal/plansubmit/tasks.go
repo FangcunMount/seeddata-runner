@@ -11,6 +11,7 @@ import (
 
 const (
 	planOpenTaskPageSize             = 100
+	planOpenTaskMaxPages             = 200
 	planOpenTaskSubmitRequestTimeout = 15 * time.Second
 	planOpenTaskSubmitHTTPRetryMax   = 0
 	planOpenTaskSubmitMaxAttempts    = 2
@@ -96,10 +97,7 @@ func listOpenPlanTaskJobs(
 	planID string,
 	verbose bool,
 ) ([]planTaskJob, error) {
-	tasks, err := listPlanTaskWindowTasks(ctx, gateway, logger, ListPlanTaskWindowRequest{
-		PlanID: planID,
-		Status: "opened",
-	}, verbose)
+	tasks, err := listPlanTaskWindowTasks(ctx, gateway, logger, planSubmitOpenedTaskWindowRequest(planID, time.Now()), verbose)
 	if err != nil {
 		return nil, err
 	}
@@ -127,10 +125,7 @@ func listDailyPlanTaskJobs(
 		completionPercent = 100
 	}
 
-	tasks, err := listPlanTaskWindowTasks(ctx, gateway, logger, ListPlanTaskWindowRequest{
-		PlanID:        planID,
-		PlannedBefore: planSubmitEndOfDay(now).Format("2006-01-02 15:04:05"),
-	}, verbose)
+	tasks, err := listPlanTaskWindowTasks(ctx, gateway, logger, planSubmitDailyTaskWindowRequest(planID, now), verbose)
 	if err != nil {
 		return nil, err
 	}
@@ -166,6 +161,18 @@ func listPlanTaskWindowTasks(
 	resourceID := req.PlanID
 	tasks := make([]TaskResponse, 0, planOpenTaskPageSize)
 	for page := 1; ; page++ {
+		if page > planOpenTaskMaxPages {
+			logger.Warnw("Plan task window pagination stopped at safety cap",
+				"plan_id", resourceID,
+				"status", req.Status,
+				"planned_after", req.PlannedAfter,
+				"planned_before", req.PlannedBefore,
+				"max_pages", planOpenTaskMaxPages,
+				"tasks_loaded", len(tasks),
+			)
+			break
+		}
+
 		pageReq := req
 		pageReq.Page = page
 		pageReq.PageSize = planOpenTaskPageSize
@@ -191,6 +198,7 @@ func listPlanTaskWindowTasks(
 			return tasks, nil
 		}
 	}
+	return tasks, nil
 }
 
 func appendOpenPlanTaskJobs(
@@ -324,9 +332,28 @@ func planSubmitTargetCompletedCount(totalTasks, completionPercent int) int {
 	return (totalTasks*completionPercent + 99) / 100
 }
 
+func planSubmitStartOfDay(now time.Time) time.Time {
+	year, month, day := now.Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, now.Location())
+}
+
 func planSubmitEndOfDay(now time.Time) time.Time {
 	year, month, day := now.Date()
 	return time.Date(year, month, day, 23, 59, 59, 0, now.Location())
+}
+
+func planSubmitDailyTaskWindowRequest(planID string, now time.Time) ListPlanTaskWindowRequest {
+	return ListPlanTaskWindowRequest{
+		PlanID:        normalizePlanID(planID),
+		PlannedAfter:  planSubmitStartOfDay(now).Format("2006-01-02 15:04:05"),
+		PlannedBefore: planSubmitEndOfDay(now).Format("2006-01-02 15:04:05"),
+	}
+}
+
+func planSubmitOpenedTaskWindowRequest(planID string, now time.Time) ListPlanTaskWindowRequest {
+	req := planSubmitDailyTaskWindowRequest(planID, now)
+	req.Status = "opened"
+	return req
 }
 
 func parsePlanSubmitTaskTime(raw string, loc *time.Location) (time.Time, error) {
