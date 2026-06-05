@@ -240,8 +240,8 @@ func simulateDailyUserWithAdditionalTargets(
 	decision, err := toolchain.Run(ctx, "daily_simulation_user", state,
 		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStageGuardianAccount), HandlerFunc: dailySimulationStageEnsureGuardianAccount},
 		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStageTesteeProfile), HandlerFunc: dailySimulationStageEnsureTestee},
-		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStagePlanEnrollment), HandlerFunc: dailySimulationStageEnrollPlan},
 		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStageAssessmentEntry), HandlerFunc: dailySimulationStageEnsureEntryAccess},
+		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStagePlanEnrollment), HandlerFunc: dailySimulationStageEnrollPlan},
 		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStageAnswerSheet), HandlerFunc: dailySimulationStageSubmitAnswerSheet},
 	)
 	if err != nil {
@@ -371,6 +371,9 @@ func dailySimulationStageEnsureTestee(ctx context.Context, state *dailySimulatio
 		state.outcome.TesteeCreated = false
 		return state.nextDecision(dailySimulationJourneyStageTesteeProfile), nil
 	}
+	if !shouldPrecreateDailySimulationTestee(state.journeyTarget) {
+		return state.nextDecision(dailySimulationJourneyStageTesteeProfile), nil
+	}
 	if state.collectionClient == nil {
 		return toolchain.Decision{}, fmt.Errorf("collection client is not initialized")
 	}
@@ -413,15 +416,14 @@ func dailySimulationStageEnsureEntryAccess(ctx context.Context, state *dailySimu
 	if state.entry == nil || strings.TrimSpace(state.entry.ID) == "" || strings.TrimSpace(state.entry.Token) == "" {
 		return toolchain.Decision{}, fmt.Errorf("assessment entry is not initialized")
 	}
-	if state.testee == nil || strings.TrimSpace(state.testee.ID) == "" {
-		return toolchain.Decision{}, fmt.Errorf("testee is not initialized before entry access")
-	}
-	hasEntryRelation, err := hasAssessmentEntryRelation(ctx, state.deps.APIClient, state.testee.ID, state.entry.ID)
-	if err != nil {
-		return toolchain.Decision{}, err
-	}
-	if hasEntryRelation {
-		return state.nextDecision(dailySimulationJourneyStageAssessmentEntry), nil
+	if state.testee != nil && strings.TrimSpace(state.testee.ID) != "" {
+		hasEntryRelation, err := hasAssessmentEntryRelation(ctx, state.deps.APIClient, state.testee.ID, state.entry.ID)
+		if err != nil {
+			return toolchain.Decision{}, err
+		}
+		if hasEntryRelation {
+			return state.nextDecision(dailySimulationJourneyStageAssessmentEntry), nil
+		}
 	}
 
 	if _, err := state.deps.APIClient.ResolveAssessmentEntry(ctx, state.entry.Token); err != nil {
@@ -429,11 +431,16 @@ func dailySimulationStageEnsureEntryAccess(ctx context.Context, state *dailySimu
 	}
 	state.outcome.EntryResolved = true
 
-	req, err := buildDailySimulationAssessmentEntryRelationRequest(state)
+	req, err := buildDailySimulationAssessmentEntryIntakeRequest(state)
 	if err != nil {
 		return toolchain.Decision{}, err
 	}
-	if _, err := state.deps.APIClient.AssignClinicianTesteeWithRelationType(ctx, "attending", req); err != nil {
+	previousTesteeID := dailySimulationTesteeID(state.testee)
+	intakeResp, err := state.deps.APIClient.IntakeAssessmentEntry(ctx, state.entry.Token, req)
+	if err != nil {
+		return toolchain.Decision{}, err
+	}
+	if err := applyDailySimulationAssessmentEntryIntakeResult(state, intakeResp, previousTesteeID); err != nil {
 		return toolchain.Decision{}, err
 	}
 	state.outcome.EntryIntaked = true
@@ -568,45 +575,121 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 	return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
 }
 
-func buildDailySimulationAssessmentEntryRelationRequest(state *dailySimulationJourneyState) (AssignClinicianTesteeRequest, error) {
+func buildDailySimulationAssessmentEntryIntakeRequest(state *dailySimulationJourneyState) (IntakeAssessmentEntryRequest, error) {
 	if state == nil {
-		return AssignClinicianTesteeRequest{}, fmt.Errorf("daily simulation state is nil")
+		return IntakeAssessmentEntryRequest{}, fmt.Errorf("daily simulation state is nil")
 	}
-	if state.entry == nil {
-		return AssignClinicianTesteeRequest{}, fmt.Errorf("assessment entry is not initialized before relation assignment")
+	req := IntakeAssessmentEntryRequest{
+		Name:   strings.TrimSpace(state.profile.ChildName),
+		Gender: dailySimulationGenderString(state.profile.ChildGender),
 	}
-	if state.testee == nil {
-		return AssignClinicianTesteeRequest{}, fmt.Errorf("testee is not initialized before relation assignment")
+	birthday, err := dailySimulationBirthdayPtr(state.profile.ChildDOB)
+	if err != nil {
+		return IntakeAssessmentEntryRequest{}, err
 	}
-	orgID := parseID(state.entry.OrgID)
-	if orgID == 0 && state.deps != nil && state.deps.Config != nil && state.deps.Config.Global.OrgID > 0 {
-		orgID = uint64(state.deps.Config.Global.OrgID)
+	req.Birthday = birthday
+
+	if state.existingTestee != nil {
+		profileID, err := dailySimulationExistingTesteeProfileID(state.existingTestee)
+		if err != nil {
+			return IntakeAssessmentEntryRequest{}, err
+		}
+		if profileID == nil {
+			return IntakeAssessmentEntryRequest{}, fmt.Errorf("existing testee %s has no profile_id; cannot public-intake assessment entry without duplicating testee", strings.TrimSpace(state.existingTestee.ID))
+		}
+		req.ProfileID = profileID
+		if name := strings.TrimSpace(state.existingTestee.Name); name != "" {
+			req.Name = name
+		}
+		if gender := strings.TrimSpace(state.existingTestee.Gender); gender != "" {
+			req.Gender = gender
+		}
+		if state.existingTestee.Birthday != nil {
+			req.Birthday = state.existingTestee.Birthday
+		}
 	}
-	if orgID == 0 {
-		return AssignClinicianTesteeRequest{}, fmt.Errorf("assessment entry org id is empty")
+
+	if strings.TrimSpace(req.Name) == "" {
+		return IntakeAssessmentEntryRequest{}, fmt.Errorf("daily simulation child name is empty")
 	}
-	clinicianID := parseID(state.entry.ClinicianID)
-	if clinicianID == 0 {
-		clinicianID = parseID(state.clinicianID)
+	return req, nil
+}
+
+func dailySimulationExistingTesteeProfileID(testee *ApiserverTesteeResponse) (*uint64, error) {
+	if testee == nil || testee.ProfileID == nil {
+		return nil, nil
 	}
-	if clinicianID == 0 {
-		return AssignClinicianTesteeRequest{}, fmt.Errorf("assessment entry clinician id is empty")
+	raw := strings.TrimSpace(*testee.ProfileID)
+	if raw == "" {
+		return nil, nil
 	}
-	testeeID := parseID(state.testee.ID)
-	if testeeID == 0 {
-		return AssignClinicianTesteeRequest{}, fmt.Errorf("invalid testee id %q", state.testee.ID)
+	profileID := parseID(raw)
+	if profileID == 0 {
+		return nil, fmt.Errorf("invalid existing testee profile_id %q", raw)
 	}
-	entryID := parseID(state.entry.ID)
-	if entryID == 0 {
-		return AssignClinicianTesteeRequest{}, fmt.Errorf("invalid assessment entry id %q", state.entry.ID)
+	return &profileID, nil
+}
+
+func dailySimulationGenderString(gender uint8) string {
+	switch gender {
+	case 1:
+		return "male"
+	case 2:
+		return "female"
+	default:
+		return "unknown"
 	}
-	return AssignClinicianTesteeRequest{
-		OrgID:       int64(orgID),
-		ClinicianID: clinicianID,
-		TesteeID:    testeeID,
-		SourceType:  "assessment_entry",
-		SourceID:    &entryID,
-	}, nil
+}
+
+func dailySimulationBirthdayPtr(raw string) (*time.Time, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, nil
+	}
+	layouts := []string{
+		"2006-01-02",
+		"2006-01-02 15:04:05",
+		time.RFC3339,
+		time.RFC3339Nano,
+	}
+	var lastErr error
+	for _, layout := range layouts {
+		parsed, err := time.Parse(layout, value)
+		if err == nil {
+			return &parsed, nil
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("invalid daily simulation child birthday %q: %w", raw, lastErr)
+}
+
+func applyDailySimulationAssessmentEntryIntakeResult(
+	state *dailySimulationJourneyState,
+	resp *AssessmentEntryIntakeResponse,
+	previousTesteeID string,
+) error {
+	if state == nil {
+		return fmt.Errorf("daily simulation state is nil")
+	}
+	if resp == nil || resp.Testee == nil || strings.TrimSpace(resp.Testee.ID) == "" {
+		return fmt.Errorf("assessment entry intake returned empty testee")
+	}
+	state.testee = &TesteeResponse{
+		ID:        strings.TrimSpace(resp.Testee.ID),
+		Name:      strings.TrimSpace(resp.Testee.Name),
+		CreatedAt: resp.Testee.CreatedAt,
+		UpdatedAt: resp.Testee.UpdatedAt,
+	}
+	if state.existingTestee != nil {
+		state.existingTestee.ID = state.testee.ID
+		state.existingTestee.Name = state.testee.Name
+		state.existingTestee.CreatedAt = resp.Testee.CreatedAt
+		state.existingTestee.UpdatedAt = resp.Testee.UpdatedAt
+	}
+	if strings.TrimSpace(previousTesteeID) == "" {
+		state.outcome.TesteeCreated = true
+	}
+	return nil
 }
 
 func resolveDailySimulationCanonicalTesteeID(ctx context.Context, state *dailySimulationJourneyState) (uint64, error) {
@@ -652,6 +735,10 @@ func shouldStopDailySimulationJourneyAfter(target dailySimulationJourneyTarget, 
 	default:
 		return stage == dailySimulationJourneyStageAnswerSheet
 	}
+}
+
+func shouldPrecreateDailySimulationTestee(target dailySimulationJourneyTarget) bool {
+	return target == dailySimulationJourneyCreateTestee
 }
 
 func resolveDailySimulationJourneyTarget(cfg DailySimulationConfig, runDate time.Time, index int) dailySimulationJourneyTarget {

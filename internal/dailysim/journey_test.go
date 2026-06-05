@@ -284,25 +284,69 @@ func TestEnsureDailySimulationGuardianMockConsumerLoginOmitsTenantID(t *testing.
 	}
 }
 
-func TestBuildDailySimulationAssessmentEntryRelationRequest(t *testing.T) {
-	req, err := buildDailySimulationAssessmentEntryRelationRequest(&dailySimulationJourneyState{
-		deps: &dependencies{
-			Config: &seedconfig.Config{
-				Global: seedconfig.GlobalConfig{OrgID: 1},
-			},
+func TestBuildDailySimulationAssessmentEntryIntakeRequestForNewSeedUser(t *testing.T) {
+	req, err := buildDailySimulationAssessmentEntryIntakeRequest(&dailySimulationJourneyState{
+		profile: dailySimulationProfile{
+			ChildName:   " Seed Child ",
+			ChildGender: 2,
+			ChildDOB:    "2018-01-02",
 		},
-		entry:       &AssessmentEntryResponse{ID: "6151", OrgID: "1", ClinicianID: "6152"},
-		clinicianID: "6152",
-		testee:      &TesteeResponse{ID: "6153"},
 	})
 	if err != nil {
-		t.Fatalf("build relation request: %v", err)
+		t.Fatalf("build intake request: %v", err)
 	}
-	if req.OrgID != 1 || req.ClinicianID != 6152 || req.TesteeID != 6153 {
-		t.Fatalf("unexpected relation request ids: %+v", req)
+	if req.ProfileID != nil {
+		t.Fatalf("new seed user intake should not carry profile id: %+v", req)
 	}
-	if req.SourceType != "assessment_entry" || req.SourceID == nil || *req.SourceID != 6151 {
-		t.Fatalf("unexpected relation source: %+v", req)
+	if req.Name != "Seed Child" || req.Gender != "female" {
+		t.Fatalf("unexpected intake request fields: %+v", req)
+	}
+	if req.Birthday == nil || req.Birthday.Format("2006-01-02") != "2018-01-02" {
+		t.Fatalf("unexpected birthday: %+v", req.Birthday)
+	}
+}
+
+func TestBuildDailySimulationAssessmentEntryIntakeRequestForExistingProfileTestee(t *testing.T) {
+	profileID := "6154"
+	birthday := time.Date(2017, 3, 4, 0, 0, 0, 0, time.UTC)
+	req, err := buildDailySimulationAssessmentEntryIntakeRequest(&dailySimulationJourneyState{
+		profile: dailySimulationProfile{
+			ChildName:   "Fallback Child",
+			ChildGender: 1,
+			ChildDOB:    "2018-01-02",
+		},
+		existingTestee: &ApiserverTesteeResponse{
+			ID:        "6153",
+			ProfileID: &profileID,
+			Name:      "Existing Child",
+			Gender:    "male",
+			Birthday:  &birthday,
+		},
+	})
+	if err != nil {
+		t.Fatalf("build intake request: %v", err)
+	}
+	if req.ProfileID == nil || *req.ProfileID != 6154 {
+		t.Fatalf("unexpected profile id: %+v", req.ProfileID)
+	}
+	if req.Name != "Existing Child" || req.Gender != "male" {
+		t.Fatalf("unexpected intake request fields: %+v", req)
+	}
+	if req.Birthday == nil || req.Birthday.Format("2006-01-02") != "2017-03-04" {
+		t.Fatalf("unexpected birthday: %+v", req.Birthday)
+	}
+}
+
+func TestBuildDailySimulationAssessmentEntryIntakeRequestRejectsExistingTesteeWithoutProfile(t *testing.T) {
+	_, err := buildDailySimulationAssessmentEntryIntakeRequest(&dailySimulationJourneyState{
+		profile: dailySimulationProfile{ChildName: "Seed Child"},
+		existingTestee: &ApiserverTesteeResponse{
+			ID:   "6153",
+			Name: "Existing Child",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected existing testee without profile_id to be rejected")
 	}
 }
 

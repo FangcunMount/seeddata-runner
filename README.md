@@ -196,13 +196,15 @@ sudo systemctl restart seeddata-runner
 
 配置结构固定为五段：
 
-| 段落 | 作用 |
-| --- | --- |
-| `global` | 默认机构 ID、默认标签前缀 |
-| `api` | 业务 API、采集 API、重试策略、静态 token |
-| `iam` | IAM 登录、mock-consumer 建号与可选 gRPC 配置 |
-| `dailySimulation` | 每日模拟用户生成策略 |
-| `planSubmit` | opened task 答卷提交策略 |
+
+| 段落                | 作用                                 |
+| ----------------- | ---------------------------------- |
+| `global`          | 默认机构 ID、默认标签前缀                     |
+| `api`             | 业务 API、采集 API、重试策略、静态 token        |
+| `iam`             | IAM 登录、mock-consumer 建号与可选 gRPC 配置 |
+| `dailySimulation` | 每日模拟用户生成策略                         |
+| `planSubmit`      | opened task 答卷提交策略                 |
+
 
 其中 `dailySimulation` 和 `planSubmit` 是必填段；`api.baseUrl` 也是运行时硬要求。
 
@@ -217,25 +219,27 @@ sudo systemctl restart seeddata-runner
 
 关键字段如下：
 
-| 字段 | 说明 |
-| --- | --- |
-| `countPerRun` | 固定每轮生成数量；当 `countMin` / `countMax` 都为 0 时生效 |
-| `countMin` / `countMax` | 每轮随机生成数量区间；设置后优先于 `countPerRun` |
-| `dailyMaxUsers` | 当天成功新增用户上限；`<= 0` 表示不限制 |
-| `workers` | 并发 worker 数 |
-| `runAt` | 兼容单次调度模式，每天固定时刻跑一次 |
-| `windowStartAt` / `windowEndAt` / `interval` | 窗口调度模式，在时间窗口内按固定间隔反复触发 |
-| `retryDelay` | 一轮失败后的重试等待时间 |
-| `stateFile` | daemon 状态文件，默认 `.seeddata-cache/daily-simulation-daemon-state.json` |
-| `clinicianIds` | 可用医生范围；当 `entryId` 为空时必填 |
-| `focusCliniciansPerRunMin` / `focusCliniciansPerRunMax` | 每轮从 `clinicianIds` 中抽取多少位医生参与本轮模拟；不配时默认使用全部医生 |
-| `entryId` | 指定现成 assessment entry；设置后优先复用这个入口，并忽略 `clinicianIds` 选入口的逻辑 |
-| `targetType` / `targetCode` / `targetVersion` | 当未指定 `entryId` 时，用于定位或创建 assessment entry；每个 testee 仍然只拿这一个入口 |
-| `additionalTargetCodes` / `additionalTargetMaxCount` | 入口填完后额外填报的量表池，以及每个 testee 从池子里随机抽取 `1..additionalTargetMaxCount` 个量表；`additionalTargetMaxCount=0` 表示不额外填报 |
-| `planIds` | 必填；每个模拟用户会从这里确定性选一个 plan 加入 |
-| `journeyMix` | 控制四种旅程深度的权重分布 |
-| `userPassword` / `userPhonePrefix` / `userEmailDomain` | 模拟 guardian 账号生成规则 |
+
+| 字段                                                                | 说明                                                                                                                         |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `countPerRun`                                                     | 固定每轮生成数量；当 `countMin` / `countMax` 都为 0 时生效                                                                                |
+| `countMin` / `countMax`                                           | 每轮随机生成数量区间；设置后优先于 `countPerRun`                                                                                            |
+| `dailyMaxUsers`                                                   | 当天成功新增用户上限；`<= 0` 表示不限制                                                                                                    |
+| `workers`                                                         | 并发 worker 数                                                                                                                |
+| `runAt`                                                           | 兼容单次调度模式，每天固定时刻跑一次                                                                                                         |
+| `windowStartAt` / `windowEndAt` / `interval`                      | 窗口调度模式，在时间窗口内按固定间隔反复触发                                                                                                     |
+| `retryDelay`                                                      | 一轮失败后的重试等待时间                                                                                                               |
+| `stateFile`                                                       | daemon 状态文件，默认 `.seeddata-cache/daily-simulation-daemon-state.json`                                                        |
+| `clinicianIds`                                                    | 可用医生范围；当 `entryId` 为空时必填                                                                                                   |
+| `focusCliniciansPerRunMin` / `focusCliniciansPerRunMax`           | 每轮从 `clinicianIds` 中抽取多少位医生参与本轮模拟；不配时默认使用全部医生                                                                              |
+| `entryId`                                                         | 指定现成 assessment entry；设置后优先复用这个入口，并忽略 `clinicianIds` 选入口的逻辑                                                                |
+| `targetType` / `targetCode` / `targetVersion`                     | 当未指定 `entryId` 时，用于定位或创建 assessment entry；每个 testee 仍然只拿这一个入口                                                              |
+| `additionalTargetCodes` / `additionalTargetMaxCount`              | 入口填完后额外填报的量表池，以及每个 testee 从池子里随机抽取 `1..additionalTargetMaxCount` 个量表；`additionalTargetMaxCount=0` 表示不额外填报                  |
+| `planIds`                                                         | 必填；每个模拟用户会从这里确定性选一个 plan 加入                                                                                                |
+| `journeyMix`                                                      | 控制四种旅程深度的权重分布                                                                                                              |
+| `userPassword` / `userPhonePrefix` / `userEmailDomain`            | 模拟 guardian 账号生成规则                                                                                                         |
 | `guardianRelation` / `testeeSource` / `testeeTags` / `isKeyFocus` | 创建 testee 时写入的业务属性；`guardianRelation` 需使用 IAM 当前词表 `self / parent / grandparent / other`，legacy `guardian` 会自动归一化为 `other` |
+
 
 `journeyMix` 支持四种目标：
 
@@ -258,13 +262,15 @@ sudo systemctl restart seeddata-runner
 
 关键字段如下：
 
-| 字段 | 说明 |
-| --- | --- |
-| `planIds` | 必填；持续扫描这些 plan |
-| `workers` | 并发提交 opened task 的 worker 数 |
+
+| 字段                  | 说明                                                  |
+| ------------------- | --------------------------------------------------- |
+| `planIds`           | 必填；持续扫描这些 plan                                      |
+| `workers`           | 并发提交 opened task 的 worker 数                         |
 | `completionPercent` | 当天 task 目标完成比例，取值 `0..100`；默认 `100` 保持旧行为，`0` 表示不提交 |
-| `idleInterval` | 本轮没有活跃 opened task 时，下次轮询等待时间 |
-| `activeInterval` | 本轮发现 opened task 并执行提交后，下次轮询等待时间 |
+| `idleInterval`      | 本轮没有活跃 opened task 时，下次轮询等待时间                       |
+| `activeInterval`    | 本轮发现 opened task 并执行提交后，下次轮询等待时间                    |
+
 
 `planSubmit` 会复用 `dailySimulation.testeeSource` 作为安全边界，避免自动完成正常业务渠道创建的 testee 任务；如果某个 task 的 testee 来源查询失败，会跳过该 task。
 
@@ -363,3 +369,4 @@ go test ./...
 - [cmd/seeddata/main.go](./cmd/seeddata/main.go)
 - [internal/seedconfig/config.go](./internal/seedconfig/config.go)
 - [scripts/run_seeddata_daemon.sh](./scripts/run_seeddata_daemon.sh)
+
