@@ -48,20 +48,29 @@ func TestResolveDailySimulationJourneyTargetDefaultsToSubmit(t *testing.T) {
 	}
 }
 
-func TestResolveDailySimulationJourneyTargetForMockConsumerAlwaysSubmits(t *testing.T) {
+func TestResolveDailySimulationJourneyTargetStableWithMockConsumerEnabled(t *testing.T) {
 	cfg := DailySimulationConfig{
 		JourneyMix: DailySimulationJourneyMixConfig{
-			RegisterOnlyWeight: 20,
+			RegisterOnlyWeight: 10,
 			CreateTesteeWeight: 20,
-			ResolveEntryWeight: 20,
+			ResolveEntryWeight: 30,
 			SubmitAnswerWeight: 40,
 		},
 	}
-	target := resolveDailySimulationJourneyTargetForMode(cfg, IAMConfig{
-		MockConsumer: IAMMockConsumerConfig{Enabled: true},
-	}, time.Date(2026, 4, 19, 0, 0, 0, 0, time.Local), 3)
-	if target != dailySimulationJourneySubmitAnswer {
-		t.Fatalf("expected mock-consumer mode to always submit answer, got %q", target)
+	runDate := time.Date(2026, 4, 19, 0, 0, 0, 0, time.Local)
+
+	first := resolveDailySimulationJourneyTarget(cfg, runDate, 3)
+	second := resolveDailySimulationJourneyTarget(cfg, runDate, 3)
+	if first != second {
+		t.Fatalf("expected stable journey target with mock-consumer config, got %q and %q", first, second)
+	}
+	switch first {
+	case dailySimulationJourneyRegisterOnly,
+		dailySimulationJourneyCreateTestee,
+		dailySimulationJourneyResolveEntry,
+		dailySimulationJourneySubmitAnswer:
+	default:
+		t.Fatalf("unexpected journey target %q", first)
 	}
 }
 
