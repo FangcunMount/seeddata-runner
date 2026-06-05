@@ -46,7 +46,6 @@ type EnsureIAMMockConsumerRequest = seedapi.EnsureIAMMockConsumerRequest
 type EnsureIAMMockConsumerResponse = seedapi.EnsureIAMMockConsumerResponse
 type CollectionCreateTesteeRequest = seedapi.CollectionCreateTesteeRequest
 type CollectionAssessmentDetailResponse = seedapi.CollectionAssessmentDetailResponse
-type AssignClinicianTesteeRequest = seedapi.AssignClinicianTesteeRequest
 type EnrollTesteeRequest = seedapi.EnrollTesteeRequest
 type EnrollmentResponse = seedapi.EnrollmentResponse
 type QuestionnaireDetailResponse = seedapi.QuestionnaireDetailResponse

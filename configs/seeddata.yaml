@@ -84,7 +84,7 @@ dailySimulation:
     - "614187067651404334"
   journeyMix:
     registerOnlyWeight: 10  # ~10% 只注册账号；各档位之和不必等于 100，按相对权重分流
-    createTesteeWeight: 15  # ~15% 注册后建档案即停
+    createTesteeWeight: 15  # ~15% 走公开 intake 建档案后停，不写答卷
     resolveEntryWeight: 25  # ~25% 完成入口接入后停，拉开 entry/testee 与答卷指标
     submitAnswerWeight: 50  # ~50% 走完全流程；planSubmit 另有 completionPercent 控制提交比例
 

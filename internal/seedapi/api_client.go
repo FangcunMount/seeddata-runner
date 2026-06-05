@@ -883,16 +883,6 @@ type CollectionAssessmentDetailResponse struct {
 	Status               string `json:"status"`
 }
 
-// AssignClinicianTesteeRequest 建立从业者关系请求（apiserver）。
-type AssignClinicianTesteeRequest struct {
-	OrgID        int64   `json:"org_id"`
-	ClinicianID  uint64  `json:"clinician_id"`
-	TesteeID     uint64  `json:"testee_id"`
-	RelationType string  `json:"relation_type,omitempty"`
-	SourceType   string  `json:"source_type,omitempty"`
-	SourceID     *uint64 `json:"source_id,omitempty"`
-}
-
 // QuestionnaireDetailResponse 问卷详情响应（collection-server）
 type QuestionnaireDetailResponse struct {
 	Code      string             `json:"code"`

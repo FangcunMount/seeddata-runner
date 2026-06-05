@@ -371,26 +371,7 @@ func dailySimulationStageEnsureTestee(ctx context.Context, state *dailySimulatio
 		state.outcome.TesteeCreated = false
 		return state.nextDecision(dailySimulationJourneyStageTesteeProfile), nil
 	}
-	if !shouldPrecreateDailySimulationTestee(state.journeyTarget) {
-		return state.nextDecision(dailySimulationJourneyStageTesteeProfile), nil
-	}
-	if state.collectionClient == nil {
-		return toolchain.Decision{}, fmt.Errorf("collection client is not initialized")
-	}
-	testee, testeeCreated, err := ensureDailySimulationTestee(
-		ctx,
-		state.collectionClient,
-		state.cfg,
-		state.profile,
-	)
-	if err != nil {
-		return toolchain.Decision{}, err
-	}
-	if testee == nil || strings.TrimSpace(testee.ID) == "" {
-		return toolchain.Decision{}, fmt.Errorf("ensure testee returned empty testee")
-	}
-	state.testee = testee
-	state.outcome.TesteeCreated = testeeCreated
+	// 受试者档案统一在公开 intake 阶段创建/绑定，避免 collection 预建档或后台 assign 关系。
 	return state.nextDecision(dailySimulationJourneyStageTesteeProfile), nil
 }
 
@@ -416,20 +397,24 @@ func dailySimulationStageEnsureEntryAccess(ctx context.Context, state *dailySimu
 	if state.entry == nil || strings.TrimSpace(state.entry.ID) == "" || strings.TrimSpace(state.entry.Token) == "" {
 		return toolchain.Decision{}, fmt.Errorf("assessment entry is not initialized")
 	}
+	hasEntryRelation := false
 	if state.testee != nil && strings.TrimSpace(state.testee.ID) != "" {
-		hasEntryRelation, err := hasAssessmentEntryRelation(ctx, state.deps.APIClient, state.testee.ID, state.entry.ID)
+		var err error
+		hasEntryRelation, err = hasAssessmentEntryRelation(ctx, state.deps.APIClient, state.testee.ID, state.entry.ID)
 		if err != nil {
 			return toolchain.Decision{}, err
 		}
-		if hasEntryRelation {
-			return state.nextDecision(dailySimulationJourneyStageAssessmentEntry), nil
-		}
 	}
 
+	// 每次访问都走公开 resolve，确保 entry_opened 行为事件落到对应 clinician。
 	if _, err := state.deps.APIClient.ResolveAssessmentEntry(ctx, state.entry.Token); err != nil {
 		return toolchain.Decision{}, err
 	}
 	state.outcome.EntryResolved = true
+	if hasEntryRelation {
+		state.outcome.EntryIntaked = true
+		return state.nextDecision(dailySimulationJourneyStageAssessmentEntry), nil
+	}
 
 	req, err := buildDailySimulationAssessmentEntryIntakeRequest(state)
 	if err != nil {
@@ -727,7 +712,7 @@ func shouldStopDailySimulationJourneyAfter(target dailySimulationJourneyTarget, 
 	case dailySimulationJourneyRegisterOnly:
 		return stage == dailySimulationJourneyStageGuardianAccount
 	case dailySimulationJourneyCreateTestee:
-		return stage == dailySimulationJourneyStageTesteeProfile
+		return stage == dailySimulationJourneyStageAssessmentEntry
 	case dailySimulationJourneyResolveEntry:
 		return stage == dailySimulationJourneyStageAssessmentEntry
 	case dailySimulationJourneySubmitAnswer:
@@ -735,10 +720,6 @@ func shouldStopDailySimulationJourneyAfter(target dailySimulationJourneyTarget, 
 	default:
 		return stage == dailySimulationJourneyStageAnswerSheet
 	}
-}
-
-func shouldPrecreateDailySimulationTestee(target dailySimulationJourneyTarget) bool {
-	return target == dailySimulationJourneyCreateTestee
 }
 
 func resolveDailySimulationJourneyTarget(cfg DailySimulationConfig, runDate time.Time, index int) dailySimulationJourneyTarget {

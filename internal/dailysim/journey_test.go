@@ -83,7 +83,8 @@ func TestShouldStopDailySimulationJourneyAfter(t *testing.T) {
 	}{
 		{name: "register stops after guardian", target: dailySimulationJourneyRegisterOnly, stage: dailySimulationJourneyStageGuardianAccount, want: true},
 		{name: "register does not stop after entry", target: dailySimulationJourneyRegisterOnly, stage: dailySimulationJourneyStageAssessmentEntry, want: false},
-		{name: "testee stops after testee", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStageTesteeProfile, want: true},
+		{name: "testee stops after intake", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStageAssessmentEntry, want: true},
+		{name: "testee does not stop after testee profile", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStageTesteeProfile, want: false},
 		{name: "testee does not stop after plan enrollment", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStagePlanEnrollment, want: false},
 		{name: "resolve stops after entry", target: dailySimulationJourneyResolveEntry, stage: dailySimulationJourneyStageAssessmentEntry, want: true},
 		{name: "submit stops after submit", target: dailySimulationJourneySubmitAnswer, stage: dailySimulationJourneyStageAnswerSheet, want: true},

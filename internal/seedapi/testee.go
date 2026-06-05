@@ -98,27 +98,3 @@ func (c *APIClient) GetTesteeClinicians(ctx context.Context, testeeID string) (*
 	}
 	return &relationResp, nil
 }
-
-// AssignClinicianTesteeWithRelationType 按指定关系类型建立受试者分配（apiserver）。
-func (c *APIClient) AssignClinicianTesteeWithRelationType(ctx context.Context, relationType string, req AssignClinicianTesteeRequest) (*RelationResponse, error) {
-	path := "/api/v1/clinician-testee-relations/assign"
-	switch strings.ToLower(strings.TrimSpace(relationType)) {
-	case "primary":
-		path = "/api/v1/clinician-testee-relations/assign-primary"
-	case "collaborator":
-		path = "/api/v1/clinician-testee-relations/assign-collaborator"
-	case "attending", "", "assigned":
-		path = "/api/v1/clinician-testee-relations/assign-attending"
-	}
-
-	resp, err := c.doRequest(ctx, "POST", path, req)
-	if err != nil {
-		return nil, err
-	}
-
-	var relationResp RelationResponse
-	if err := decodeResponseData(resp, &relationResp); err != nil {
-		return nil, fmt.Errorf("decode clinician-testee relation response: %w", err)
-	}
-	return &relationResp, nil
-}
