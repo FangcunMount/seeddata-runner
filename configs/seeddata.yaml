@@ -36,12 +36,12 @@ iam:
       insecureSkipVerify: false
 
 dailySimulation:
-  countMin: 20        # 每日模拟最小用户数
-  countMax: 100       # 每日模拟最大用户数
+  countMin: 40        # 每日模拟最小用户数
+  countMax: 200       # 每日模拟最大用户数
   countPerRun: 20     # 每轮模拟用户数，建议不超过 dailyMaxUsers/workers
-  dailyMaxUsers: 120  # 每日模拟用户数上限，超过后当天不再执行模拟；建议设置为 countMax 的整数倍以保证模拟效果，同时也要考虑 IAM 承受能力
-  workers: 6          # 模拟并发数，建议不超过 10，以免 IAM 压力过大
-  runDate: ""         # 模拟日期，格式 "YYYY-MM-DD"，默认为当天；设置后仅模拟指定日期，适用于补数据或测试
+  dailyMaxUsers: 250  # 每日模拟用户数上限，超过后当天不再执行模拟；建议设置为 countMax 的整数倍以保证模拟效果，同时也要考虑 IAM 承受能力
+  workers: 5          # 模拟并发数，建议不超过 10，以免 IAM 压力过大
+  runDate: "2026-05-16"         # 模拟日期，格式 "YYYY-MM-DD"，默认为当天；设置后仅模拟指定日期，适用于补数据或测试
   runAt: "10:00"      # 兼容单次调度；设置 windowStartAt/windowEndAt/interval 后按窗口模式执行
   windowStartAt: "10:00"  # 模拟时间窗口开始时间，格式 "HH:mm"
   windowEndAt: "23:00"    # 模拟时间窗口结束时间，格式 "HH:mm"
