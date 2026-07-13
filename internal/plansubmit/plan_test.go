@@ -27,8 +27,8 @@ func TestNewPlanQuestionnaireVersionMismatchError(t *testing.T) {
 		"questionnaire_code=QNR-001",
 		"scale_questionnaire_version=1.0.1",
 		"loaded_questionnaire_version=6.0.1",
-		"scale:sas-test",
-		"<cache.namespace>:scale:sas-test",
+		"assessment-model cache for code=sas-test",
+		"published model key for sas-test",
 	} {
 		if !strings.Contains(msg, expected) {
 			t.Fatalf("expected error message to contain %q, got %q", expected, msg)
@@ -345,7 +345,7 @@ func TestPlanTaskSubmitQuestionnaireLoaderUsesAPIGateway(t *testing.T) {
 				"scale_code": "SAS-TEST",
 				"status":     "active",
 			}})
-		case "/api/v1/scales/SAS-TEST":
+		case "/api/v1/assessment-models/SAS-TEST":
 			_ = json.NewEncoder(w).Encode(Response{Code: 0, Message: "ok", Data: map[string]any{
 				"code":                  "SAS-TEST",
 				"questionnaire_code":    "QNR-TEST",
@@ -420,7 +420,7 @@ func TestNewPlanTaskSubmitRunnerBuildsRunnerState(t *testing.T) {
 				"scale_code": "SAS-TEST",
 				"status":     "active",
 			}})
-		case "/api/v1/scales/SAS-TEST":
+		case "/api/v1/assessment-models/SAS-TEST":
 			_ = json.NewEncoder(w).Encode(Response{Code: 0, Message: "ok", Data: map[string]any{
 				"code":                  "SAS-TEST",
 				"questionnaire_code":    "QNR-TEST",
@@ -488,7 +488,7 @@ func TestNewPlanTaskSubmitBootstrapLoadsSessionAndQuestionnaire(t *testing.T) {
 				"scale_code": "SAS-TEST",
 				"status":     "active",
 			}})
-		case "/api/v1/scales/SAS-TEST":
+		case "/api/v1/assessment-models/SAS-TEST":
 			_ = json.NewEncoder(w).Encode(Response{Code: 0, Message: "ok", Data: map[string]any{
 				"code":                  "SAS-TEST",
 				"questionnaire_code":    "QNR-TEST",

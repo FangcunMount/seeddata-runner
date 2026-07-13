@@ -442,12 +442,12 @@ func truncateResponseBody(body []byte, limit int) string {
 	return value
 }
 
-// ScaleResponse 量表响应
+// ScaleResponse 测评模型响应（兼容旧 Scale 命名；字段对齐 assessment-models）。
 type ScaleResponse struct {
 	Code                 string `json:"code"`
 	Title                string `json:"title"`
 	Status               string `json:"status"`
-	Version              string `json:"version"`
+	Version              string `json:"version,omitempty"`
 	QuestionnaireCode    string `json:"questionnaire_code"`
 	QuestionnaireVersion string `json:"questionnaire_version"`
 }
@@ -875,12 +875,18 @@ type CollectionCreateTesteeRequest struct {
 	IsKeyFocus   bool     `json:"is_key_focus,omitempty"`
 }
 
-// CollectionAssessmentDetailResponse collection 侧答卷对应测评详情。
-type CollectionAssessmentDetailResponse struct {
-	ID                   string `json:"id"`
-	QuestionnaireCode    string `json:"questionnaire_code"`
-	QuestionnaireVersion string `json:"questionnaire_version"`
-	Status               string `json:"status"`
+// CollectionSubmitAcceptedResponse collection 答卷异步受理响应。
+type CollectionSubmitAcceptedResponse struct {
+	Status    string `json:"status"`
+	RequestID string `json:"request_id"`
+}
+
+// CollectionSubmitStatusResponse collection 答卷提交状态响应。
+type CollectionSubmitStatusResponse struct {
+	Status        string `json:"status"`
+	AnswerSheetID string `json:"answersheet_id,omitempty"`
+	AssessmentID  string `json:"assessment_id,omitempty"`
+	UpdatedAt     int64  `json:"updated_at,omitempty"`
 }
 
 // QuestionnaireDetailResponse 问卷详情响应（collection-server）
@@ -951,20 +957,22 @@ type Answer struct {
 	Value        interface{} `json:"value"`
 }
 
-// SubmitAnswerSheetResponse 提交答卷响应（collection-server）
+// SubmitAnswerSheetResponse 提交答卷响应。
+// collection 异步提交完成后 id 为 answersheet_id；admin-submit 同步返回答卷 id。
 type SubmitAnswerSheetResponse struct {
-	ID      string `json:"id"`
-	Message string `json:"message"`
+	ID           string `json:"id"`
+	AssessmentID string `json:"assessment_id,omitempty"`
+	Message      string `json:"message,omitempty"`
 }
 
-// AdminAnswerSheetListItem 管理端答卷列表项。
+// AdminAnswerSheetListItem 管理端答卷列表项（对齐 AnswerSheetSummaryItem）。
 type AdminAnswerSheetListItem struct {
 	ID                string `json:"id"`
 	QuestionnaireCode string `json:"questionnaire_code"`
-	Version           string `json:"questionnaire_version"`
+	QuestionnaireVer  string `json:"questionnaire_ver,omitempty"`
 	Title             string `json:"title"`
-	WriterID          string `json:"writer_id"`
-	TesteeID          string `json:"testee_id"`
+	FillerID          string `json:"filler_id"`
+	FilledAt          string `json:"filled_at,omitempty"`
 }
 
 // AdminAnswerSheetListResponse 管理端答卷列表响应。

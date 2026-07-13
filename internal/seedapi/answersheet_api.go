@@ -4,9 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
+
+	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
+)
+
+const (
+	collectionSubmitPollTimeout  = 2 * time.Minute
+	collectionSubmitPollInterval = 500 * time.Millisecond
 )
 
 type collectionSubmitAnswer struct {
@@ -25,7 +31,7 @@ type collectionSubmitAnswerSheetRequest struct {
 	Answers              []collectionSubmitAnswer `json:"answers"`
 }
 
-// SubmitAnswerSheet 提交答卷（collection-server）。
+// SubmitAnswerSheet 提交答卷（collection-server，异步 202 + submit-status 轮询）。
 func (c *APIClient) SubmitAnswerSheet(ctx context.Context, req SubmitAnswerSheetRequest) (*SubmitAnswerSheetResponse, error) {
 	wireReq, err := toCollectionSubmitAnswerSheetRequest(req)
 	if err != nil {
@@ -37,17 +43,81 @@ func (c *APIClient) SubmitAnswerSheet(ctx context.Context, req SubmitAnswerSheet
 		return nil, err
 	}
 
-	dataBytes, err := json.Marshal(resp.Data)
+	var accepted CollectionSubmitAcceptedResponse
+	if err := decodeResponseData(resp, &accepted); err != nil {
+		return nil, fmt.Errorf("decode collection submit accepted response: %w", err)
+	}
+	requestID := strings.TrimSpace(accepted.RequestID)
+	if requestID == "" {
+		// 兼容偶发同步返回 {id,...} 的旧形态。
+		var legacy SubmitAnswerSheetResponse
+		if err := decodeResponseData(resp, &legacy); err == nil && strings.TrimSpace(legacy.ID) != "" {
+			return &legacy, nil
+		}
+		return nil, fmt.Errorf("collection submit accepted without request_id")
+	}
+
+	status, err := c.waitCollectionAnswerSheetSubmit(ctx, requestID)
 	if err != nil {
-		return nil, fmt.Errorf("marshal response data: %w", err)
+		return nil, err
 	}
+	return &SubmitAnswerSheetResponse{
+		ID:           strings.TrimSpace(status.AnswerSheetID),
+		AssessmentID: strings.TrimSpace(status.AssessmentID),
+		Message:      strings.TrimSpace(status.Status),
+	}, nil
+}
 
-	var submitResp SubmitAnswerSheetResponse
-	if err := json.Unmarshal(dataBytes, &submitResp); err != nil {
-		return nil, fmt.Errorf("unmarshal submit response: %w", err)
+func (c *APIClient) waitCollectionAnswerSheetSubmit(ctx context.Context, requestID string) (*CollectionSubmitStatusResponse, error) {
+	deadline := time.Now().Add(collectionSubmitPollTimeout)
+	var lastStatus, lastAnswerSheetID string
+	for {
+		status, err := c.GetAnswerSheetSubmitStatus(ctx, requestID)
+		if err != nil {
+			return nil, err
+		}
+		lastStatus = status.Status
+		lastAnswerSheetID = status.AnswerSheetID
+		switch strings.ToLower(strings.TrimSpace(status.Status)) {
+		case "done":
+			if strings.TrimSpace(status.AnswerSheetID) == "" {
+				return nil, fmt.Errorf("collection submit done without answersheet_id: request_id=%s", requestID)
+			}
+			return status, nil
+		case "failed":
+			return nil, fmt.Errorf("collection submit failed: request_id=%s", requestID)
+		}
+
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf(
+				"collection submit not ready before timeout: request_id=%s last_status=%s answersheet_id=%s",
+				requestID,
+				lastStatus,
+				lastAnswerSheetID,
+			)
+		}
+		if err := scheduler.Wait(ctx, collectionSubmitPollInterval); err != nil {
+			return nil, err
+		}
 	}
+}
 
-	return &submitResp, nil
+// GetAnswerSheetSubmitStatus 查询 collection 答卷提交状态。
+func (c *APIClient) GetAnswerSheetSubmitStatus(ctx context.Context, requestID string) (*CollectionSubmitStatusResponse, error) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return nil, fmt.Errorf("request_id is required")
+	}
+	path := fmt.Sprintf("/api/v1/answersheets/submit-status?request_id=%s", urlQueryEscape(requestID))
+	resp, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var status CollectionSubmitStatusResponse
+	if err := decodeResponseData(resp, &status); err != nil {
+		return nil, fmt.Errorf("decode collection submit status response: %w", err)
+	}
+	return &status, nil
 }
 
 func toCollectionSubmitAnswerSheetRequest(req SubmitAnswerSheetRequest) (collectionSubmitAnswerSheetRequest, error) {
@@ -133,24 +203,6 @@ func (c *APIClient) ListAdminAnswerSheets(ctx context.Context, questionnaireCode
 		return nil, fmt.Errorf("decode admin answersheet list response: %w", err)
 	}
 	return &listResp, nil
-}
-
-// GetAssessmentByAnswerSheetID 查询答卷对应的测评详情（collection-server）。
-// 当测评尚未生成时返回 (nil, nil)。
-func (c *APIClient) GetAssessmentByAnswerSheetID(ctx context.Context, answerSheetID string) (*CollectionAssessmentDetailResponse, error) {
-	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("/api/v1/answersheets/%s/assessment", strings.TrimSpace(answerSheetID)), nil)
-	if err != nil {
-		if isAPIHTTPStatus(err, http.StatusNotFound) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	var detail CollectionAssessmentDetailResponse
-	if err := decodeResponseData(resp, &detail); err != nil {
-		return nil, fmt.Errorf("decode assessment-by-answersheet response: %w", err)
-	}
-	return &detail, nil
 }
 
 // SubmitAnswerSheetAdminWithPolicy 管理员提交答卷并覆盖超时/重试。

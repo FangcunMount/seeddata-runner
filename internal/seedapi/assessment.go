@@ -17,12 +17,14 @@ type AssessmentListResponse struct {
 
 // AssessmentResponse 测评响应（apiserver）。
 type AssessmentResponse struct {
-	ID                string   `json:"id"`
-	TesteeID          string   `json:"testee_id"`
-	QuestionnaireCode string   `json:"questionnaire_code"`
-	Status            string   `json:"status"`
-	TotalScore        *float64 `json:"total_score,omitempty"`
-	RiskLevel         *string  `json:"risk_level,omitempty"`
+	ID                   string   `json:"id"`
+	TesteeID             string   `json:"testee_id"`
+	QuestionnaireCode    string   `json:"questionnaire_code"`
+	QuestionnaireVersion string   `json:"questionnaire_version,omitempty"`
+	AnswerSheetID        string   `json:"answer_sheet_id,omitempty"`
+	Status               string   `json:"status"`
+	TotalScore           *float64 `json:"total_score,omitempty"`
+	RiskLevel            *string  `json:"risk_level,omitempty"`
 }
 
 // ListAssessmentsByTestee 获取某个受试者的测评列表（apiserver）。

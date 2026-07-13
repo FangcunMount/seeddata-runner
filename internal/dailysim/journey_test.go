@@ -394,11 +394,6 @@ func TestWaitForDailySimulationAssessmentFallsBackToAssessmentList(t *testing.T)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/api/v1/answersheets/"+answerSheetID+"/assessment":
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"code":1,"message":"An internal server error occurred"}`))
-			return
 		case r.URL.Path == "/api/v1/evaluations/assessments":
 			if got := r.URL.Query().Get("testee_id"); got != testeeID {
 				t.Fatalf("unexpected testee_id %q", got)
@@ -410,7 +405,7 @@ func TestWaitForDailySimulationAssessmentFallsBackToAssessmentList(t *testing.T)
 				t.Fatalf("unexpected page_size %q", got)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"items":[{"id":"` + assessmentID + `","testee_id":"` + testeeID + `","questionnaire_code":"` + questionnaireCode + `","status":"done"}],"total":1,"page":1,"page_size":100,"total_pages":1}}`))
+			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"items":[{"id":"` + assessmentID + `","testee_id":"` + testeeID + `","questionnaire_code":"` + questionnaireCode + `","questionnaire_version":"` + questionnaireVer + `","answer_sheet_id":"` + answerSheetID + `","status":"done"}],"total":1,"page":1,"page_size":100,"total_pages":1}}`))
 			return
 		default:
 			t.Fatalf("unexpected path %q", r.URL.Path)
@@ -419,12 +414,11 @@ func TestWaitForDailySimulationAssessmentFallsBackToAssessmentList(t *testing.T)
 	defer server.Close()
 
 	logger := log.New(log.NewOptions())
-	collectionClient := NewAPIClient(server.URL, "", logger)
 	apiClient := NewAPIClient(server.URL, "", logger)
 
 	gotAssessmentID, err := waitForDailySimulationAssessment(
 		context.Background(),
-		collectionClient,
+		nil,
 		apiClient,
 		answerSheetID,
 		testeeID,

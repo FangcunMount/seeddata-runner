@@ -1306,6 +1306,26 @@ func findDailySimulationAnswerSheet(
 	adminClient *APIClient,
 	questionnaireCode, guardianUserID, testeeID string,
 ) (*AdminAnswerSheetListItem, error) {
+	// 优先从测评列表取 answer_sheet_id（列表项已不再返回 testee_id）。
+	if adminClient != nil && strings.TrimSpace(testeeID) != "" {
+		answerSheetID, err := findDailySimulationAnswerSheetIDByAssessment(
+			ctx,
+			adminClient,
+			testeeID,
+			questionnaireCode,
+			"",
+		)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(answerSheetID) != "" {
+			return &AdminAnswerSheetListItem{
+				ID:                answerSheetID,
+				QuestionnaireCode: questionnaireCode,
+			}, nil
+		}
+	}
+
 	userID := parseID(guardianUserID)
 	if userID == 0 {
 		return nil, fmt.Errorf("invalid guardian user id %q", guardianUserID)
@@ -1314,13 +1334,27 @@ func findDailySimulationAnswerSheet(
 	if err != nil {
 		return nil, fmt.Errorf("list admin answersheets for questionnaire %s filler %s: %w", questionnaireCode, guardianUserID, err)
 	}
+	// daily sim 每个 guardian 对应用户唯一；按 filler+questionnaire 取首条即可。
 	for _, item := range resp.Items {
-		if strings.TrimSpace(item.TesteeID) == strings.TrimSpace(testeeID) {
-			cloned := item
-			return &cloned, nil
+		if strings.TrimSpace(item.ID) == "" {
+			continue
 		}
+		cloned := item
+		return &cloned, nil
 	}
 	return nil, nil
+}
+
+func findDailySimulationAnswerSheetIDByAssessment(
+	ctx context.Context,
+	apiClient *APIClient,
+	testeeID, questionnaireCode, questionnaireVersion string,
+) (string, error) {
+	assessment, err := findDailySimulationAssessmentItem(ctx, apiClient, testeeID, questionnaireCode, questionnaireVersion, "")
+	if err != nil || assessment == nil {
+		return "", err
+	}
+	return strings.TrimSpace(assessment.AnswerSheetID), nil
 }
 
 func findDailySimulationAssessment(
@@ -1328,31 +1362,57 @@ func findDailySimulationAssessment(
 	apiClient *APIClient,
 	testeeID, questionnaireCode, questionnaireVersion string,
 ) (string, error) {
+	assessment, err := findDailySimulationAssessmentItem(ctx, apiClient, testeeID, questionnaireCode, questionnaireVersion, "")
+	if err != nil || assessment == nil {
+		return "", err
+	}
+	return strings.TrimSpace(assessment.ID), nil
+}
+
+func findDailySimulationAssessmentItem(
+	ctx context.Context,
+	apiClient *APIClient,
+	testeeID, questionnaireCode, questionnaireVersion, answerSheetID string,
+) (*AssessmentResponse, error) {
 	page := 1
+	wantAnswerSheetID := strings.TrimSpace(answerSheetID)
+	wantCode := strings.TrimSpace(questionnaireCode)
+	wantVersion := strings.TrimSpace(questionnaireVersion)
 	for {
 		resp, err := apiClient.ListAssessmentsByTestee(ctx, testeeID, page, assessmentListPageSize)
 		if err != nil {
-			return "", fmt.Errorf("list assessments by testee %s: %w", testeeID, err)
+			return nil, fmt.Errorf("list assessments by testee %s: %w", testeeID, err)
 		}
 		for _, item := range resp.Items {
 			if item == nil {
 				continue
 			}
-			if strings.TrimSpace(item.QuestionnaireCode) == strings.TrimSpace(questionnaireCode) {
-				return strings.TrimSpace(item.ID), nil
+			if wantAnswerSheetID != "" {
+				if strings.TrimSpace(item.AnswerSheetID) == wantAnswerSheetID {
+					return item, nil
+				}
+				continue
 			}
+			if strings.TrimSpace(item.QuestionnaireCode) != wantCode {
+				continue
+			}
+			if wantVersion != "" && strings.TrimSpace(item.QuestionnaireVersion) != "" &&
+				strings.TrimSpace(item.QuestionnaireVersion) != wantVersion {
+				continue
+			}
+			return item, nil
 		}
 		if len(resp.Items) == 0 || page >= resp.TotalPages {
 			break
 		}
 		page++
 	}
-	return "", nil
+	return nil, nil
 }
 
 func waitForDailySimulationAssessment(
 	ctx context.Context,
-	collectionClient *APIClient,
+	_ *APIClient,
 	apiClient *APIClient,
 	answerSheetID string,
 	testeeID, questionnaireCode, questionnaireVersion string,
@@ -1360,34 +1420,40 @@ func waitForDailySimulationAssessment(
 	deadline := time.Now().Add(seedAssessmentPollTimeout)
 	var lastErr error
 	for {
-		if collectionClient != nil {
-			detail, err := collectionClient.GetAssessmentByAnswerSheetID(ctx, answerSheetID)
-			if err != nil {
-				wrappedErr := fmt.Errorf("get assessment by answersheet %s: %w", answerSheetID, err)
-				if !shouldRetryDailySimulationAssessmentLookup(wrappedErr) {
-					return "", wrappedErr
-				}
-				lastErr = wrappedErr
-			} else if detail != nil && strings.TrimSpace(detail.ID) != "" {
-				return strings.TrimSpace(detail.ID), nil
-			}
-		}
-
-		if apiClient != nil && strings.TrimSpace(testeeID) != "" && strings.TrimSpace(questionnaireCode) != "" {
-			assessmentID, err := findDailySimulationAssessment(
+		if apiClient != nil && strings.TrimSpace(testeeID) != "" {
+			assessment, err := findDailySimulationAssessmentItem(
 				ctx,
 				apiClient,
 				testeeID,
 				questionnaireCode,
 				questionnaireVersion,
+				answerSheetID,
 			)
 			if err != nil {
 				if !shouldRetryDailySimulationAssessmentLookup(err) {
 					return "", err
 				}
 				lastErr = err
-			} else if strings.TrimSpace(assessmentID) != "" {
-				return strings.TrimSpace(assessmentID), nil
+			} else if assessment != nil && strings.TrimSpace(assessment.ID) != "" {
+				return strings.TrimSpace(assessment.ID), nil
+			} else if strings.TrimSpace(answerSheetID) != "" && strings.TrimSpace(questionnaireCode) != "" {
+				// answer_sheet_id 尚未回填时，回退到问卷编码匹配（兼容过渡期）。
+				assessment, err = findDailySimulationAssessmentItem(
+					ctx,
+					apiClient,
+					testeeID,
+					questionnaireCode,
+					questionnaireVersion,
+					"",
+				)
+				if err != nil {
+					if !shouldRetryDailySimulationAssessmentLookup(err) {
+						return "", err
+					}
+					lastErr = err
+				} else if assessment != nil && strings.TrimSpace(assessment.ID) != "" {
+					return strings.TrimSpace(assessment.ID), nil
+				}
 			}
 		}
 

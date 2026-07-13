@@ -6,7 +6,8 @@ import (
 	"fmt"
 )
 
-// GetScale 获取量表详情。
+// GetScale 获取测评模型详情（兼容旧命名；实际调用 assessment-models）。
+// apiserver 与 collection-server 均提供 GET /api/v1/assessment-models/{code}。
 func (c *APIClient) GetScale(ctx context.Context, code string) (*ScaleResponse, error) {
 	cacheKey := normalizeSeedCacheKey(code)
 	if cacheKey != "" {
@@ -19,7 +20,7 @@ func (c *APIClient) GetScale(ctx context.Context, code string) (*ScaleResponse, 
 		}
 	}
 
-	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("/api/v1/scales/%s", code), nil)
+	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("/api/v1/assessment-models/%s", code), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -29,10 +30,11 @@ func (c *APIClient) GetScale(ctx context.Context, code string) (*ScaleResponse, 
 		return nil, fmt.Errorf("marshal response data: %w", err)
 	}
 
-	var sResp ScaleResponse
-	if err := json.Unmarshal(dataBytes, &sResp); err != nil {
-		return nil, fmt.Errorf("unmarshal scale response: %w", err)
+	var model assessmentModelResponse
+	if err := json.Unmarshal(dataBytes, &model); err != nil {
+		return nil, fmt.Errorf("unmarshal assessment model response: %w", err)
 	}
+	sResp := model.toScaleResponse()
 
 	if cacheKey != "" {
 		cloned := sResp
@@ -42,6 +44,27 @@ func (c *APIClient) GetScale(ctx context.Context, code string) (*ScaleResponse, 
 	}
 
 	return &sResp, nil
+}
+
+// assessmentModelResponse 对齐 apiserver/collection 的 assessment-models 摘要。
+type assessmentModelResponse struct {
+	Code                 string `json:"code"`
+	Title                string `json:"title"`
+	Status               string `json:"status"`
+	Version              string `json:"version,omitempty"`
+	QuestionnaireCode    string `json:"questionnaire_code,omitempty"`
+	QuestionnaireVersion string `json:"questionnaire_version,omitempty"`
+}
+
+func (m assessmentModelResponse) toScaleResponse() ScaleResponse {
+	return ScaleResponse{
+		Code:                 m.Code,
+		Title:                m.Title,
+		Status:               m.Status,
+		Version:              m.Version,
+		QuestionnaireCode:    m.QuestionnaireCode,
+		QuestionnaireVersion: m.QuestionnaireVersion,
+	}
 }
 
 // GetQuestionnaireDetail 获取问卷详情（collection-server）。
