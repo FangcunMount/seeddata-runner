@@ -26,8 +26,8 @@ func newPlanTaskSubmitQuestionnaireLoader(session *planTaskSubmitSession) (*plan
 func (l *planTaskSubmitQuestionnaireLoader) Load(
 	ctx context.Context,
 	verbose bool,
-) (*ScaleResponse, *QuestionnaireDetailResponse, error) {
-	scaleResp, err := l.session.gateway.GetScale(ctx, l.session.plan.ScaleCode)
+) (*PublishedAssessmentModelResponse, *QuestionnaireDetailResponse, error) {
+	scaleResp, err := l.session.apiGateway.GetPublishedAssessmentModel(ctx, l.session.plan.ScaleCode, "")
 	if err != nil {
 		return nil, nil, fmt.Errorf("load scale %s: %w", l.session.plan.ScaleCode, err)
 	}
@@ -41,7 +41,7 @@ func (l *planTaskSubmitQuestionnaireLoader) Load(
 		return nil, nil, fmt.Errorf("scale %s has empty questionnaire_version", l.session.plan.ScaleCode)
 	}
 
-	detail, err := l.session.gateway.GetQuestionnaireDetail(ctx, scaleResp.QuestionnaireCode)
+	detail, err := l.session.collectionGateway.GetPublishedQuestionnaire(ctx, scaleResp.QuestionnaireCode, scaleResp.QuestionnaireVersion)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load questionnaire %s: %w", scaleResp.QuestionnaireCode, err)
 	}

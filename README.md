@@ -73,6 +73,8 @@ mkdir -p ./bin
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ./bin/seeddata-linux-amd64 ./cmd/seeddata
 ```
 
+
+
 ### 2. 确认 systemd 当前使用的启动方式
 
 先检查服务单元文件，确认它当前是直接跑二进制，还是仍然在跑 `go run`：
@@ -130,6 +132,8 @@ sudo systemctl daemon-reload
 sudo systemctl restart seeddata-runner
 ```
 
+
+
 ### 5. 验证服务是否按新版本运行
 
 ```bash
@@ -158,6 +162,8 @@ sudo systemctl cat seeddata-runner.service
 - `ExecStart` 是否已经切到新二进制
 - `--config` 指向的是否是你预期的配置文件
 
+
+
 ### 6. 一次典型升级流程
 
 ```bash
@@ -176,12 +182,14 @@ sudo systemctl daemon-reload
 sudo systemctl restart seeddata-runner
 ```
 
+
+
 ## 认证与依赖
 
 运行时依赖主要分为三类：
 
 - `api.baseUrl`：业务 API 地址，必填
-- `api.collectionBaseUrl`：采集/问卷相关 API 地址；为空时会回退到 `api.baseUrl`
+- `api.collectionBaseUrl`：采集/问卷和 C 端答卷 API 地址；启用 daemon 时必填，不再回退到 `api.baseUrl`
 - `iam.*`：当 `api.token` 为空时，用于登录并自动刷新 token；daily simulation 新建模拟 C 端账号时还会使用 IAM v2 内部 mock-consumer REST ensure
 
 凭据优先级如下：
@@ -190,7 +198,7 @@ sudo systemctl restart seeddata-runner
 2. 环境变量 `IAM_USERNAME` / `IAM_PASSWORD`
 3. 配置文件中的 `iam.username` / `iam.password`
 
-如果 daily simulation 需要新建 guardian / testee，应启用 `iam.mockConsumer` 并配置 shared secret。runner 只通过 IAM 创建或确保 guardian 登录身份；受试者注册交给 qs-server `/api/v1/testees`，不再先注册 IAM profile 再携带 profile_id 注册 testee。
+如果 daily simulation 需要新建 guardian / testee，应启用 `iam.mockConsumer`。shared secret 不应写入仓库，只允许通过 `IAM_MOCK_CONSUMER_SHARED_SECRET` 或部署密钥注入。runner 只通过 IAM 创建或确保 guardian 登录身份；受试者注册交给 qs-server `/api/v1/testees`，不再先注册 IAM profile 再携带 profile_id 注册 testee。
 
 ## 配置总览
 
@@ -230,6 +238,7 @@ sudo systemctl restart seeddata-runner
 | `windowStartAt` / `windowEndAt` / `interval`                      | 窗口调度模式，在时间窗口内按固定间隔反复触发                                                                                                     |
 | `retryDelay`                                                      | 一轮失败后的重试等待时间                                                                                                               |
 | `stateFile`                                                       | daemon 状态文件，默认 `.seeddata-cache/daily-simulation-daemon-state.json`                                                        |
+| `submissionStateFile`                                             | 提交恢复账本，默认 `.seeddata-cache/daily-simulation-submissions.json`；仅保存指纹与业务标识，文件权限为 `0600`                                  |
 | `clinicianIds`                                                    | 可用医生范围；当 `entryId` 为空时必填                                                                                                   |
 | `focusCliniciansPerRunMin` / `focusCliniciansPerRunMax`           | 每轮从 `clinicianIds` 中抽取多少位医生参与本轮模拟；不配时默认使用全部医生                                                                              |
 | `entryId`                                                         | 指定现成 assessment entry；设置后优先复用这个入口，并忽略 `clinicianIds` 选入口的逻辑                                                                |
@@ -256,6 +265,10 @@ sudo systemctl restart seeddata-runner
 2. 若找到了但已停用，则自动重新激活
 3. 若没有找到，则自动创建一个新 entry
 
+提交答卷时，runner 使用 guardian token 调用 collection：先按已发布模型锁定精确的 `code@version` 问卷，再以稳定幂等键提交，最后只通过 `assessment-readiness` 等待测评结果。超时会保留为 `accepted_pending`，下一轮从恢复账本继续查询，不会重新生成答卷。
+
+
+
 ## Plan Submit
 
 `planSubmit` 只处理当天“已经 opened 的任务”，不会参与 plan 调度本身。它会按 `planned_after = 当天 00:00:00` 且 `planned_before = 当天 23:59:59` 拉取任务窗口（需要 qs-apiserver 支持 `planned_after`），再在本地校验当天任务；随后按 task 的 `testee_id` 查询 testee 来源，只提交 `source == dailySimulation.testeeSource` 的任务，并用 `completionPercent` 控制当天最多完成的比例。
@@ -270,11 +283,18 @@ sudo systemctl restart seeddata-runner
 | `completionPercent` | 当天 task 目标完成比例，取值 `0..100`；默认 `100` 保持旧行为，`0` 表示不提交 |
 | `idleInterval`      | 本轮没有活跃 opened task 时，下次轮询等待时间                       |
 | `activeInterval`    | 本轮发现 opened task 并执行提交后，下次轮询等待时间                    |
+| `submissionStateFile` | 提交恢复账本，默认 `.seeddata-cache/plan-submit-submissions.json`；重启后复用同一幂等键和确定性请求体 |
 
 
 `planSubmit` 会复用 `dailySimulation.testeeSource` 作为安全边界，避免自动完成正常业务渠道创建的 testee 任务；如果某个 task 的 testee 来源查询失败，会跳过该 task。
 
-启动时，每个 plan 会预先加载一次 plan、scale 和 questionnaire 元数据，之后进入连续轮询。
+每个扫描周期都会重新解析一次当前 published assessment model，并在该周期内固定模型绑定的精确问卷快照。提交仍走 apiserver `admin-submit` 以保留 `task_id`，但网络重试始终复用同一业务幂等键，并为每次 HTTP 尝试生成新的 `X-Request-ID`；409 会进入人工检查，不会自动换 key。
+
+## 发布、恢复与回滚
+
+发布顺序固定为：轮换 IAM mock-consumer secret → 发布 qs-server → 验证 `admin-submit.idempotency_key` → 停止旧 runner 并等待请求窗口结束 → 备份旧状态文件 → 发布新 runner → 单组织小流量验证。若需要回滚 qs-server，必须先回滚 runner。
+
+两份 submission state file 是独立恢复账本。`prepared`、`accepted`、`accepted_pending` 和 `conflict` 不会自动删除；完成记录保留 30 天。不要删除账本来规避 409，因为这会失去“同一逻辑任务不得换 key”的保护。
 
 ## 最小示例
 
@@ -297,7 +317,7 @@ iam:
   tenantId: "1"
   mockConsumer:
     enabled: true
-    sharedSecret: "replace-with-iam-seed-secret"
+    sharedSecret: "" # 通过 IAM_MOCK_CONSUMER_SHARED_SECRET 注入
     endpointPath: "/api/v2/internal/authn/mock-consumers/ensure"
     maxConcurrent: 1
   grpc:
@@ -311,6 +331,7 @@ dailySimulation:
   windowEndAt: "18:00"
   interval: "30m"
   retryDelay: "30m"
+  submissionStateFile: ".seeddata-cache/daily-simulation-submissions.json"
   clinicianIds:
     - "614995509882401326"
   targetType: "scale"
@@ -323,6 +344,7 @@ dailySimulation:
     submitAnswerWeight: 100
 
 planSubmit:
+  submissionStateFile: ".seeddata-cache/plan-submit-submissions.json"
   planIds:
     - "614333603412718126"
   workers: 1
@@ -343,6 +365,8 @@ planSubmit:
 - 不支持按单个 seed step 运行
 - 不再包含历史 backfill / fixup 工具入口
 
+
+
 ## 项目结构
 
 主要目录如下：
@@ -355,6 +379,8 @@ planSubmit:
 - [internal/seedconfig](./internal/seedconfig)：配置加载、默认值、校验
 - [internal/seedruntime](./internal/seedruntime)：日志、signal、client 初始化
 - [internal/seedapi](./internal/seedapi) / [internal/seediauth](./internal/seediauth)：API 与 IAM 访问封装
+
+
 
 ## 开发与验证
 
@@ -369,4 +395,3 @@ go test ./...
 - [cmd/seeddata/main.go](./cmd/seeddata/main.go)
 - [internal/seedconfig/config.go](./internal/seedconfig/config.go)
 - [scripts/run_seeddata_daemon.sh](./scripts/run_seeddata_daemon.sh)
-

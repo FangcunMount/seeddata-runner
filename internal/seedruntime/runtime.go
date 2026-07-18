@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
+	toolanswersheet "github.com/FangcunMount/seeddata-runner/internal/answersheet"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 	"github.com/FangcunMount/seeddata-runner/internal/seedapi"
 	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
@@ -17,10 +18,12 @@ import (
 )
 
 type Dependencies struct {
-	Logger           log.Logger
-	Config           *seedconfig.Config
-	APIClient        *seedapi.APIClient
-	CollectionClient *seedapi.APIClient
+	Logger                log.Logger
+	Config                *seedconfig.Config
+	APIClient             *seedapi.APIClient
+	CollectionClient      *seedapi.APIClient
+	DailySubmissionLedger *toolanswersheet.SubmissionLedger
+	PlanSubmissionLedger  *toolanswersheet.SubmissionLedger
 }
 
 func NewLogger(verbose bool) log.Logger {
@@ -46,17 +49,30 @@ func LoadDependencies(ctx context.Context, cfg *seedconfig.Config, logger log.Lo
 	apiClient := newConfiguredAPIClient(apiBaseURL, token, cfg, logger)
 	logger.Infow("Initialized API client", "base_url", apiBaseURL)
 
-	collectionURL := firstNonEmpty(cfg.API.CollectionBaseURL, apiBaseURL)
+	collectionURL := strings.TrimSpace(cfg.API.CollectionBaseURL)
+	if collectionURL == "" {
+		return nil, fmt.Errorf("api.collectionBaseUrl is required for published questionnaires and collection submission")
+	}
 	collectionClient := newConfiguredAPIClient(collectionURL, token, cfg, logger)
 	logger.Infow("Initialized collection client", "base_url", collectionURL)
 
 	configureIAMTokenRefresh(cfg, logger, token, apiClient, collectionClient)
+	dailyLedger, err := toolanswersheet.NewSubmissionLedger(cfg.DailySimulation.SubmissionStateFile, "daily")
+	if err != nil {
+		return nil, fmt.Errorf("initialize daily submission ledger: %w", err)
+	}
+	planLedger, err := toolanswersheet.NewSubmissionLedger(cfg.PlanSubmit.SubmissionStateFile, "plan")
+	if err != nil {
+		return nil, fmt.Errorf("initialize plan submission ledger: %w", err)
+	}
 
 	return &Dependencies{
-		Logger:           logger,
-		Config:           cfg,
-		APIClient:        apiClient,
-		CollectionClient: collectionClient,
+		Logger:                logger,
+		Config:                cfg,
+		APIClient:             apiClient,
+		CollectionClient:      collectionClient,
+		DailySubmissionLedger: dailyLedger,
+		PlanSubmissionLedger:  planLedger,
 	}, nil
 }
 

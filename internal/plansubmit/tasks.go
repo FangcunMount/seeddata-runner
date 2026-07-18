@@ -3,9 +3,9 @@ package plansubmit
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"math/rand"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -13,11 +13,10 @@ const (
 	planOpenTaskPageSize             = 100
 	planOpenTaskMaxPages             = 200
 	planOpenTaskSubmitRequestTimeout = 15 * time.Second
-	planOpenTaskSubmitHTTPRetryMax   = 0
 	planOpenTaskSubmitMaxAttempts    = 2
-	planOpenTaskSubmitRetryBackoff   = 2 * time.Second
-	planOpenTaskRecentSubmitTTL      = 10 * time.Minute
 )
+
+var planOpenTaskSubmitRetryBackoff = 2 * time.Second
 
 type planTaskJob struct {
 	testeeID string
@@ -30,69 +29,9 @@ type planTaskLogger interface {
 	Infow(string, ...interface{})
 }
 
-type recentPlanTaskTracker struct {
-	mu          sync.Mutex
-	ttl         time.Duration
-	submittedAt map[string]time.Time
-}
-
-// newRecentPlanTaskTracker 创建最近计划任务跟踪器
-func newRecentPlanTaskTracker(ttl time.Duration) *recentPlanTaskTracker {
-	if ttl <= 0 {
-		ttl = planOpenTaskRecentSubmitTTL
-	}
-	return &recentPlanTaskTracker{
-		ttl:         ttl,
-		submittedAt: make(map[string]time.Time),
-	}
-}
-
-// Seen 检查任务是否已提交
-func (t *recentPlanTaskTracker) Seen(taskID string) bool {
-	if t == nil {
-		return false
-	}
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
-		return false
-	}
-
-	now := time.Now()
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.pruneLocked(now)
-
-	until, ok := t.submittedAt[taskID]
-	return ok && now.Before(until)
-}
-
-func (t *recentPlanTaskTracker) Remember(taskID string) {
-	if t == nil {
-		return
-	}
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
-		return
-	}
-
-	now := time.Now()
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.pruneLocked(now)
-	t.submittedAt[taskID] = now.Add(t.ttl)
-}
-
-func (t *recentPlanTaskTracker) pruneLocked(now time.Time) {
-	for taskID, expiresAt := range t.submittedAt {
-		if !now.Before(expiresAt) {
-			delete(t.submittedAt, taskID)
-		}
-	}
-}
-
 func listOpenPlanTaskJobs(
 	ctx context.Context,
-	gateway planTaskSubmitGateway,
+	gateway planTaskSubmitAPIGateway,
 	logger planTaskLogger,
 	planID string,
 	verbose bool,
@@ -106,7 +45,7 @@ func listOpenPlanTaskJobs(
 
 func listDailyPlanTaskJobs(
 	ctx context.Context,
-	gateway planTaskSubmitGateway,
+	gateway planTaskSubmitAPIGateway,
 	logger planTaskLogger,
 	planID string,
 	completionPercent int,
@@ -148,7 +87,7 @@ func listDailyPlanTaskJobs(
 
 func listPlanTaskWindowTasks(
 	ctx context.Context,
-	gateway planTaskSubmitGateway,
+	gateway planTaskSubmitAPIGateway,
 	logger planTaskLogger,
 	req ListPlanTaskWindowRequest,
 	verbose bool,
@@ -268,7 +207,7 @@ func filterPlanSubmitTasksForDay(tasks []TaskResponse, now time.Time, logger pla
 
 func filterPlanSubmitTasksByTesteeSource(
 	ctx context.Context,
-	gateway planTaskSubmitGateway,
+	gateway planTaskSubmitAPIGateway,
 	logger planTaskLogger,
 	tasks []TaskResponse,
 	testeeSource string,
@@ -405,6 +344,7 @@ func normalizeTaskStatus(status string) string {
 }
 
 func buildPlanTaskSubmitRequest(
+	planID string,
 	detail *QuestionnaireDetailResponse,
 	questionnaireVersion string,
 	task TaskResponse,
@@ -419,7 +359,7 @@ func buildPlanTaskSubmitRequest(
 	}
 	if strings.TrimSpace(detail.Version) != questionnaireVersion {
 		return nil, fmt.Errorf(
-			"questionnaire version mismatch while building plan answersheet: questionnaire_code=%s expected=%s loaded=%s; retry after refreshing the scale/questionnaire cache path",
+			"published questionnaire version mismatch while building plan answersheet: questionnaire_code=%s expected=%s loaded=%s",
 			detail.Code,
 			questionnaireVersion,
 			detail.Version,
@@ -431,9 +371,7 @@ func buildPlanTaskSubmitRequest(
 		return nil, fmt.Errorf("task %s has empty testee_id", task.ID)
 	}
 
-	rngSeed := time.Now().UnixNano()
-	rngSeed += int64(parseID(testeeID))
-	rngSeed += int64(parseID(task.ID))
+	rngSeed := deterministicPlanAnswerSeed(planID, task.ID, testeeID, detail.Code, questionnaireVersion)
 	rng := rand.New(rand.NewSource(rngSeed))
 	answers := buildAnswers(detail, rng)
 	if len(answers) == 0 {
@@ -473,16 +411,11 @@ func buildPlanTaskSubmitRequest(
 	}, nil
 }
 
-func submitPlanTaskAnswerSheet(
-	ctx context.Context,
-	client adminAnswerSheetSubmitClient,
-	req SubmitAnswerSheetRequest,
-) (int, error) {
-	return submitAdminAnswerSheet(ctx, client, req, adminAnswerSheetSubmitPolicy{
-		Timeout:      planOpenTaskSubmitRequestTimeout,
-		HTTPRetryMax: planOpenTaskSubmitHTTPRetryMax,
-		MaxAttempts:  planOpenTaskSubmitMaxAttempts,
-		RetryBackoff: planOpenTaskSubmitRetryBackoff,
-		Retryable:    isSeedPlanRecoverableError,
-	})
+func deterministicPlanAnswerSeed(parts ...string) int64 {
+	hash := fnv.New64a()
+	for _, part := range parts {
+		_, _ = hash.Write([]byte(strings.TrimSpace(part)))
+		_, _ = hash.Write([]byte{0})
+	}
+	return int64(hash.Sum64())
 }

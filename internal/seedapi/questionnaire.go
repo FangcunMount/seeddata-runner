@@ -2,105 +2,98 @@ package seedapi
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
 )
 
-// GetScale 获取测评模型详情（兼容旧命名；实际调用 assessment-models）。
-// apiserver 与 collection-server 均提供 GET /api/v1/assessment-models/{code}。
-func (c *APIClient) GetScale(ctx context.Context, code string) (*ScaleResponse, error) {
-	cacheKey := normalizeSeedCacheKey(code)
-	if cacheKey != "" {
-		c.scaleCacheMu.RLock()
-		cached := c.scaleCache[cacheKey]
-		c.scaleCacheMu.RUnlock()
-		if cached != nil {
-			cloned := *cached
+// GetPublishedAssessmentModel 获取不可变的已发布测评模型。
+func (c *APIClient) GetPublishedAssessmentModel(ctx context.Context, code, version string) (*PublishedAssessmentModelResponse, error) {
+	code = strings.TrimSpace(code)
+	version = strings.TrimSpace(version)
+	if code == "" {
+		return nil, fmt.Errorf("assessment model code is required")
+	}
+	cacheKey := publishedResourceCacheKey(code, version)
+	if version != "" {
+		if cached, ok := c.publishedModelCache.Get(cacheKey); ok {
+			cloned := cached
 			return &cloned, nil
 		}
 	}
 
-	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("/api/v1/assessment-models/%s", code), nil)
+	path := fmt.Sprintf("/api/v1/assessment-models/published/%s", url.PathEscape(code))
+	if version != "" {
+		path += "?version=" + url.QueryEscape(version)
+	}
+	resp, err := c.doRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	dataBytes, err := json.Marshal(resp.Data)
-	if err != nil {
-		return nil, fmt.Errorf("marshal response data: %w", err)
+	var model PublishedAssessmentModelResponse
+	if err := decodeResponseData(resp, &model); err != nil {
+		return nil, fmt.Errorf("decode published assessment model response: %w", err)
 	}
-
-	var model assessmentModelResponse
-	if err := json.Unmarshal(dataBytes, &model); err != nil {
-		return nil, fmt.Errorf("unmarshal assessment model response: %w", err)
+	if strings.TrimSpace(model.Code) != code {
+		return nil, fmt.Errorf("published assessment model code mismatch: requested=%s loaded=%s", code, model.Code)
 	}
-	sResp := model.toScaleResponse()
-
-	if cacheKey != "" {
-		cloned := sResp
-		c.scaleCacheMu.Lock()
-		c.scaleCache[cacheKey] = &cloned
-		c.scaleCacheMu.Unlock()
+	if version != "" && strings.TrimSpace(model.Version) != version {
+		return nil, fmt.Errorf("published assessment model version mismatch: code=%s requested=%s loaded=%s", code, version, model.Version)
 	}
-
-	return &sResp, nil
+	if version != "" {
+		exactKey := publishedResourceCacheKey(model.Code, model.Version)
+		c.publishedModelCache.Put(exactKey, model)
+	}
+	return &model, nil
 }
 
-// assessmentModelResponse 对齐 apiserver/collection 的 assessment-models 摘要。
-type assessmentModelResponse struct {
-	Code                 string `json:"code"`
-	Title                string `json:"title"`
-	Status               string `json:"status"`
-	Version              string `json:"version,omitempty"`
-	QuestionnaireCode    string `json:"questionnaire_code,omitempty"`
-	QuestionnaireVersion string `json:"questionnaire_version,omitempty"`
-}
-
-func (m assessmentModelResponse) toScaleResponse() ScaleResponse {
-	return ScaleResponse{
-		Code:                 m.Code,
-		Title:                m.Title,
-		Status:               m.Status,
-		Version:              m.Version,
-		QuestionnaireCode:    m.QuestionnaireCode,
-		QuestionnaireVersion: m.QuestionnaireVersion,
+// GetPublishedQuestionnaire 获取 collection-server 中的精确已发布问卷。
+func (c *APIClient) GetPublishedQuestionnaire(ctx context.Context, code, version string) (*QuestionnaireDetailResponse, error) {
+	code = strings.TrimSpace(code)
+	version = strings.TrimSpace(version)
+	if code == "" {
+		return nil, fmt.Errorf("questionnaire code is required")
 	}
-}
-
-// GetQuestionnaireDetail 获取问卷详情（collection-server）。
-func (c *APIClient) GetQuestionnaireDetail(ctx context.Context, code string) (*QuestionnaireDetailResponse, error) {
-	cacheKey := normalizeSeedCacheKey(code)
-	if cacheKey != "" {
-		c.questionnaireCacheMu.RLock()
-		cached := c.questionnaireCache[cacheKey]
-		c.questionnaireCacheMu.RUnlock()
-		if cached != nil {
-			cloned := *cached
+	cacheKey := publishedResourceCacheKey(code, version)
+	if version != "" {
+		if cached, ok := c.questionnaireCache.Get(cacheKey); ok {
+			cloned := cached
 			return &cloned, nil
 		}
 	}
 
-	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("/api/v1/questionnaires/%s", code), nil)
+	path := fmt.Sprintf("/api/v1/questionnaires/%s", url.PathEscape(code))
+	if version != "" {
+		path += "?version=" + url.QueryEscape(version)
+	}
+	resp, err := c.doRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	dataBytes, err := json.Marshal(resp.Data)
-	if err != nil {
-		return nil, fmt.Errorf("marshal response data: %w", err)
+	var detail QuestionnaireDetailResponse
+	if err := decodeResponseData(resp, &detail); err != nil {
+		return nil, fmt.Errorf("decode published questionnaire response: %w", err)
 	}
-
-	var detailResp QuestionnaireDetailResponse
-	if err := json.Unmarshal(dataBytes, &detailResp); err != nil {
-		return nil, fmt.Errorf("unmarshal questionnaire response: %w", err)
+	if strings.TrimSpace(detail.Code) != code {
+		return nil, fmt.Errorf("published questionnaire code mismatch: requested=%s loaded=%s", code, detail.Code)
 	}
-
-	if cacheKey != "" {
-		cloned := detailResp
-		c.questionnaireCacheMu.Lock()
-		c.questionnaireCache[cacheKey] = &cloned
-		c.questionnaireCacheMu.Unlock()
+	if version != "" && strings.TrimSpace(detail.Version) != version {
+		return nil, fmt.Errorf("published questionnaire version mismatch: code=%s requested=%s loaded=%s", code, version, detail.Version)
 	}
+	if version != "" {
+		exactKey := publishedResourceCacheKey(detail.Code, detail.Version)
+		c.questionnaireCache.Put(exactKey, detail)
+	}
+	return &detail, nil
+}
 
-	return &detailResp, nil
+func publishedResourceCacheKey(code, version string) string {
+	code = normalizeSeedCacheKey(code)
+	version = normalizeSeedCacheKey(version)
+	if code == "" || version == "" {
+		return ""
+	}
+	return code + "@" + version
 }

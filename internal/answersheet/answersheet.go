@@ -1,16 +1,12 @@
 package answersheet
 
 import (
-	"context"
 	"fmt"
 	"math/rand"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
-
-	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 )
 
 const (
@@ -54,65 +50,6 @@ type Answer struct {
 	QuestionType string
 	Score        uint32
 	Value        interface{}
-}
-
-type SubmitRequest struct {
-	QuestionnaireCode    string
-	QuestionnaireVersion string
-	Title                string
-	TesteeID             uint64
-	TaskID               string
-	Answers              []Answer
-}
-
-type SubmitPolicy struct {
-	Timeout      time.Duration
-	HTTPRetryMax int
-	MaxAttempts  int
-	RetryBackoff time.Duration
-	Retryable    func(error) bool
-}
-
-func SubmitWithRetry[T any](
-	ctx context.Context,
-	req T,
-	policy SubmitPolicy,
-	submit func(context.Context, T, time.Duration, int) error,
-) (int, error) {
-	maxAttempts := policy.MaxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = 1
-	}
-
-	var lastErr error
-	attempts := 0
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if ctx.Err() != nil {
-			return attempts, ctx.Err()
-		}
-
-		attempts++
-		if err := submit(ctx, req, policy.Timeout, policy.HTTPRetryMax); err == nil {
-			return attempts, nil
-		} else {
-			lastErr = err
-		}
-
-		if attempt == maxAttempts-1 {
-			break
-		}
-		if policy.Retryable != nil && !policy.Retryable(lastErr) {
-			break
-		}
-		if policy.RetryBackoff <= 0 {
-			continue
-		}
-		if err := scheduler.Wait(ctx, policy.RetryBackoff*time.Duration(attempt+1)); err != nil {
-			return attempts, err
-		}
-	}
-
-	return attempts, lastErr
 }
 
 func BuildAnswers(q Questionnaire, rng *rand.Rand) []Answer {
@@ -348,16 +285,15 @@ func validateAnswer(question Question, answer Answer) []map[string]interface{} {
 	case string:
 		if resolvedType == strings.ToLower(QuestionTypeRadio) && len(optionSet) > 0 && !optionSet[value] {
 			invalid = append(invalid, map[string]interface{}{
-				"question_code":     answer.QuestionCode,
-				"value":             value,
-				"reason":            "option not found in question",
-				"available_options": questionOptionsFromQuestion(question),
+				"question_code": answer.QuestionCode,
+				"value_type":    "string",
+				"reason":        "option not found in question",
 			})
 		}
 		if reason := validateScalarRules(question, value); reason != "" {
 			invalid = append(invalid, map[string]interface{}{
 				"question_code": answer.QuestionCode,
-				"value":         value,
+				"value_type":    "string",
 				"reason":        reason,
 			})
 		}
@@ -365,17 +301,16 @@ func validateAnswer(question Question, answer Answer) []map[string]interface{} {
 		for _, item := range value {
 			if len(optionSet) > 0 && !optionSet[item] {
 				invalid = append(invalid, map[string]interface{}{
-					"question_code":     answer.QuestionCode,
-					"value":             item,
-					"reason":            "option not found in question",
-					"available_options": questionOptionsFromQuestion(question),
+					"question_code": answer.QuestionCode,
+					"value_type":    "string_slice",
+					"reason":        "option not found in question",
 				})
 			}
 		}
 		if reason := validateSelectionRules(question, len(value)); reason != "" {
 			invalid = append(invalid, map[string]interface{}{
 				"question_code": answer.QuestionCode,
-				"value":         value,
+				"value_type":    "string_slice",
 				"reason":        reason,
 			})
 		}
@@ -383,14 +318,14 @@ func validateAnswer(question Question, answer Answer) []map[string]interface{} {
 		if reason := validateNumberRules(question, value); reason != "" {
 			invalid = append(invalid, map[string]interface{}{
 				"question_code": answer.QuestionCode,
-				"value":         value,
+				"value_type":    "number",
 				"reason":        reason,
 			})
 		}
 	default:
 		invalid = append(invalid, map[string]interface{}{
 			"question_code": answer.QuestionCode,
-			"value":         FormatValue(value),
+			"value_type":    fmt.Sprintf("%T", value),
 			"reason":        fmt.Sprintf("unsupported answer value type %T", value),
 		})
 	}
@@ -527,38 +462,6 @@ func questionOptionSet(question Question) map[string]bool {
 	return optionSet
 }
 
-func questionOptionsFromQuestion(question Question) []string {
-	options := make([]string, 0, len(question.Options))
-	for _, option := range question.Options {
-		if option.Code != "" {
-			options = append(options, option.Code)
-		} else if option.Content != "" {
-			options = append(options, option.Content)
-		}
-	}
-	return options
-}
-
-func FormatValue(value interface{}) string {
-	if value == nil {
-		return "<nil>"
-	}
-	switch v := value.(type) {
-	case string:
-		return v
-	case []string:
-		return fmt.Sprintf("%v", v)
-	case float64:
-		return fmt.Sprintf("%.0f", v)
-	case int:
-		return fmt.Sprintf("%d", v)
-	case int64:
-		return fmt.Sprintf("%d", v)
-	default:
-		return fmt.Sprintf("%v (type: %T)", v, v)
-	}
-}
-
 func NormalizeQuestionType(raw string) string {
 	return strings.ToLower(strings.TrimSpace(raw))
 }
@@ -602,41 +505,6 @@ func CollectQuestionTypes(q Questionnaire) []string {
 		out = append(out, typ)
 	}
 	return out
-}
-
-func PreviewAnswers(answers []Answer, max int) []map[string]string {
-	if len(answers) == 0 || max <= 0 {
-		return nil
-	}
-	if len(answers) < max {
-		max = len(answers)
-	}
-	out := make([]map[string]string, 0, max)
-	for i := 0; i < max; i++ {
-		out = append(out, map[string]string{
-			"question_code": answers[i].QuestionCode,
-			"value":         FormatValue(answers[i].Value),
-		})
-	}
-	return out
-}
-
-func questionOptions(q Questionnaire, questionCode string) []string {
-	for _, question := range q.Questions {
-		if question.Code != questionCode {
-			continue
-		}
-		options := make([]string, 0, len(question.Options))
-		for _, option := range question.Options {
-			if option.Code != "" {
-				options = append(options, option.Code)
-			} else if option.Content != "" {
-				options = append(options, option.Content)
-			}
-		}
-		return options
-	}
-	return nil
 }
 
 func Truncate(value string, max int) string {

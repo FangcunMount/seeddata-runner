@@ -383,29 +383,21 @@ func TestResolveDailySimulationCanonicalTesteeIDUsesCurrentTesteeID(t *testing.T
 	}
 }
 
-func TestWaitForDailySimulationAssessmentFallsBackToAssessmentList(t *testing.T) {
+func TestWaitForDailySimulationReadinessUsesCollectionContract(t *testing.T) {
 	const (
-		answerSheetID     = "615984776595124782"
-		testeeID          = "615969746222854702"
-		assessmentID      = "615984705628090926"
-		questionnaireCode = "3adyDE"
-		questionnaireVer  = "6.0.1"
+		answerSheetID = "615984776595124782"
+		testeeID      = "615969746222854702"
+		assessmentID  = "615984705628090926"
 	)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/evaluations/assessments":
+		switch r.URL.Path {
+		case "/api/v1/answersheets/" + answerSheetID + "/assessment-readiness":
 			if got := r.URL.Query().Get("testee_id"); got != testeeID {
 				t.Fatalf("unexpected testee_id %q", got)
 			}
-			if got := r.URL.Query().Get("page"); got != "1" {
-				t.Fatalf("unexpected page %q", got)
-			}
-			if got := r.URL.Query().Get("page_size"); got != "100" {
-				t.Fatalf("unexpected page_size %q", got)
-			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"items":[{"id":"` + assessmentID + `","testee_id":"` + testeeID + `","questionnaire_code":"` + questionnaireCode + `","questionnaire_version":"` + questionnaireVer + `","answer_sheet_id":"` + answerSheetID + `","status":"done"}],"total":1,"page":1,"page_size":100,"total_pages":1}}`))
+			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"status":"ready","answersheet_id":"` + answerSheetID + `","assessment_id":"` + assessmentID + `"}}`))
 			return
 		default:
 			t.Fatalf("unexpected path %q", r.URL.Path)
@@ -416,14 +408,11 @@ func TestWaitForDailySimulationAssessmentFallsBackToAssessmentList(t *testing.T)
 	logger := log.New(log.NewOptions())
 	apiClient := NewAPIClient(server.URL, "", logger)
 
-	gotAssessmentID, err := waitForDailySimulationAssessment(
+	gotAssessmentID, err := waitForDailySimulationReadiness(
 		context.Background(),
-		nil,
 		apiClient,
 		answerSheetID,
-		testeeID,
-		questionnaireCode,
-		questionnaireVer,
+		parseID(testeeID),
 	)
 	if err != nil {
 		t.Fatalf("wait for assessment: %v", err)

@@ -4,7 +4,7 @@ import "context"
 
 type planTaskSubmitBootstrap struct {
 	session   *planTaskSubmitSession
-	scaleResp *ScaleResponse
+	scaleResp *PublishedAssessmentModelResponse
 	detail    *QuestionnaireDetailResponse
 }
 
@@ -41,7 +41,7 @@ func (b planTaskSubmitBootstrap) BuildRunner() planTaskSubmitRunner {
 	return planTaskSubmitRunner{
 		session:   b.session,
 		detail:    b.detail,
-		tracker:   newRecentPlanTaskTracker(planOpenTaskRecentSubmitTTL),
+		ledger:    b.session.deps.PlanSubmissionLedger,
 		scaleResp: b.scaleResp,
 	}
 }

@@ -12,22 +12,24 @@ import (
 )
 
 const (
-	DefaultDailySimulationCountPerRun      = 10
-	DefaultDailySimulationWorkers          = 4
-	DefaultDailySimulationRunAt            = "10:00"
-	DefaultDailySimulationWindowEndAt      = "18:00"
-	DefaultDailySimulationInterval         = "30m"
-	DefaultDailySimulationRetryDelay       = "30m"
-	DefaultDailySimulationStateFile        = ".seeddata-cache/daily-simulation-daemon-state.json"
-	DefaultDailySimulationPhonePrefix      = "+86199"
-	DefaultDailySimulationEmailDomain      = "fangcunmount.com"
-	DefaultDailySimulationPassword         = "DailySim@123"
-	DefaultDailySimulationGuardianRelation = "other"
-	DefaultDailySimulationSource           = "daily_simulation"
-	DefaultPlanSubmitWorkers               = 1
-	DefaultPlanSubmitIdleInterval          = "30s"
-	DefaultPlanSubmitActiveInterval        = "5s"
-	DefaultPlanSubmitCompletionPercent     = 100
+	DefaultDailySimulationCountPerRun         = 10
+	DefaultDailySimulationWorkers             = 4
+	DefaultDailySimulationRunAt               = "10:00"
+	DefaultDailySimulationWindowEndAt         = "18:00"
+	DefaultDailySimulationInterval            = "30m"
+	DefaultDailySimulationRetryDelay          = "30m"
+	DefaultDailySimulationStateFile           = ".seeddata-cache/daily-simulation-daemon-state.json"
+	DefaultDailySimulationSubmissionStateFile = ".seeddata-cache/daily-simulation-submissions.json"
+	DefaultDailySimulationPhonePrefix         = "+86199"
+	DefaultDailySimulationEmailDomain         = "fangcunmount.com"
+	DefaultDailySimulationPassword            = "DailySim@123"
+	DefaultDailySimulationGuardianRelation    = "other"
+	DefaultDailySimulationSource              = "daily_simulation"
+	DefaultPlanSubmitWorkers                  = 1
+	DefaultPlanSubmitIdleInterval             = "30s"
+	DefaultPlanSubmitActiveInterval           = "5s"
+	DefaultPlanSubmitCompletionPercent        = 100
+	DefaultPlanSubmitSubmissionStateFile      = ".seeddata-cache/plan-submit-submissions.json"
 )
 
 // Config 定义整个种子数据配置结构
@@ -154,6 +156,7 @@ type DailySimulationConfig struct {
 	Interval                 string                          `yaml:"interval"`
 	RetryDelay               string                          `yaml:"retryDelay"`
 	StateFile                string                          `yaml:"stateFile"`
+	SubmissionStateFile      string                          `yaml:"submissionStateFile"`
 	ClinicianIDs             []FlexibleID                    `yaml:"clinicianIds"`
 	FocusCliniciansPerRunMin int                             `yaml:"focusCliniciansPerRunMin"`
 	FocusCliniciansPerRunMax int                             `yaml:"focusCliniciansPerRunMax"`
@@ -182,11 +185,12 @@ type DailySimulationJourneyMixConfig struct {
 }
 
 type PlanSubmitConfig struct {
-	PlanIDs           []FlexibleID `yaml:"planIds"`
-	Workers           int          `yaml:"workers"`
-	CompletionPercent *int         `yaml:"completionPercent"`
-	IdleInterval      string       `yaml:"idleInterval"`
-	ActiveInterval    string       `yaml:"activeInterval"`
+	PlanIDs             []FlexibleID `yaml:"planIds"`
+	Workers             int          `yaml:"workers"`
+	CompletionPercent   *int         `yaml:"completionPercent"`
+	IdleInterval        string       `yaml:"idleInterval"`
+	ActiveInterval      string       `yaml:"activeInterval"`
+	SubmissionStateFile string       `yaml:"submissionStateFile"`
 }
 
 func Load(filepath string) (*Config, error) {
@@ -235,6 +239,9 @@ func (cfg *Config) Normalize() {
 		return
 	}
 
+	cfg.API.BaseURL = strings.TrimSpace(cfg.API.BaseURL)
+	cfg.API.CollectionBaseURL = strings.TrimSpace(cfg.API.CollectionBaseURL)
+	cfg.API.Token = strings.TrimSpace(cfg.API.Token)
 	cfg.IAM.Normalize()
 	cfg.DailySimulation.Normalize()
 	cfg.PlanSubmit.Normalize()
@@ -310,6 +317,7 @@ func (cfg DailySimulationConfig) IsZero() bool {
 		strings.TrimSpace(cfg.Interval) == "" &&
 		strings.TrimSpace(cfg.RetryDelay) == "" &&
 		strings.TrimSpace(cfg.StateFile) == "" &&
+		strings.TrimSpace(cfg.SubmissionStateFile) == "" &&
 		len(cfg.ClinicianIDs) == 0 &&
 		cfg.FocusCliniciansPerRunMin == 0 &&
 		cfg.FocusCliniciansPerRunMax == 0 &&
@@ -350,6 +358,9 @@ func (cfg *DailySimulationConfig) Normalize() {
 	if strings.TrimSpace(cfg.StateFile) == "" {
 		cfg.StateFile = DefaultDailySimulationStateFile
 	}
+	if strings.TrimSpace(cfg.SubmissionStateFile) == "" {
+		cfg.SubmissionStateFile = DefaultDailySimulationSubmissionStateFile
+	}
 	if strings.TrimSpace(cfg.UserPhonePrefix) == "" {
 		cfg.UserPhonePrefix = DefaultDailySimulationPhonePrefix
 	}
@@ -380,6 +391,7 @@ func (cfg *DailySimulationConfig) Normalize() {
 	cfg.Interval = strings.TrimSpace(cfg.Interval)
 	cfg.RetryDelay = strings.TrimSpace(cfg.RetryDelay)
 	cfg.StateFile = strings.TrimSpace(cfg.StateFile)
+	cfg.SubmissionStateFile = strings.TrimSpace(cfg.SubmissionStateFile)
 	cfg.PlanIDs = normalizeFlexibleIDs(cfg.PlanIDs)
 }
 
@@ -462,7 +474,8 @@ func (cfg PlanSubmitConfig) IsZero() bool {
 		cfg.Workers == 0 &&
 		cfg.CompletionPercent == nil &&
 		strings.TrimSpace(cfg.IdleInterval) == "" &&
-		strings.TrimSpace(cfg.ActiveInterval) == ""
+		strings.TrimSpace(cfg.ActiveInterval) == "" &&
+		strings.TrimSpace(cfg.SubmissionStateFile) == ""
 }
 
 func (cfg *PlanSubmitConfig) Normalize() {
@@ -485,6 +498,10 @@ func (cfg *PlanSubmitConfig) Normalize() {
 	if cfg.ActiveInterval == "" {
 		cfg.ActiveInterval = DefaultPlanSubmitActiveInterval
 	}
+	if strings.TrimSpace(cfg.SubmissionStateFile) == "" {
+		cfg.SubmissionStateFile = DefaultPlanSubmitSubmissionStateFile
+	}
+	cfg.SubmissionStateFile = strings.TrimSpace(cfg.SubmissionStateFile)
 }
 
 func (cfg PlanSubmitConfig) Validate() error {

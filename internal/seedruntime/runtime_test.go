@@ -1,9 +1,24 @@
 package seedruntime
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/FangcunMount/component-base/pkg/log"
+	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 )
+
+func TestLoadDependenciesRequiresCollectionBaseURL(t *testing.T) {
+	cfg := &seedconfig.Config{
+		API: seedconfig.APIConfig{BaseURL: "https://api.example.com", Token: "test-token"},
+	}
+	_, err := LoadDependencies(context.Background(), cfg, log.New(log.NewOptions()))
+	if err == nil || !strings.Contains(err.Error(), "api.collectionBaseUrl is required") {
+		t.Fatalf("LoadDependencies error=%v, want collection base URL validation", err)
+	}
+}
 
 func TestNormalizePlanWorkers(t *testing.T) {
 	tests := []struct {

@@ -58,6 +58,12 @@ planSubmit:
 	if cfg.DailySimulation.GuardianRelation != DefaultDailySimulationGuardianRelation {
 		t.Fatalf("unexpected default guardianRelation: %q", cfg.DailySimulation.GuardianRelation)
 	}
+	if cfg.DailySimulation.SubmissionStateFile != DefaultDailySimulationSubmissionStateFile {
+		t.Fatalf("unexpected daily submission state file: %q", cfg.DailySimulation.SubmissionStateFile)
+	}
+	if cfg.PlanSubmit.SubmissionStateFile != DefaultPlanSubmitSubmissionStateFile {
+		t.Fatalf("unexpected plan submission state file: %q", cfg.PlanSubmit.SubmissionStateFile)
+	}
 }
 
 func TestLoadRequiresPlanSubmitPlanID(t *testing.T) {

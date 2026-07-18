@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 )
@@ -18,56 +19,47 @@ func TestSubmitAnswerSheetSerializesCollectionValues(t *testing.T) {
 		Value        string `json:"value"`
 	}
 	type capturedRequest struct {
-		Answers []capturedAnswer `json:"answers"`
+		IdempotencyKey string           `json:"idempotency_key"`
+		Answers        []capturedAnswer `json:"answers"`
 	}
 
 	var captured capturedRequest
-	var statusCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/answersheets":
-			if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
-				t.Fatalf("decode request body: %v", err)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte(`{"code":0,"message":"accepted","data":{"status":"queued","request_id":"req-1"}}`))
-		case "/api/v1/answersheets/submit-status":
-			if got := r.URL.Query().Get("request_id"); got != "req-1" {
-				t.Fatalf("unexpected request_id %q", got)
-			}
-			statusCalls.Add(1)
-			w.Header().Set("Content-Type", "application/json")
-			if statusCalls.Load() == 1 {
-				_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"status":"processing","updated_at":1}}`))
-				return
-			}
-			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"status":"done","answersheet_id":"123","assessment_id":"456","updated_at":2}}`))
-		default:
+		if r.URL.Path != "/api/v1/answersheets" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
+		if got := r.Header.Get("X-Request-ID"); got != "attempt-1" {
+			t.Fatalf("unexpected request id %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"code":0,"message":"accepted","data":{"status":"accepted","request_id":"attempt-1","answersheet_id":"123"}}`))
 	}))
 	defer server.Close()
 
 	client := NewAPIClient(server.URL, "", nil)
-	resp, err := client.SubmitAnswerSheet(context.Background(), SubmitAnswerSheetRequest{
+	resp, err := client.AcceptCollectionAnswerSheet(context.Background(), SubmitAnswerSheetRequest{
 		QuestionnaireCode:    "QNR-001",
 		QuestionnaireVersion: "1.0.0",
+		IdempotencyKey:       "seed.daily.1234",
 		TesteeID:             1001,
 		Answers: []Answer{
 			{QuestionCode: "q1", QuestionType: "Radio", Value: "A"},
 			{QuestionCode: "q2", QuestionType: "Checkbox", Value: []string{"B", "C"}},
 			{QuestionCode: "q3", QuestionType: "Number", Value: float64(12)},
 		},
-	})
+	}, "attempt-1")
 	if err != nil {
-		t.Fatalf("SubmitAnswerSheet returned error: %v", err)
+		t.Fatalf("AcceptCollectionAnswerSheet returned error: %v", err)
 	}
-	if resp == nil || resp.ID != "123" || resp.AssessmentID != "456" {
+	if resp == nil || resp.AnswerSheetID != "123" || resp.RequestID != "attempt-1" {
 		t.Fatalf("unexpected submit response: %+v", resp)
 	}
-	if statusCalls.Load() < 2 {
-		t.Fatalf("expected submit-status to be polled at least twice, got %d", statusCalls.Load())
+	if captured.IdempotencyKey != "seed.daily.1234" {
+		t.Fatalf("unexpected idempotency key %q", captured.IdempotencyKey)
 	}
 
 	if len(captured.Answers) != 3 {
@@ -84,11 +76,33 @@ func TestSubmitAnswerSheetSerializesCollectionValues(t *testing.T) {
 	}
 }
 
-func TestGetScaleUsesAssessmentModels(t *testing.T) {
+func TestGetAssessmentReadiness(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/assessment-models/3adyDE" {
+		if r.URL.Path != "/api/v1/answersheets/123/assessment-readiness" || r.URL.Query().Get("testee_id") != "1001" {
+			t.Fatalf("unexpected readiness request: %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"status":"pending","answersheet_id":"123","next_poll_after_ms":2400}}`))
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "", nil)
+	readiness, err := client.GetAssessmentReadiness(context.Background(), "123", 1001)
+	if err != nil {
+		t.Fatalf("GetAssessmentReadiness returned error: %v", err)
+	}
+	if readiness.Status != "pending" || readiness.AnswerSheetID != "123" || readiness.NextPollAfterMs != 2400 {
+		t.Fatalf("unexpected readiness response: %+v", readiness)
+	}
+}
+
+func TestGetPublishedAssessmentModelUsesExactVersion(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/assessment-models/published/3adyDE" || r.URL.Query().Get("version") != "1.0.0" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -97,11 +111,61 @@ func TestGetScaleUsesAssessmentModels(t *testing.T) {
 	defer server.Close()
 
 	client := NewAPIClient(server.URL, "", nil)
-	scale, err := client.GetScale(context.Background(), "3adyDE")
+	scale, err := client.GetPublishedAssessmentModel(context.Background(), "3adyDE", "1.0.0")
 	if err != nil {
-		t.Fatalf("GetScale returned error: %v", err)
+		t.Fatalf("GetPublishedAssessmentModel returned error: %v", err)
 	}
 	if scale.Code != "3adyDE" || scale.QuestionnaireCode != "QNR-1" || scale.QuestionnaireVersion != "6.0.1" || scale.Version != "1.0.0" {
 		t.Fatalf("unexpected scale response: %+v", scale)
+	}
+}
+
+func TestGetPublishedQuestionnaireUsesExactVersion(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/questionnaires/QNR-1" || r.URL.Query().Get("version") != "6.0.1" {
+			t.Fatalf("unexpected questionnaire request: %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"code":"QNR-1","title":"Demo","status":"published","version":"6.0.1","type":"MedicalScale","questions":[]}}`))
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "", nil)
+	detail, err := client.GetPublishedQuestionnaire(context.Background(), "QNR-1", "6.0.1")
+	if err != nil {
+		t.Fatalf("GetPublishedQuestionnaire returned error: %v", err)
+	}
+	if detail.Code != "QNR-1" || detail.Version != "6.0.1" {
+		t.Fatalf("unexpected questionnaire: %+v", detail)
+	}
+}
+
+func TestUnversionedPublishedModelLookupIsNotCached(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("version"); got != "" {
+			t.Fatalf("unexpected version query %q", got)
+		}
+		version := strconv.Itoa(int(calls.Add(1)))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"code":"MODEL","status":"published","version":"` + version + `","questionnaire_code":"Q","questionnaire_version":"` + version + `"}}`))
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "", nil)
+	first, err := client.GetPublishedAssessmentModel(context.Background(), "MODEL", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.GetPublishedAssessmentModel(context.Background(), "MODEL", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Version != "1" || second.Version != "2" || calls.Load() != 2 {
+		t.Fatalf("unversioned lookup was cached: first=%q second=%q calls=%d", first.Version, second.Version, calls.Load())
 	}
 }

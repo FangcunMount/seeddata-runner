@@ -41,10 +41,8 @@ type APIClient struct {
 	retryMinDelay time.Duration
 	retryMaxDelay time.Duration
 
-	scaleCacheMu         sync.RWMutex
-	scaleCache           map[string]*ScaleResponse
-	questionnaireCacheMu sync.RWMutex
-	questionnaireCache   map[string]*QuestionnaireDetailResponse
+	publishedModelCache *versionedCache[PublishedAssessmentModelResponse]
+	questionnaireCache  *versionedCache[QuestionnaireDetailResponse]
 }
 
 type TokenProvider struct {
@@ -73,12 +71,12 @@ func NewAPIClient(baseURL, token string, logger log.Logger) *APIClient {
 		httpClient: &http.Client{
 			Timeout: defaultHTTPTimeout,
 		},
-		logger:             logger,
-		retryMax:           retryMax,
-		retryMinDelay:      retryMinDelay,
-		retryMaxDelay:      retryMaxDelay,
-		scaleCache:         make(map[string]*ScaleResponse),
-		questionnaireCache: make(map[string]*QuestionnaireDetailResponse),
+		logger:              logger,
+		retryMax:            retryMax,
+		retryMinDelay:       retryMinDelay,
+		retryMaxDelay:       retryMaxDelay,
+		publishedModelCache: newVersionedCache[PublishedAssessmentModelResponse](publishedResourceCacheLimit),
+		questionnaireCache:  newVersionedCache[QuestionnaireDetailResponse](publishedResourceCacheLimit),
 	}
 }
 
@@ -442,8 +440,8 @@ func truncateResponseBody(body []byte, limit int) string {
 	return value
 }
 
-// ScaleResponse 测评模型响应（兼容旧 Scale 命名；字段对齐 assessment-models）。
-type ScaleResponse struct {
+// PublishedAssessmentModelResponse 已发布测评模型响应。
+type PublishedAssessmentModelResponse struct {
 	Code                 string `json:"code"`
 	Title                string `json:"title"`
 	Status               string `json:"status"`
@@ -877,16 +875,17 @@ type CollectionCreateTesteeRequest struct {
 
 // CollectionSubmitAcceptedResponse collection 答卷异步受理响应。
 type CollectionSubmitAcceptedResponse struct {
-	Status    string `json:"status"`
-	RequestID string `json:"request_id"`
+	Status        string `json:"status"`
+	RequestID     string `json:"request_id"`
+	AnswerSheetID string `json:"answersheet_id"`
 }
 
-// CollectionSubmitStatusResponse collection 答卷提交状态响应。
-type CollectionSubmitStatusResponse struct {
-	Status        string `json:"status"`
-	AnswerSheetID string `json:"answersheet_id,omitempty"`
-	AssessmentID  string `json:"assessment_id,omitempty"`
-	UpdatedAt     int64  `json:"updated_at,omitempty"`
+// AssessmentReadinessResponse collection Assessment 就绪响应。
+type AssessmentReadinessResponse struct {
+	Status          string `json:"status"`
+	AnswerSheetID   string `json:"answersheet_id"`
+	AssessmentID    string `json:"assessment_id,omitempty"`
+	NextPollAfterMs int    `json:"next_poll_after_ms,omitempty"`
 }
 
 // QuestionnaireDetailResponse 问卷详情响应（collection-server）
@@ -925,6 +924,7 @@ type ValidationRuleResponse struct {
 type SubmitAnswerSheetRequest struct {
 	QuestionnaireCode    string   `json:"questionnaire_code"`
 	QuestionnaireVersion string   `json:"questionnaire_version"`
+	IdempotencyKey       string   `json:"idempotency_key"`
 	Title                string   `json:"title"`
 	TesteeID             uint64   `json:"testee_id"`
 	TaskID               string   `json:"task_id,omitempty"`
@@ -935,6 +935,7 @@ type SubmitAnswerSheetRequest struct {
 type AdminSubmitAnswerSheetRequest struct {
 	QuestionnaireCode    string   `json:"questionnaire_code"`
 	QuestionnaireVersion string   `json:"questionnaire_version"`
+	IdempotencyKey       string   `json:"idempotency_key,omitempty"`
 	Title                string   `json:"title"`
 	TesteeID             uint64   `json:"testee_id"`
 	TaskID               string   `json:"task_id,omitempty"`

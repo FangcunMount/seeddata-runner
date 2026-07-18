@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,10 +26,8 @@ func TestNewPlanQuestionnaireVersionMismatchError(t *testing.T) {
 	for _, expected := range []string{
 		"scale_code=SAS-TEST",
 		"questionnaire_code=QNR-001",
-		"scale_questionnaire_version=1.0.1",
-		"loaded_questionnaire_version=6.0.1",
-		"assessment-model cache for code=sas-test",
-		"published model key for sas-test",
+		"requested_version=1.0.1",
+		"loaded_version=6.0.1",
 	} {
 		if !strings.Contains(msg, expected) {
 			t.Fatalf("expected error message to contain %q, got %q", expected, msg)
@@ -206,6 +205,7 @@ func TestBuildPlanTaskSubmitRequestIncludesTaskID(t *testing.T) {
 	}
 
 	req, err := buildPlanTaskSubmitRequest(
+		"plan-1",
 		detail,
 		"1.0.0",
 		TaskResponse{
@@ -260,7 +260,8 @@ func TestPlanTaskSubmitSessionFactoryOpensSessionWithoutLocalRuntimeConfig(t *te
 		Config: &SeedConfig{
 			Global: GlobalConfig{OrgID: 1},
 		},
-		APIClient: NewAPIClient(server.URL, "test-token", logger),
+		APIClient:        NewAPIClient(server.URL, "test-token", logger),
+		CollectionClient: NewAPIClient(server.URL, "test-token", logger),
 	}
 
 	factory, err := newPlanTaskSubmitSessionFactory(context.Background(), deps)
@@ -310,7 +311,8 @@ func TestPlanTaskSubmitSessionFactoryRejectsInactivePlan(t *testing.T) {
 		Config: &SeedConfig{
 			Global: GlobalConfig{OrgID: 1},
 		},
-		APIClient: NewAPIClient(server.URL, "test-token", logger),
+		APIClient:        NewAPIClient(server.URL, "test-token", logger),
+		CollectionClient: NewAPIClient(server.URL, "test-token", logger),
 	}
 
 	factory, err := newPlanTaskSubmitSessionFactory(context.Background(), deps)
@@ -345,7 +347,7 @@ func TestPlanTaskSubmitQuestionnaireLoaderUsesAPIGateway(t *testing.T) {
 				"scale_code": "SAS-TEST",
 				"status":     "active",
 			}})
-		case "/api/v1/assessment-models/SAS-TEST":
+		case "/api/v1/assessment-models/published/SAS-TEST":
 			_ = json.NewEncoder(w).Encode(Response{Code: 0, Message: "ok", Data: map[string]any{
 				"code":                  "SAS-TEST",
 				"questionnaire_code":    "QNR-TEST",
@@ -374,7 +376,8 @@ func TestPlanTaskSubmitQuestionnaireLoaderUsesAPIGateway(t *testing.T) {
 		Config: &SeedConfig{
 			Global: GlobalConfig{OrgID: 1},
 		},
-		APIClient: NewAPIClient(server.URL, "test-token", logger),
+		APIClient:        NewAPIClient(server.URL, "test-token", logger),
+		CollectionClient: NewAPIClient(server.URL, "test-token", logger),
 	}
 
 	factory, err := newPlanTaskSubmitSessionFactory(context.Background(), deps)
@@ -420,7 +423,7 @@ func TestNewPlanTaskSubmitRunnerBuildsRunnerState(t *testing.T) {
 				"scale_code": "SAS-TEST",
 				"status":     "active",
 			}})
-		case "/api/v1/assessment-models/SAS-TEST":
+		case "/api/v1/assessment-models/published/SAS-TEST":
 			_ = json.NewEncoder(w).Encode(Response{Code: 0, Message: "ok", Data: map[string]any{
 				"code":                  "SAS-TEST",
 				"questionnaire_code":    "QNR-TEST",
@@ -449,7 +452,8 @@ func TestNewPlanTaskSubmitRunnerBuildsRunnerState(t *testing.T) {
 		Config: &SeedConfig{
 			Global: GlobalConfig{OrgID: 1},
 		},
-		APIClient: NewAPIClient(server.URL, "test-token", logger),
+		APIClient:        NewAPIClient(server.URL, "test-token", logger),
+		CollectionClient: NewAPIClient(server.URL, "test-token", logger),
 	}
 
 	runner, err := newPlanTaskSubmitRunner(context.Background(), deps, planID, false)
@@ -465,8 +469,8 @@ func TestNewPlanTaskSubmitRunnerBuildsRunnerState(t *testing.T) {
 	if runner.detail == nil || runner.detail.Version != "1.0.1" {
 		t.Fatalf("unexpected questionnaire detail: %#v", runner.detail)
 	}
-	if runner.tracker == nil {
-		t.Fatal("expected tracker to be initialized")
+	if runner.ledger == nil {
+		t.Fatal("expected submission ledger to be initialized")
 	}
 }
 
@@ -488,7 +492,7 @@ func TestNewPlanTaskSubmitBootstrapLoadsSessionAndQuestionnaire(t *testing.T) {
 				"scale_code": "SAS-TEST",
 				"status":     "active",
 			}})
-		case "/api/v1/assessment-models/SAS-TEST":
+		case "/api/v1/assessment-models/published/SAS-TEST":
 			_ = json.NewEncoder(w).Encode(Response{Code: 0, Message: "ok", Data: map[string]any{
 				"code":                  "SAS-TEST",
 				"questionnaire_code":    "QNR-TEST",
@@ -517,7 +521,8 @@ func TestNewPlanTaskSubmitBootstrapLoadsSessionAndQuestionnaire(t *testing.T) {
 		Config: &SeedConfig{
 			Global: GlobalConfig{OrgID: 1},
 		},
-		APIClient: NewAPIClient(server.URL, "test-token", logger),
+		APIClient:        NewAPIClient(server.URL, "test-token", logger),
+		CollectionClient: NewAPIClient(server.URL, "test-token", logger),
 	}
 
 	bootstrap, err := newPlanTaskSubmitBootstrap(context.Background(), deps, planID, false)
@@ -532,25 +537,6 @@ func TestNewPlanTaskSubmitBootstrapLoadsSessionAndQuestionnaire(t *testing.T) {
 	}
 	if bootstrap.detail == nil || bootstrap.detail.Version != "1.0.1" {
 		t.Fatalf("unexpected bootstrap questionnaire detail: %#v", bootstrap.detail)
-	}
-}
-
-func TestRecentPlanTaskTrackerHonorsTTL(t *testing.T) {
-	tracker := newRecentPlanTaskTracker(2 * time.Minute)
-	if tracker.Seen("2001") {
-		t.Fatal("expected task to be unseen initially")
-	}
-
-	tracker.Remember("2001")
-	if !tracker.Seen("2001") {
-		t.Fatal("expected task to be tracked after remember")
-	}
-
-	tracker.mu.Lock()
-	tracker.submittedAt["2001"] = time.Now().Add(-1 * time.Second)
-	tracker.mu.Unlock()
-	if tracker.Seen("2001") {
-		t.Fatal("expected expired task tracker entry to be pruned")
 	}
 }
 
@@ -570,11 +556,11 @@ func (s *pagedPlanTaskSubmitGatewayStub) GetPlan(ctx context.Context, planID str
 	return nil, nil
 }
 
-func (s *pagedPlanTaskSubmitGatewayStub) GetScale(ctx context.Context, code string) (*ScaleResponse, error) {
+func (s *pagedPlanTaskSubmitGatewayStub) GetPublishedAssessmentModel(ctx context.Context, code, version string) (*PublishedAssessmentModelResponse, error) {
 	return nil, nil
 }
 
-func (s *pagedPlanTaskSubmitGatewayStub) GetQuestionnaireDetail(ctx context.Context, code string) (*QuestionnaireDetailResponse, error) {
+func (s *pagedPlanTaskSubmitGatewayStub) GetPublishedQuestionnaire(ctx context.Context, code, version string) (*QuestionnaireDetailResponse, error) {
 	return nil, nil
 }
 
@@ -602,11 +588,11 @@ func (s *planTaskSubmitGatewayStubWithError) GetPlan(ctx context.Context, planID
 	return nil, nil
 }
 
-func (s *planTaskSubmitGatewayStubWithError) GetScale(ctx context.Context, code string) (*ScaleResponse, error) {
+func (s *planTaskSubmitGatewayStubWithError) GetPublishedAssessmentModel(ctx context.Context, code, version string) (*PublishedAssessmentModelResponse, error) {
 	return nil, nil
 }
 
-func (s *planTaskSubmitGatewayStubWithError) GetQuestionnaireDetail(ctx context.Context, code string) (*QuestionnaireDetailResponse, error) {
+func (s *planTaskSubmitGatewayStubWithError) GetPublishedQuestionnaire(ctx context.Context, code, version string) (*QuestionnaireDetailResponse, error) {
 	return nil, nil
 }
 
@@ -874,8 +860,6 @@ func TestRunPlanSubmitOpenTasksCycleSubmitsOnlyFreshOpenedTasks(t *testing.T) {
 		},
 	}
 	submitClient := &adminAnswerSheetSubmitClientStub{}
-	tracker := newRecentPlanTaskTracker(5 * time.Minute)
-	tracker.Remember("2002")
 
 	detail := &QuestionnaireDetailResponse{
 		Code:    "QNR-001",
@@ -892,18 +876,38 @@ func TestRunPlanSubmitOpenTasksCycleSubmitsOnlyFreshOpenedTasks(t *testing.T) {
 			},
 		},
 	}
+	ledger, err := NewSubmissionLedger(filepath.Join(t.TempDir(), "plan-submissions.json"), "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedReq, err := buildPlanTaskSubmitRequest(
+		planID, detail, "1.0.0",
+		TaskResponse{ID: "2002", PlanID: planID, TesteeID: "1002", Status: "opened"},
+		false, newSeeddataLogger(false),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := ledger.Prepare("plan|"+planID+"|2002|1002", *completedReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.MarkCompleted(prepared.Record.LogicalID, "existing-2002"); err != nil {
+		t.Fatal(err)
+	}
 
 	cycle := newPlanTaskSubmitCycle(
 		gateway,
 		submitClient,
 		newSeeddataLogger(false),
 		planID,
+		"SAS-TEST",
 		"1.0.0",
 		detail,
 		2,
 		100,
 		"daily_simulation",
-		tracker,
+		ledger,
 		false,
 	)
 	stats, err := cycle.Execute(context.Background())
@@ -939,6 +943,7 @@ func TestPlanTaskSubmitCycleRecordsListLoadFailure(t *testing.T) {
 		&adminAnswerSheetSubmitClientStub{},
 		newSeeddataLogger(false),
 		planID,
+		"SAS-TEST",
 		"1.0.0",
 		&QuestionnaireDetailResponse{Code: "QNR-001", Version: "1.0.0"},
 		1,

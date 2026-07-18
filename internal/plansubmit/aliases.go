@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
+	toolanswersheet "github.com/FangcunMount/seeddata-runner/internal/answersheet"
 	"github.com/FangcunMount/seeddata-runner/internal/seedapi"
 	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 	"github.com/FangcunMount/seeddata-runner/internal/seedruntime"
@@ -17,7 +18,7 @@ type dependencies = Dependencies
 type SeedConfig = seedconfig.Config
 type GlobalConfig = seedconfig.GlobalConfig
 type APIClient = seedapi.APIClient
-type ScaleResponse = seedapi.ScaleResponse
+type PublishedAssessmentModelResponse = seedapi.PublishedAssessmentModelResponse
 type PlanResponse = seedapi.PlanResponse
 type TaskResponse = seedapi.TaskResponse
 type ApiserverTesteeResponse = seedapi.ApiserverTesteeResponse
@@ -28,11 +29,13 @@ type SubmitAnswerSheetRequest = seedapi.SubmitAnswerSheetRequest
 type AdminSubmitAnswerSheetRequest = seedapi.AdminSubmitAnswerSheetRequest
 type Answer = seedapi.Answer
 type SubmitAnswerSheetResponse = seedapi.SubmitAnswerSheetResponse
+type SubmissionLedger = toolanswersheet.SubmissionLedger
 type QuestionResponse = seedapi.QuestionResponse
 type OptionResponse = seedapi.OptionResponse
 type Response = seedapi.Response
 
 var NewAPIClient = seedapi.NewAPIClient
+var NewSubmissionLedger = toolanswersheet.NewSubmissionLedger
 
 func newSeeddataLogger(verbose bool) log.Logger {
 	return seedruntime.NewLogger(verbose)

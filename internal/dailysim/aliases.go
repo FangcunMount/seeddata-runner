@@ -25,7 +25,7 @@ type FlexibleID = seedconfig.FlexibleID
 
 type APIClient = seedapi.APIClient
 type RetryConfig = seedapi.RetryConfig
-type ScaleResponse = seedapi.ScaleResponse
+type PublishedAssessmentModelResponse = seedapi.PublishedAssessmentModelResponse
 type PlanResponse = seedapi.PlanResponse
 type TaskResponse = seedapi.TaskResponse
 type PlanTaskWindowResponse = seedapi.PlanTaskWindowResponse
@@ -56,14 +56,11 @@ type Answer = seedapi.Answer
 type SubmitAnswerSheetResponse = seedapi.SubmitAnswerSheetResponse
 type AdminAnswerSheetListItem = seedapi.AdminAnswerSheetListItem
 type AdminAnswerSheetListResponse = seedapi.AdminAnswerSheetListResponse
-type AssessmentListResponse = seedapi.AssessmentListResponse
-type AssessmentResponse = seedapi.AssessmentResponse
 
 var NewAPIClient = seedapi.NewAPIClient
 
 const (
 	assessmentEntryListPageSize   = 100
-	assessmentListPageSize        = 100
 	questionnaireTypeMedicalScale = "MedicalScale"
 )
 

@@ -6,30 +6,32 @@ import (
 )
 
 type planTaskSubmitCycle struct {
-	gateway              planTaskSubmitGateway
+	gateway              planTaskSubmitAPIGateway
 	submitClient         adminAnswerSheetSubmitClient
 	logger               planTaskLogger
 	planID               string
+	scaleCode            string
 	questionnaireVersion string
 	detail               *QuestionnaireDetailResponse
 	workers              int
 	completionPercent    int
 	testeeSource         string
-	tracker              *recentPlanTaskTracker
+	ledger               *SubmissionLedger
 	verbose              bool
 }
 
 func newPlanTaskSubmitCycle(
-	gateway planTaskSubmitGateway,
+	gateway planTaskSubmitAPIGateway,
 	submitClient adminAnswerSheetSubmitClient,
 	logger planTaskLogger,
 	planID string,
+	scaleCode string,
 	questionnaireVersion string,
 	detail *QuestionnaireDetailResponse,
 	workers int,
 	completionPercent int,
 	testeeSource string,
-	tracker *recentPlanTaskTracker,
+	ledger *SubmissionLedger,
 	verbose bool,
 ) planTaskSubmitCycle {
 	return planTaskSubmitCycle{
@@ -37,12 +39,13 @@ func newPlanTaskSubmitCycle(
 		submitClient:         submitClient,
 		logger:               logger,
 		planID:               planID,
+		scaleCode:            scaleCode,
 		questionnaireVersion: questionnaireVersion,
 		detail:               detail,
 		workers:              workers,
 		completionPercent:    completionPercent,
 		testeeSource:         testeeSource,
-		tracker:              tracker,
+		ledger:               ledger,
 		verbose:              verbose,
 	}
 }
@@ -64,10 +67,11 @@ func (c planTaskSubmitCycle) Execute(ctx context.Context) (*planOpenTaskSubmitSt
 		c.submitClient,
 		c.logger,
 		c.planID,
+		c.scaleCode,
 		c.questionnaireVersion,
 		c.detail,
 		c.workers,
-		c.tracker,
+		c.ledger,
 		c.verbose,
 	)
 	if err := executor.Execute(ctx, jobs, stats); err != nil {

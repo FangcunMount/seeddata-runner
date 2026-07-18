@@ -1,0 +1,21 @@
+{
+  "source_repository": "fangcun-mount/qs-server",
+  "openapi_base_commit": "e7300bf8bb53541ccecac4470d6a483a3e2aec61",
+  "note": "Generated apiserver OpenAPI contract used by these consumer fixtures.",
+  "active_paths": [
+    "POST /api/v1/answersheets/admin-submit",
+    "POST /api/v1/answersheets",
+    "GET /api/v1/answersheets/{id}/assessment-readiness",
+    "GET /api/v1/assessment-models/published/{code}?version={version}",
+    "GET /api/v1/questionnaires/{code}?version={version}"
+  ],
+  "removed_paths": [
+    "GET /api/v1/answersheets/{id}/submit-status"
+  ],
+  "required_fields": {
+    "admin_submit_request": ["idempotency_key"],
+    "collection_submit_request": ["idempotency_key"],
+    "collection_submit_accepted": ["status", "request_id", "answersheet_id"],
+    "assessment_readiness": ["status", "answersheet_id", "assessment_id", "next_poll_after_ms"]
+  }
+}

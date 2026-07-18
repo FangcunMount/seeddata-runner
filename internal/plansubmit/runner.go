@@ -8,8 +8,8 @@ import (
 type planTaskSubmitRunner struct {
 	session   *planTaskSubmitSession
 	detail    *QuestionnaireDetailResponse
-	tracker   *recentPlanTaskTracker
-	scaleResp *ScaleResponse
+	ledger    *SubmissionLedger
+	scaleResp *PublishedAssessmentModelResponse
 }
 
 func newPlanTaskSubmitRunners(
@@ -54,17 +54,26 @@ func (r planTaskSubmitRunner) runCycle(
 	logger planTaskLogger,
 	opts planOpenTaskSubmitOptions,
 ) (*planOpenTaskSubmitStats, error) {
+	loader, err := newPlanTaskSubmitQuestionnaireLoader(r.session)
+	if err != nil {
+		return nil, err
+	}
+	scaleResp, detail, err := loader.Load(ctx, opts.Verbose)
+	if err != nil {
+		return nil, err
+	}
 	cycle := newPlanTaskSubmitCycle(
-		r.session.gateway,
+		r.session.apiGateway,
 		submitClient,
 		logger,
 		r.session.planID,
-		r.scaleResp.QuestionnaireVersion,
-		r.detail,
+		scaleResp.Code,
+		scaleResp.QuestionnaireVersion,
+		detail,
 		opts.Workers,
 		opts.CompletionPercent,
 		opts.TesteeSource,
-		r.tracker,
+		r.ledger,
 		opts.Verbose,
 	)
 	return cycle.Execute(ctx)

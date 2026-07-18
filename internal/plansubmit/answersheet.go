@@ -2,7 +2,6 @@ package plansubmit
 
 import (
 	"context"
-	"fmt"
 	"math/rand"
 	"time"
 
@@ -18,17 +17,15 @@ const (
 	questionTypeSection  = toolanswersheet.QuestionTypeSection
 )
 
-type adminAnswerSheetSubmitPolicy = toolanswersheet.SubmitPolicy
-
 type adminAnswerSheetSubmitClient interface {
-	SubmitAnswerSheetAdmin(context.Context, AdminSubmitAnswerSheetRequest) (*SubmitAnswerSheetResponse, error)
-	SubmitAnswerSheetAdminWithPolicy(context.Context, AdminSubmitAnswerSheetRequest, time.Duration, int) (*SubmitAnswerSheetResponse, error)
+	SubmitAnswerSheetAdminAttempt(context.Context, AdminSubmitAnswerSheetRequest, string, time.Duration) (*SubmitAnswerSheetResponse, error)
 }
 
 func buildAdminSubmitAnswerSheetRequest(req SubmitAnswerSheetRequest) AdminSubmitAnswerSheetRequest {
 	return AdminSubmitAnswerSheetRequest{
 		QuestionnaireCode:    req.QuestionnaireCode,
 		QuestionnaireVersion: req.QuestionnaireVersion,
+		IdempotencyKey:       req.IdempotencyKey,
 		Title:                req.Title,
 		TesteeID:             req.TesteeID,
 		TaskID:               req.TaskID,
@@ -36,59 +33,24 @@ func buildAdminSubmitAnswerSheetRequest(req SubmitAnswerSheetRequest) AdminSubmi
 	}
 }
 
-func submitAdminAnswerSheet(
-	ctx context.Context,
-	client adminAnswerSheetSubmitClient,
-	req SubmitAnswerSheetRequest,
-	policy adminAnswerSheetSubmitPolicy,
-) (int, error) {
-	internalReq := toToolSubmitRequest(req)
-	return toolanswersheet.SubmitWithRetry(ctx, internalReq, policy, func(
-		ctx context.Context,
-		submitReq toolanswersheet.SubmitRequest,
-		timeout time.Duration,
-		retryMax int,
-	) error {
-		adminReq := buildAdminSubmitAnswerSheetRequest(fromToolSubmitRequest(submitReq))
-		if timeout > 0 || retryMax != 0 {
-			_, err := client.SubmitAnswerSheetAdminWithPolicy(ctx, adminReq, timeout, retryMax)
-			return err
-		}
-		_, err := client.SubmitAnswerSheetAdmin(ctx, adminReq)
-		return err
-	})
-}
-
 func logBuiltAnswers(logger interface{ Infow(string, ...interface{}) }, answers []Answer, questionnaireCode, testeeID string) {
-	answerDetails := make([]map[string]interface{}, 0, len(answers))
+	questionTypes := make([]string, 0, len(answers))
 	for _, answer := range answers {
-		answerDetails = append(answerDetails, map[string]interface{}{
-			"question_code": answer.QuestionCode,
-			"question_type": answer.QuestionType,
-			"value":         formatAnswerValue(answer.Value),
-			"value_type":    fmt.Sprintf("%T", answer.Value),
-			"score":         answer.Score,
-		})
+		questionTypes = append(questionTypes, answer.QuestionType)
 	}
 
 	logger.Infow("Built answers",
 		"questionnaire_code", questionnaireCode,
 		"testee_id", testeeID,
 		"answer_count", len(answers),
-		"answers", answerDetails,
+		"question_types", questionTypes,
 	)
 }
 
 func logSubmitRequest(logger interface{ Infow(string, ...interface{}) }, req SubmitAnswerSheetRequest, testeeIDStr string) {
-	answerDetails := make([]map[string]interface{}, 0, len(req.Answers))
+	questionTypes := make([]string, 0, len(req.Answers))
 	for _, answer := range req.Answers {
-		answerDetails = append(answerDetails, map[string]interface{}{
-			"question_code": answer.QuestionCode,
-			"question_type": answer.QuestionType,
-			"value":         formatAnswerValue(answer.Value),
-			"value_type":    fmt.Sprintf("%T", answer.Value),
-			"score":         answer.Score,
-		})
+		questionTypes = append(questionTypes, answer.QuestionType)
 	}
 
 	logger.Infow("Submit answer sheet request",
@@ -99,16 +61,12 @@ func logSubmitRequest(logger interface{ Infow(string, ...interface{}) }, req Sub
 		"title", req.Title,
 		"task_id", req.TaskID,
 		"answer_count", len(req.Answers),
-		"answers", answerDetails,
+		"question_types", questionTypes,
 	)
 }
 
 func validateAnswers(detail *QuestionnaireDetailResponse, answers []Answer) []map[string]interface{} {
 	return toolanswersheet.Validate(toToolQuestionnaire(detail), toToolAnswers(answers))
-}
-
-func formatAnswerValue(value interface{}) string {
-	return toolanswersheet.FormatValue(value)
 }
 
 func buildAnswers(detail *QuestionnaireDetailResponse, rng *rand.Rand) []Answer {
@@ -199,26 +157,4 @@ func fromToolAnswers(answers []toolanswersheet.Answer) []Answer {
 		})
 	}
 	return out
-}
-
-func toToolSubmitRequest(req SubmitAnswerSheetRequest) toolanswersheet.SubmitRequest {
-	return toolanswersheet.SubmitRequest{
-		QuestionnaireCode:    req.QuestionnaireCode,
-		QuestionnaireVersion: req.QuestionnaireVersion,
-		Title:                req.Title,
-		TesteeID:             req.TesteeID,
-		TaskID:               req.TaskID,
-		Answers:              toToolAnswers(req.Answers),
-	}
-}
-
-func fromToolSubmitRequest(req toolanswersheet.SubmitRequest) SubmitAnswerSheetRequest {
-	return SubmitAnswerSheetRequest{
-		QuestionnaireCode:    req.QuestionnaireCode,
-		QuestionnaireVersion: req.QuestionnaireVersion,
-		Title:                req.Title,
-		TesteeID:             req.TesteeID,
-		TaskID:               req.TaskID,
-		Answers:              fromToolAnswers(req.Answers),
-	}
 }

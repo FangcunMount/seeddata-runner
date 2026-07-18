@@ -5,6 +5,7 @@ go 1.25.9
 require (
 	github.com/FangcunMount/component-base v0.6.1
 	github.com/FangcunMount/iam/v2 v2.0.8
+	github.com/google/uuid v1.6.0
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mozillazg/go-pinyin v0.21.0
 	golang.org/x/sync v0.19.0
@@ -15,7 +16,6 @@ require (
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect

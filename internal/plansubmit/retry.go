@@ -109,14 +109,11 @@ func newPlanQuestionnaireVersionMismatchError(
 	scaleQuestionnaireVersion string,
 	loadedQuestionnaireVersion string,
 ) error {
-	normalizedScaleCode := strings.ToLower(strings.TrimSpace(scaleCode))
 	return fmt.Errorf(
-		"questionnaire version mismatch for plan task submit: scale_code=%s questionnaire_code=%s scale_questionnaire_version=%s loaded_questionnaire_version=%s; seeddata loads questionnaire detail by code only, so this usually means the assessment-model catalogue cache is stale or the model is bound to a different questionnaire version; if you changed model.questionnaire_version directly, invalidate assessment-model cache for code=%s (or <cache.namespace> published model key for %s) and retry",
+		"published questionnaire contract mismatch for plan task submit: scale_code=%s questionnaire_code=%s requested_version=%s loaded_version=%s",
 		scaleCode,
 		questionnaireCode,
 		scaleQuestionnaireVersion,
 		loadedQuestionnaireVersion,
-		normalizedScaleCode,
-		normalizedScaleCode,
 	)
 }

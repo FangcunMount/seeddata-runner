@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math/rand"
-	"net/http"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -32,7 +31,6 @@ const (
 	dailySimulationDefaultSource    = "daily_simulation"
 	dailySimulationDeviceIDPrefix   = "seeddata-daily"
 	seedAssessmentPollTimeout       = 5 * time.Minute
-	seedAssessmentPollInterval      = 2 * time.Second
 	dailySimulationMockIAMTimeout   = 15 * time.Second
 	dailySimulationMockIAMRetryMax  = 1
 )
@@ -309,11 +307,6 @@ func simulateDailyUserAdditionalTarget(
 }
 
 func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
-	if state.existingTestee != nil {
-		state.collectionClient = state.deps.CollectionClient
-		return state.nextDecision(dailySimulationJourneyStageGuardianAccount), nil
-	}
-
 	var (
 		guardianUserID string
 		guardianToken  string
@@ -447,66 +440,6 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 	if state.existingTestee != nil {
 		state.existingTestee.ID = state.testee.ID
 	}
-	var (
-		existingAnswerSheet *AdminAnswerSheetListItem
-	)
-	if strings.TrimSpace(state.guardianUserID) != "" {
-		existingAnswerSheet, err = findDailySimulationAnswerSheet(
-			ctx,
-			state.deps.APIClient,
-			state.target.QuestionnaireCode,
-			state.guardianUserID,
-			state.testee.ID,
-		)
-		if err != nil {
-			return toolchain.Decision{}, err
-		}
-	}
-	existingAssessmentID, err := findDailySimulationAssessment(
-		ctx,
-		state.deps.APIClient,
-		state.testee.ID,
-		state.target.QuestionnaireCode,
-		state.target.QuestionnaireVersion,
-	)
-	if err != nil {
-		return toolchain.Decision{}, err
-	}
-	assessmentClient := state.collectionClient
-	if assessmentClient == nil {
-		assessmentClient = state.deps.CollectionClient
-	}
-	if assessmentClient == nil {
-		return toolchain.Decision{}, fmt.Errorf("assessment client is not initialized")
-	}
-	if strings.TrimSpace(existingAssessmentID) != "" {
-		state.outcome.AssessmentID = existingAssessmentID
-		state.outcome.SkippedSubmission = true
-		return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
-	}
-	if existingAnswerSheet != nil && !state.target.RequiresAssessment {
-		state.outcome.AnswerSheetID = existingAnswerSheet.ID
-		state.outcome.SkippedSubmission = true
-		return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
-	}
-	if existingAnswerSheet != nil && state.target.RequiresAssessment {
-		assessmentID, waitErr := waitForDailySimulationAssessment(
-			ctx,
-			assessmentClient,
-			state.deps.APIClient,
-			existingAnswerSheet.ID,
-			state.testee.ID,
-			state.target.QuestionnaireCode,
-			state.target.QuestionnaireVersion,
-		)
-		if waitErr == nil {
-			state.outcome.AnswerSheetID = existingAnswerSheet.ID
-			state.outcome.AssessmentID = assessmentID
-			state.outcome.SkippedSubmission = true
-			return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
-		}
-	}
-
 	testeeID := parseID(state.testee.ID)
 	if testeeID == 0 {
 		return toolchain.Decision{}, fmt.Errorf("invalid testee id %q", state.testee.ID)
@@ -535,27 +468,8 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 		TesteeID:             testeeID,
 		Answers:              answers,
 	}
-	adminSubmitReq := buildDailySimulationAdminSubmitAnswerSheetRequest(submitReq, state.guardianUserID)
-	submitResp, err := state.deps.APIClient.SubmitAnswerSheetAdmin(ctx, adminSubmitReq)
-	if err != nil {
+	if err := submitDailySimulationAnswerSheet(ctx, state, submitReq); err != nil {
 		return toolchain.Decision{}, err
-	}
-	state.outcome.AnswerSheetID = submitResp.ID
-
-	if state.target.RequiresAssessment {
-		assessmentID, err := waitForDailySimulationAssessment(
-			ctx,
-			assessmentClient,
-			state.deps.APIClient,
-			submitResp.ID,
-			state.testee.ID,
-			state.target.QuestionnaireCode,
-			state.target.QuestionnaireVersion,
-		)
-		if err != nil {
-			return toolchain.Decision{}, err
-		}
-		state.outcome.AssessmentID = assessmentID
 	}
 	return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
 }
@@ -859,7 +773,7 @@ func ensureDailySimulationEntryAndTarget(
 		if clinicianID == "" {
 			return nil, nil, "", fmt.Errorf("daily simulation entry %s has empty clinician_id", entry.ID)
 		}
-		target, err := resolveDailySimulationTarget(ctx, deps.CollectionClient, entry.TargetType, entry.TargetCode, entry.TargetVersion)
+		target, err := resolveDailySimulationTarget(ctx, deps.APIClient, deps.CollectionClient, entry.TargetType, entry.TargetCode, entry.TargetVersion)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -897,7 +811,7 @@ func ensureDailySimulationEntryAndTarget(
 				return nil, nil, "", fmt.Errorf("reactivate daily simulation entry %s: %w", item.ID, err)
 			}
 		}
-		target, err := resolveDailySimulationTarget(ctx, deps.CollectionClient, item.TargetType, item.TargetCode, item.TargetVersion)
+		target, err := resolveDailySimulationTarget(ctx, deps.APIClient, deps.CollectionClient, item.TargetType, item.TargetCode, item.TargetVersion)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -912,7 +826,7 @@ func ensureDailySimulationEntryAndTarget(
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("create daily simulation entry: %w", err)
 	}
-	target, err := resolveDailySimulationTarget(ctx, deps.CollectionClient, entry.TargetType, entry.TargetCode, entry.TargetVersion)
+	target, err := resolveDailySimulationTarget(ctx, deps.APIClient, deps.CollectionClient, entry.TargetType, entry.TargetCode, entry.TargetVersion)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -921,7 +835,8 @@ func ensureDailySimulationEntryAndTarget(
 
 func resolveDailySimulationTarget(
 	ctx context.Context,
-	client *APIClient,
+	apiClient *APIClient,
+	collectionClient *APIClient,
 	targetType, targetCode, targetVersion string,
 ) (*dailySimulationResolvedTarget, error) {
 	targetType = strings.ToLower(strings.TrimSpace(targetType))
@@ -933,33 +848,42 @@ func resolveDailySimulationTarget(
 
 	switch targetType {
 	case "scale":
-		scaleItem, err := client.GetScale(ctx, targetCode)
+		if apiClient == nil {
+			return nil, fmt.Errorf("apiserver client is not initialized")
+		}
+		if collectionClient == nil {
+			return nil, fmt.Errorf("collection client is not initialized")
+		}
+		scaleItem, err := apiClient.GetPublishedAssessmentModel(ctx, targetCode, targetVersion)
 		if err != nil {
 			return nil, fmt.Errorf("get scale %s: %w", targetCode, err)
 		}
 		if scaleItem == nil {
 			return nil, fmt.Errorf("scale %s not found", targetCode)
 		}
-		detail, err := client.GetQuestionnaireDetail(ctx, scaleItem.QuestionnaireCode)
+		questionnaireVersion := strings.TrimSpace(scaleItem.QuestionnaireVersion)
+		if questionnaireVersion == "" {
+			return nil, fmt.Errorf("published assessment model %s has empty questionnaire_version", targetCode)
+		}
+		detail, err := collectionClient.GetPublishedQuestionnaire(ctx, scaleItem.QuestionnaireCode, questionnaireVersion)
 		if err != nil {
 			return nil, fmt.Errorf("get questionnaire %s for scale %s: %w", scaleItem.QuestionnaireCode, targetCode, err)
-		}
-		version := strings.TrimSpace(scaleItem.QuestionnaireVersion)
-		if version == "" {
-			version = strings.TrimSpace(detail.Version)
 		}
 		return &dailySimulationResolvedTarget{
 			TargetType:           targetType,
 			TargetCode:           targetCode,
 			TargetVersion:        targetVersion,
 			QuestionnaireCode:    strings.TrimSpace(scaleItem.QuestionnaireCode),
-			QuestionnaireVersion: version,
+			QuestionnaireVersion: questionnaireVersion,
 			QuestionnaireTitle:   strings.TrimSpace(detail.Title),
 			QuestionnaireDetail:  detail,
 			RequiresAssessment:   true,
 		}, nil
 	case "questionnaire":
-		detail, err := client.GetQuestionnaireDetail(ctx, targetCode)
+		if collectionClient == nil {
+			return nil, fmt.Errorf("collection client is not initialized")
+		}
+		detail, err := collectionClient.GetPublishedQuestionnaire(ctx, targetCode, targetVersion)
 		if err != nil {
 			return nil, fmt.Errorf("get questionnaire %s: %w", targetCode, err)
 		}
@@ -1299,196 +1223,6 @@ func hasAssessmentEntryRelation(
 		}
 	}
 	return false, nil
-}
-
-func findDailySimulationAnswerSheet(
-	ctx context.Context,
-	adminClient *APIClient,
-	questionnaireCode, guardianUserID, testeeID string,
-) (*AdminAnswerSheetListItem, error) {
-	// 优先从测评列表取 answer_sheet_id（列表项已不再返回 testee_id）。
-	if adminClient != nil && strings.TrimSpace(testeeID) != "" {
-		answerSheetID, err := findDailySimulationAnswerSheetIDByAssessment(
-			ctx,
-			adminClient,
-			testeeID,
-			questionnaireCode,
-			"",
-		)
-		if err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(answerSheetID) != "" {
-			return &AdminAnswerSheetListItem{
-				ID:                answerSheetID,
-				QuestionnaireCode: questionnaireCode,
-			}, nil
-		}
-	}
-
-	userID := parseID(guardianUserID)
-	if userID == 0 {
-		return nil, fmt.Errorf("invalid guardian user id %q", guardianUserID)
-	}
-	resp, err := adminClient.ListAdminAnswerSheets(ctx, questionnaireCode, userID, 1, dailySimulationAnswerSheetPage)
-	if err != nil {
-		return nil, fmt.Errorf("list admin answersheets for questionnaire %s filler %s: %w", questionnaireCode, guardianUserID, err)
-	}
-	// daily sim 每个 guardian 对应用户唯一；按 filler+questionnaire 取首条即可。
-	for _, item := range resp.Items {
-		if strings.TrimSpace(item.ID) == "" {
-			continue
-		}
-		cloned := item
-		return &cloned, nil
-	}
-	return nil, nil
-}
-
-func findDailySimulationAnswerSheetIDByAssessment(
-	ctx context.Context,
-	apiClient *APIClient,
-	testeeID, questionnaireCode, questionnaireVersion string,
-) (string, error) {
-	assessment, err := findDailySimulationAssessmentItem(ctx, apiClient, testeeID, questionnaireCode, questionnaireVersion, "")
-	if err != nil || assessment == nil {
-		return "", err
-	}
-	return strings.TrimSpace(assessment.AnswerSheetID), nil
-}
-
-func findDailySimulationAssessment(
-	ctx context.Context,
-	apiClient *APIClient,
-	testeeID, questionnaireCode, questionnaireVersion string,
-) (string, error) {
-	assessment, err := findDailySimulationAssessmentItem(ctx, apiClient, testeeID, questionnaireCode, questionnaireVersion, "")
-	if err != nil || assessment == nil {
-		return "", err
-	}
-	return strings.TrimSpace(assessment.ID), nil
-}
-
-func findDailySimulationAssessmentItem(
-	ctx context.Context,
-	apiClient *APIClient,
-	testeeID, questionnaireCode, questionnaireVersion, answerSheetID string,
-) (*AssessmentResponse, error) {
-	page := 1
-	wantAnswerSheetID := strings.TrimSpace(answerSheetID)
-	wantCode := strings.TrimSpace(questionnaireCode)
-	wantVersion := strings.TrimSpace(questionnaireVersion)
-	for {
-		resp, err := apiClient.ListAssessmentsByTestee(ctx, testeeID, page, assessmentListPageSize)
-		if err != nil {
-			return nil, fmt.Errorf("list assessments by testee %s: %w", testeeID, err)
-		}
-		for _, item := range resp.Items {
-			if item == nil {
-				continue
-			}
-			if wantAnswerSheetID != "" {
-				if strings.TrimSpace(item.AnswerSheetID) == wantAnswerSheetID {
-					return item, nil
-				}
-				continue
-			}
-			if strings.TrimSpace(item.QuestionnaireCode) != wantCode {
-				continue
-			}
-			if wantVersion != "" && strings.TrimSpace(item.QuestionnaireVersion) != "" &&
-				strings.TrimSpace(item.QuestionnaireVersion) != wantVersion {
-				continue
-			}
-			return item, nil
-		}
-		if len(resp.Items) == 0 || page >= resp.TotalPages {
-			break
-		}
-		page++
-	}
-	return nil, nil
-}
-
-func waitForDailySimulationAssessment(
-	ctx context.Context,
-	_ *APIClient,
-	apiClient *APIClient,
-	answerSheetID string,
-	testeeID, questionnaireCode, questionnaireVersion string,
-) (string, error) {
-	deadline := time.Now().Add(seedAssessmentPollTimeout)
-	var lastErr error
-	for {
-		if apiClient != nil && strings.TrimSpace(testeeID) != "" {
-			assessment, err := findDailySimulationAssessmentItem(
-				ctx,
-				apiClient,
-				testeeID,
-				questionnaireCode,
-				questionnaireVersion,
-				answerSheetID,
-			)
-			if err != nil {
-				if !shouldRetryDailySimulationAssessmentLookup(err) {
-					return "", err
-				}
-				lastErr = err
-			} else if assessment != nil && strings.TrimSpace(assessment.ID) != "" {
-				return strings.TrimSpace(assessment.ID), nil
-			} else if strings.TrimSpace(answerSheetID) != "" && strings.TrimSpace(questionnaireCode) != "" {
-				// answer_sheet_id 尚未回填时，回退到问卷编码匹配（兼容过渡期）。
-				assessment, err = findDailySimulationAssessmentItem(
-					ctx,
-					apiClient,
-					testeeID,
-					questionnaireCode,
-					questionnaireVersion,
-					"",
-				)
-				if err != nil {
-					if !shouldRetryDailySimulationAssessmentLookup(err) {
-						return "", err
-					}
-					lastErr = err
-				} else if assessment != nil && strings.TrimSpace(assessment.ID) != "" {
-					return strings.TrimSpace(assessment.ID), nil
-				}
-			}
-		}
-
-		if time.Now().After(deadline) {
-			if lastErr != nil {
-				return "", fmt.Errorf("assessment not ready for answersheet %s before timeout: %w", answerSheetID, lastErr)
-			}
-			return "", fmt.Errorf("assessment not found by answersheet %s before timeout", answerSheetID)
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(seedAssessmentPollInterval):
-		}
-	}
-}
-
-func shouldRetryDailySimulationAssessmentLookup(err error) bool {
-	if err == nil {
-		return false
-	}
-	switch {
-	case isDailySimulationAPIHTTPStatus(err, http.StatusBadRequest):
-		return false
-	case isDailySimulationAPIHTTPStatus(err, http.StatusUnauthorized):
-		return false
-	case isDailySimulationAPIHTTPStatus(err, http.StatusForbidden):
-		return false
-	case isDailySimulationAPIHTTPStatus(err, http.StatusNotFound):
-		return false
-	case isDailySimulationAPIHTTPStatus(err, http.StatusUnprocessableEntity):
-		return false
-	default:
-		return true
-	}
 }
 
 func buildDailySimulationProfile(cfg DailySimulationConfig, runDate time.Time, idx int) dailySimulationProfile {

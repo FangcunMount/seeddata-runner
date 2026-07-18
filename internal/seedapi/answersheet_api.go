@@ -4,16 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"regexp"
 	"strings"
 	"time"
-
-	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 )
 
-const (
-	collectionSubmitPollTimeout  = 2 * time.Minute
-	collectionSubmitPollInterval = 500 * time.Millisecond
-)
+var safeSubmissionIdempotencyKey = regexp.MustCompile(`^[A-Za-z0-9._:-]{8,128}$`)
 
 type collectionSubmitAnswer struct {
 	QuestionCode string `json:"question_code"`
@@ -25,20 +22,28 @@ type collectionSubmitAnswer struct {
 type collectionSubmitAnswerSheetRequest struct {
 	QuestionnaireCode    string                   `json:"questionnaire_code"`
 	QuestionnaireVersion string                   `json:"questionnaire_version"`
+	IdempotencyKey       string                   `json:"idempotency_key"`
 	Title                string                   `json:"title"`
 	TesteeID             uint64                   `json:"testee_id"`
 	TaskID               string                   `json:"task_id,omitempty"`
 	Answers              []collectionSubmitAnswer `json:"answers"`
 }
 
-// SubmitAnswerSheet 提交答卷（collection-server，异步 202 + submit-status 轮询）。
-func (c *APIClient) SubmitAnswerSheet(ctx context.Context, req SubmitAnswerSheetRequest) (*SubmitAnswerSheetResponse, error) {
+// AcceptCollectionAnswerSheet durably accepts an AnswerSheet through collection-server.
+// Submission retries are intentionally owned by the caller so every attempt can persist
+// a fresh request ID while reusing the same business idempotency key.
+func (c *APIClient) AcceptCollectionAnswerSheet(ctx context.Context, req SubmitAnswerSheetRequest, requestID string) (*CollectionSubmitAcceptedResponse, error) {
 	wireReq, err := toCollectionSubmitAnswerSheetRequest(req)
 	if err != nil {
 		return nil, err
 	}
-
-	resp, err := c.doRequest(ctx, "POST", "/api/v1/answersheets", wireReq)
+	headers := map[string]string{}
+	if requestID = strings.TrimSpace(requestID); requestID != "" {
+		headers["X-Request-ID"] = requestID
+	}
+	resp, err := c.doRequestWithHeadersRetryTimeoutAndLimit(
+		ctx, http.MethodPost, "/api/v1/answersheets", wireReq, headers, true, c.httpClient.Timeout, 0,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -47,89 +52,50 @@ func (c *APIClient) SubmitAnswerSheet(ctx context.Context, req SubmitAnswerSheet
 	if err := decodeResponseData(resp, &accepted); err != nil {
 		return nil, fmt.Errorf("decode collection submit accepted response: %w", err)
 	}
-	requestID := strings.TrimSpace(accepted.RequestID)
-	if requestID == "" {
-		// 兼容偶发同步返回 {id,...} 的旧形态。
-		var legacy SubmitAnswerSheetResponse
-		if err := decodeResponseData(resp, &legacy); err == nil && strings.TrimSpace(legacy.ID) != "" {
-			return &legacy, nil
-		}
-		return nil, fmt.Errorf("collection submit accepted without request_id")
+	if !strings.EqualFold(strings.TrimSpace(accepted.Status), "accepted") {
+		return nil, fmt.Errorf("collection submit returned unexpected status %q", accepted.Status)
 	}
+	if strings.TrimSpace(accepted.AnswerSheetID) == "" {
+		return nil, fmt.Errorf("collection submit accepted without answersheet_id")
+	}
+	return &accepted, nil
+}
 
-	status, err := c.waitCollectionAnswerSheetSubmit(ctx, requestID)
+// GetAssessmentReadiness queries the only supported AnswerSheet-to-Assessment path.
+func (c *APIClient) GetAssessmentReadiness(ctx context.Context, answerSheetID string, testeeID uint64) (*AssessmentReadinessResponse, error) {
+	answerSheetID = strings.TrimSpace(answerSheetID)
+	if answerSheetID == "" {
+		return nil, fmt.Errorf("answersheet_id is required")
+	}
+	if testeeID == 0 {
+		return nil, fmt.Errorf("testee_id is required")
+	}
+	path := fmt.Sprintf(
+		"/api/v1/answersheets/%s/assessment-readiness?testee_id=%d",
+		urlQueryEscape(answerSheetID),
+		testeeID,
+	)
+	resp, err := c.doRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
-	return &SubmitAnswerSheetResponse{
-		ID:           strings.TrimSpace(status.AnswerSheetID),
-		AssessmentID: strings.TrimSpace(status.AssessmentID),
-		Message:      strings.TrimSpace(status.Status),
-	}, nil
-}
-
-func (c *APIClient) waitCollectionAnswerSheetSubmit(ctx context.Context, requestID string) (*CollectionSubmitStatusResponse, error) {
-	deadline := time.Now().Add(collectionSubmitPollTimeout)
-	var lastStatus, lastAnswerSheetID string
-	for {
-		status, err := c.GetAnswerSheetSubmitStatus(ctx, requestID)
-		if err != nil {
-			return nil, err
-		}
-		lastStatus = status.Status
-		lastAnswerSheetID = status.AnswerSheetID
-		switch strings.ToLower(strings.TrimSpace(status.Status)) {
-		case "done":
-			if strings.TrimSpace(status.AnswerSheetID) == "" {
-				return nil, fmt.Errorf("collection submit done without answersheet_id: request_id=%s", requestID)
-			}
-			return status, nil
-		case "failed":
-			return nil, fmt.Errorf("collection submit failed: request_id=%s", requestID)
-		}
-
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf(
-				"collection submit not ready before timeout: request_id=%s last_status=%s answersheet_id=%s",
-				requestID,
-				lastStatus,
-				lastAnswerSheetID,
-			)
-		}
-		if err := scheduler.Wait(ctx, collectionSubmitPollInterval); err != nil {
-			return nil, err
-		}
+	var readiness AssessmentReadinessResponse
+	if err := decodeResponseData(resp, &readiness); err != nil {
+		return nil, fmt.Errorf("decode assessment readiness response: %w", err)
 	}
-}
-
-// GetAnswerSheetSubmitStatus 查询 collection 答卷提交状态。
-func (c *APIClient) GetAnswerSheetSubmitStatus(ctx context.Context, requestID string) (*CollectionSubmitStatusResponse, error) {
-	requestID = strings.TrimSpace(requestID)
-	if requestID == "" {
-		return nil, fmt.Errorf("request_id is required")
-	}
-	path := fmt.Sprintf("/api/v1/answersheets/submit-status?request_id=%s", urlQueryEscape(requestID))
-	resp, err := c.doRequest(ctx, "GET", path, nil)
-	if err != nil {
-		return nil, err
-	}
-	var status CollectionSubmitStatusResponse
-	if err := decodeResponseData(resp, &status); err != nil {
-		return nil, fmt.Errorf("decode collection submit status response: %w", err)
-	}
-	return &status, nil
+	return &readiness, nil
 }
 
 func toCollectionSubmitAnswerSheetRequest(req SubmitAnswerSheetRequest) (collectionSubmitAnswerSheetRequest, error) {
+	req.IdempotencyKey = strings.TrimSpace(req.IdempotencyKey)
+	if !safeSubmissionIdempotencyKey.MatchString(req.IdempotencyKey) {
+		return collectionSubmitAnswerSheetRequest{}, fmt.Errorf("idempotency_key must contain 8-128 safe characters")
+	}
 	answers := make([]collectionSubmitAnswer, 0, len(req.Answers))
 	for _, answer := range req.Answers {
 		value, err := marshalCollectionAnswerValue(answer.Value)
 		if err != nil {
-			return collectionSubmitAnswerSheetRequest{}, fmt.Errorf(
-				"marshal collection answer value for question %s: %w",
-				answer.QuestionCode,
-				err,
-			)
+			return collectionSubmitAnswerSheetRequest{}, fmt.Errorf("marshal collection answer value for question %s: %w", answer.QuestionCode, err)
 		}
 		answers = append(answers, collectionSubmitAnswer{
 			QuestionCode: answer.QuestionCode,
@@ -142,6 +108,7 @@ func toCollectionSubmitAnswerSheetRequest(req SubmitAnswerSheetRequest) (collect
 	return collectionSubmitAnswerSheetRequest{
 		QuestionnaireCode:    req.QuestionnaireCode,
 		QuestionnaireVersion: req.QuestionnaireVersion,
+		IdempotencyKey:       req.IdempotencyKey,
 		Title:                req.Title,
 		TesteeID:             req.TesteeID,
 		TaskID:               req.TaskID,
@@ -164,23 +131,22 @@ func marshalCollectionAnswerValue(value interface{}) (string, error) {
 	}
 }
 
-// SubmitAnswerSheetAdmin 管理员提交答卷（apiserver）。
-func (c *APIClient) SubmitAnswerSheetAdmin(ctx context.Context, req AdminSubmitAnswerSheetRequest) (*SubmitAnswerSheetResponse, error) {
-	resp, err := c.doRequest(ctx, "POST", "/api/v1/answersheets/admin-submit", req)
+// SubmitAnswerSheetAdminAttempt performs exactly one HTTP attempt with an optional request ID.
+func (c *APIClient) SubmitAnswerSheetAdminAttempt(ctx context.Context, req AdminSubmitAnswerSheetRequest, requestID string, timeout time.Duration) (*SubmitAnswerSheetResponse, error) {
+	headers := map[string]string{}
+	if requestID = strings.TrimSpace(requestID); requestID != "" {
+		headers["X-Request-ID"] = requestID
+	}
+	resp, err := c.doRequestWithHeadersRetryTimeoutAndLimit(
+		ctx, http.MethodPost, "/api/v1/answersheets/admin-submit", req, headers, true, timeout, 0,
+	)
 	if err != nil {
 		return nil, err
 	}
-
-	dataBytes, err := json.Marshal(resp.Data)
-	if err != nil {
-		return nil, fmt.Errorf("marshal response data: %w", err)
-	}
-
 	var submitResp SubmitAnswerSheetResponse
-	if err := json.Unmarshal(dataBytes, &submitResp); err != nil {
-		return nil, fmt.Errorf("unmarshal submit response: %w", err)
+	if err := decodeResponseData(resp, &submitResp); err != nil {
+		return nil, fmt.Errorf("decode admin submit response: %w", err)
 	}
-
 	return &submitResp, nil
 }
 
@@ -188,39 +154,15 @@ func (c *APIClient) SubmitAnswerSheetAdmin(ctx context.Context, req AdminSubmitA
 func (c *APIClient) ListAdminAnswerSheets(ctx context.Context, questionnaireCode string, fillerID uint64, page, pageSize int) (*AdminAnswerSheetListResponse, error) {
 	path := fmt.Sprintf(
 		"/api/v1/answersheets?page=%d&page_size=%d&questionnaire_code=%s&filler_id=%d",
-		page,
-		pageSize,
-		urlQueryEscape(questionnaireCode),
-		fillerID,
+		page, pageSize, urlQueryEscape(questionnaireCode), fillerID,
 	)
-	resp, err := c.doRequest(ctx, "GET", path, nil)
+	resp, err := c.doRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
-
 	var listResp AdminAnswerSheetListResponse
 	if err := decodeResponseData(resp, &listResp); err != nil {
 		return nil, fmt.Errorf("decode admin answersheet list response: %w", err)
 	}
 	return &listResp, nil
-}
-
-// SubmitAnswerSheetAdminWithPolicy 管理员提交答卷并覆盖超时/重试。
-func (c *APIClient) SubmitAnswerSheetAdminWithPolicy(ctx context.Context, req AdminSubmitAnswerSheetRequest, timeout time.Duration, retryMax int) (*SubmitAnswerSheetResponse, error) {
-	resp, err := c.doRequestWithRetryTimeoutAndLimit(ctx, "POST", "/api/v1/answersheets/admin-submit", req, true, timeout, retryMax)
-	if err != nil {
-		return nil, err
-	}
-
-	dataBytes, err := json.Marshal(resp.Data)
-	if err != nil {
-		return nil, fmt.Errorf("marshal response data: %w", err)
-	}
-
-	var submitResp SubmitAnswerSheetResponse
-	if err := json.Unmarshal(dataBytes, &submitResp); err != nil {
-		return nil, fmt.Errorf("unmarshal submit response: %w", err)
-	}
-
-	return &submitResp, nil
 }

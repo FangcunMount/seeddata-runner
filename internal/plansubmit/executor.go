@@ -2,6 +2,7 @@ package plansubmit
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -12,10 +13,11 @@ type planTaskBatchExecutor struct {
 	submitClient         adminAnswerSheetSubmitClient
 	logger               planTaskLogger
 	planID               string
+	scaleCode            string
 	questionnaireVersion string
 	detail               *QuestionnaireDetailResponse
 	workers              int
-	tracker              *recentPlanTaskTracker
+	ledger               *SubmissionLedger
 	verbose              bool
 }
 
@@ -23,20 +25,22 @@ func newPlanTaskBatchExecutor(
 	submitClient adminAnswerSheetSubmitClient,
 	logger planTaskLogger,
 	planID string,
+	scaleCode string,
 	questionnaireVersion string,
 	detail *QuestionnaireDetailResponse,
 	workers int,
-	tracker *recentPlanTaskTracker,
+	ledger *SubmissionLedger,
 	verbose bool,
 ) planTaskBatchExecutor {
 	return planTaskBatchExecutor{
 		submitClient:         submitClient,
 		logger:               logger,
 		planID:               planID,
+		scaleCode:            scaleCode,
 		questionnaireVersion: questionnaireVersion,
 		detail:               detail,
 		workers:              workers,
-		tracker:              tracker,
+		ledger:               ledger,
 		verbose:              verbose,
 	}
 }
@@ -117,19 +121,14 @@ func (e planTaskBatchExecutor) processJob(
 	default:
 	}
 
-	if e.tracker != nil && e.tracker.Seen(job.task.ID) {
-		skippedCount.Add(1)
-		if e.verbose {
-			e.logger.Debugw("Skipping recently submitted opened task",
-				"plan_id", e.planID,
-				"task_id", job.task.ID,
-				"testee_id", job.testeeID,
-			)
-		}
+	if taskScaleCode := strings.TrimSpace(job.task.ScaleCode); taskScaleCode != "" && taskScaleCode != strings.TrimSpace(e.scaleCode) {
+		failedTaskExecutionCount.Add(1)
+		e.logger.Warnw("Skipping opened task because scale_code differs from published plan model",
+			"plan_id", e.planID, "task_id", job.task.ID, "task_scale_code", taskScaleCode, "plan_scale_code", e.scaleCode)
 		return
 	}
 
-	req, err := buildPlanTaskSubmitRequest(e.detail, e.questionnaireVersion, job.task, e.verbose, e.logger)
+	req, err := buildPlanTaskSubmitRequest(e.planID, e.detail, e.questionnaireVersion, job.task, e.verbose, e.logger)
 	if err != nil {
 		failedTaskExecutionCount.Add(1)
 		e.logger.Warnw("Skipping opened task because answersheet request build failed",
@@ -145,7 +144,7 @@ func (e planTaskBatchExecutor) processJob(
 		logSubmitRequest(e.logger, *req, job.testeeID)
 	}
 
-	attempts, err := submitPlanTaskAnswerSheet(ctx, e.submitClient, *req)
+	attempts, reused, err := submitPlanTaskAnswerSheet(ctx, e.submitClient, e.ledger, e.planID, *req)
 	if err != nil {
 		failedTaskExecutionCount.Add(1)
 		e.logger.Warnw("Opened plan task answersheet submit failed",
@@ -157,8 +156,9 @@ func (e planTaskBatchExecutor) processJob(
 		return
 	}
 
-	if e.tracker != nil {
-		e.tracker.Remember(job.task.ID)
+	if reused {
+		skippedCount.Add(1)
+		return
 	}
 	submittedCount.Add(1)
 	if e.verbose {
