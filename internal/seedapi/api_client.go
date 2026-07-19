@@ -592,18 +592,22 @@ type ApiserverTesteeListResponse struct {
 
 // TesteeResponse 受试者响应（collection-server）
 type TesteeResponse struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"created_at,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	IAMUserID    string    `json:"iam_user_id,omitempty"`
+	IAMProfileID string    `json:"iam_profile_id,omitempty"`
+	CreatedAt    time.Time `json:"created_at,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at,omitempty"`
 }
 
 func (r *TesteeResponse) UnmarshalJSON(data []byte) error {
 	type alias struct {
-		ID        string `json:"id"`
-		Name      string `json:"name"`
-		CreatedAt string `json:"created_at,omitempty"`
-		UpdatedAt string `json:"updated_at,omitempty"`
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		IAMUserID    string `json:"iam_user_id,omitempty"`
+		IAMProfileID string `json:"iam_profile_id,omitempty"`
+		CreatedAt    string `json:"created_at,omitempty"`
+		UpdatedAt    string `json:"updated_at,omitempty"`
 	}
 
 	var raw alias
@@ -629,6 +633,8 @@ func (r *TesteeResponse) UnmarshalJSON(data []byte) error {
 
 	r.ID = raw.ID
 	r.Name = raw.Name
+	r.IAMUserID = strings.TrimSpace(raw.IAMUserID)
+	r.IAMProfileID = strings.TrimSpace(raw.IAMProfileID)
 	r.CreatedAt = createdAt
 	r.UpdatedAt = updatedAt
 	return nil

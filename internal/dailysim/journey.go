@@ -358,13 +358,30 @@ func dailySimulationStageEnsureTestee(ctx context.Context, state *dailySimulatio
 			return toolchain.Decision{}, fmt.Errorf("existing testee id is empty")
 		}
 		state.testee = &TesteeResponse{
-			ID:   testeeID,
-			Name: strings.TrimSpace(state.existingTestee.Name),
+			ID:           testeeID,
+			Name:         strings.TrimSpace(state.existingTestee.Name),
+			IAMProfileID: strings.TrimSpace(nullableString(state.existingTestee.ProfileID)),
 		}
 		state.outcome.TesteeCreated = false
 		return state.nextDecision(dailySimulationJourneyStageTesteeProfile), nil
 	}
-	// 受试者档案统一在公开 intake 阶段创建/绑定，避免 collection 预建档或后台 assign 关系。
+	// collection CreateTestee 会创建 IAM profile 并建立 guardian ProfileLink；
+	// 公开 intake 在无 profile_id 时只会建临时 testee，无法通过 collection 答卷权限校验。
+	if state.collectionClient == nil {
+		return toolchain.Decision{}, fmt.Errorf("guardian collection client is not initialized before creating testee")
+	}
+	testee, created, err := ensureDailySimulationTestee(ctx, state.collectionClient, state.cfg, state.profile)
+	if err != nil {
+		return toolchain.Decision{}, err
+	}
+	if testee == nil || strings.TrimSpace(testee.ID) == "" {
+		return toolchain.Decision{}, fmt.Errorf("collection create testee returned empty id")
+	}
+	if strings.TrimSpace(testee.IAMProfileID) == "" {
+		return toolchain.Decision{}, fmt.Errorf("collection create testee %s returned empty iam_profile_id", strings.TrimSpace(testee.ID))
+	}
+	state.testee = testee
+	state.outcome.TesteeCreated = created
 	return state.nextDecision(dailySimulationJourneyStageTesteeProfile), nil
 }
 
@@ -506,6 +523,20 @@ func buildDailySimulationAssessmentEntryIntakeRequest(state *dailySimulationJour
 		if state.existingTestee.Birthday != nil {
 			req.Birthday = state.existingTestee.Birthday
 		}
+	} else {
+		profileID, err := dailySimulationTesteeIAMProfileID(state.testee)
+		if err != nil {
+			return IntakeAssessmentEntryRequest{}, err
+		}
+		if profileID == nil {
+			return IntakeAssessmentEntryRequest{}, fmt.Errorf("testee is missing iam_profile_id; collection create must precede public intake")
+		}
+		req.ProfileID = profileID
+		if state.testee != nil {
+			if name := strings.TrimSpace(state.testee.Name); name != "" {
+				req.Name = name
+			}
+		}
 	}
 
 	if strings.TrimSpace(req.Name) == "" {
@@ -525,6 +556,21 @@ func dailySimulationExistingTesteeProfileID(testee *ApiserverTesteeResponse) (*u
 	profileID := parseID(raw)
 	if profileID == 0 {
 		return nil, fmt.Errorf("invalid existing testee profile_id %q", raw)
+	}
+	return &profileID, nil
+}
+
+func dailySimulationTesteeIAMProfileID(testee *TesteeResponse) (*uint64, error) {
+	if testee == nil {
+		return nil, nil
+	}
+	raw := strings.TrimSpace(testee.IAMProfileID)
+	if raw == "" {
+		return nil, nil
+	}
+	profileID := parseID(raw)
+	if profileID == 0 {
+		return nil, fmt.Errorf("invalid testee iam_profile_id %q", raw)
 	}
 	return &profileID, nil
 }
@@ -573,15 +619,28 @@ func applyDailySimulationAssessmentEntryIntakeResult(
 	if resp == nil || resp.Testee == nil || strings.TrimSpace(resp.Testee.ID) == "" {
 		return fmt.Errorf("assessment entry intake returned empty testee")
 	}
+	previousProfileID := ""
+	if state.testee != nil {
+		previousProfileID = strings.TrimSpace(state.testee.IAMProfileID)
+	}
+	profileID := strings.TrimSpace(nullableString(resp.Testee.ProfileID))
+	if profileID == "" {
+		profileID = previousProfileID
+	}
 	state.testee = &TesteeResponse{
-		ID:        strings.TrimSpace(resp.Testee.ID),
-		Name:      strings.TrimSpace(resp.Testee.Name),
-		CreatedAt: resp.Testee.CreatedAt,
-		UpdatedAt: resp.Testee.UpdatedAt,
+		ID:           strings.TrimSpace(resp.Testee.ID),
+		Name:         strings.TrimSpace(resp.Testee.Name),
+		IAMProfileID: profileID,
+		CreatedAt:    resp.Testee.CreatedAt,
+		UpdatedAt:    resp.Testee.UpdatedAt,
 	}
 	if state.existingTestee != nil {
 		state.existingTestee.ID = state.testee.ID
 		state.existingTestee.Name = state.testee.Name
+		if profileID != "" {
+			cloned := profileID
+			state.existingTestee.ProfileID = &cloned
+		}
 		state.existingTestee.CreatedAt = resp.Testee.CreatedAt
 		state.existingTestee.UpdatedAt = resp.Testee.UpdatedAt
 	}

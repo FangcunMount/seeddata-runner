@@ -151,7 +151,7 @@ func TestEnsureDailySimulationTesteeDoesNotSendSeedTagByDefault(t *testing.T) {
 				t.Fatalf("decode request: %v", err)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"id":"testee-1","name":"王子轩"}}`))
+			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"id":"testee-1","name":"王子轩","iam_profile_id":"profile-1"}}`))
 			return
 		default:
 			t.Fatalf("unexpected path %q", r.URL.Path)
@@ -174,7 +174,7 @@ func TestEnsureDailySimulationTesteeDoesNotSendSeedTagByDefault(t *testing.T) {
 	if !created {
 		t.Fatalf("expected created testee")
 	}
-	if testee == nil || testee.ID != "testee-1" {
+	if testee == nil || testee.ID != "testee-1" || testee.IAMProfileID != "profile-1" {
 		t.Fatalf("unexpected testee response: %+v", testee)
 	}
 	if len(captured.Tags) != 0 {
@@ -301,18 +301,33 @@ func TestBuildDailySimulationAssessmentEntryIntakeRequestForNewSeedUser(t *testi
 			ChildGender: 2,
 			ChildDOB:    "2018-01-02",
 		},
+		testee: &TesteeResponse{
+			ID:           "615508260325175854",
+			Name:         "Seed Child",
+			IAMProfileID: "628990000000000001",
+		},
 	})
 	if err != nil {
 		t.Fatalf("build intake request: %v", err)
 	}
-	if req.ProfileID != nil {
-		t.Fatalf("new seed user intake should not carry profile id: %+v", req)
+	if req.ProfileID == nil || *req.ProfileID != 628990000000000001 {
+		t.Fatalf("expected collection-created iam_profile_id on intake request: %+v", req)
 	}
 	if req.Name != "Seed Child" || req.Gender != "female" {
 		t.Fatalf("unexpected intake request fields: %+v", req)
 	}
 	if req.Birthday == nil || req.Birthday.Format("2006-01-02") != "2018-01-02" {
 		t.Fatalf("unexpected birthday: %+v", req.Birthday)
+	}
+}
+
+func TestBuildDailySimulationAssessmentEntryIntakeRequestRejectsNewSeedUserWithoutProfile(t *testing.T) {
+	_, err := buildDailySimulationAssessmentEntryIntakeRequest(&dailySimulationJourneyState{
+		profile: dailySimulationProfile{ChildName: "Seed Child"},
+		testee:  &TesteeResponse{ID: "6153", Name: "Seed Child"},
+	})
+	if err == nil {
+		t.Fatal("expected new seed user without iam_profile_id to be rejected")
 	}
 }
 

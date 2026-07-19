@@ -198,7 +198,7 @@ sudo systemctl restart seeddata-runner
 2. 环境变量 `IAM_USERNAME` / `IAM_PASSWORD`
 3. 配置文件中的 `iam.username` / `iam.password`
 
-如果 daily simulation 需要新建 guardian / testee，应启用 `iam.mockConsumer`。shared secret 不应写入仓库，只允许通过 `IAM_MOCK_CONSUMER_SHARED_SECRET` 或部署密钥注入。runner 只通过 IAM 创建或确保 guardian 登录身份；受试者注册交给 qs-server `/api/v1/testees`，不再先注册 IAM profile 再携带 profile_id 注册 testee。
+如果 daily simulation 需要新建 guardian / testee，应启用 `iam.mockConsumer`。shared secret 不应写入仓库，只允许通过 `IAM_MOCK_CONSUMER_SHARED_SECRET` 或部署密钥注入。runner 通过 IAM 创建或确保 guardian 登录身份后，用 guardian token 调用 collection `POST /api/v1/testees` 建档（会创建 IAM profile 并建立 ProfileLink），再带 `profile_id` 走公开 intake；答卷提交走 collection，依赖该 ProfileLink 通过权限校验。
 
 ## 配置总览
 
