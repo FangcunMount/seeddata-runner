@@ -187,6 +187,16 @@ func verifyHistoricalSubmissionStages(
 		}
 		byStage[strings.TrimSpace(record.Stage)] = record
 	}
+	return verifyHistoricalSubmissionStageMap(historical, taskID, requiresAssessment, result, byStage)
+}
+
+func verifyHistoricalSubmissionStageMap(
+	historical historicalseed.Context,
+	taskID string,
+	requiresAssessment bool,
+	result dailySimulationSubmissionResult,
+	byStage map[string]HistoricalStageRecord,
+) (dailySimulationSubmissionResult, error) {
 	required := []string{"answersheet_submit"}
 	if strings.TrimSpace(taskID) != "" {
 		required = append([]string{"task_open"}, required...)

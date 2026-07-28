@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -186,6 +187,7 @@ func TestHistoricalPlanCompletesEveryDeterministicallySelectedTaskBeforeCutoff(t
 	}
 	tasks = append(tasks, TaskResponse{ID: "9999", PlannedAt: "2025-01-04T09:00:00+08:00"})
 	opened := map[string]struct{}{}
+	discovered := map[string]struct{}{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -195,6 +197,9 @@ func TestHistoricalPlanCompletesEveryDeterministicallySelectedTaskBeforeCutoff(t
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": PlanResponse{ID: "77", ScaleCode: "MODEL"}})
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/plans/tasks/") && strings.HasSuffix(r.URL.Path, "/open"):
 			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/plans/tasks/"), "/open")
+			if _, ok := discovered[id]; !ok {
+				t.Fatalf("task %s was opened before its child scenario was persisted", id)
+			}
 			opened[id] = struct{}{}
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": TaskResponse{ID: id}})
 		default:
@@ -211,6 +216,10 @@ func TestHistoricalPlanCompletesEveryDeterministicallySelectedTaskBeforeCutoff(t
 	}
 	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "parent", OrgID: 1, Version: historicalseed.Version1}
 	ctx := withHistoricalCutoff(historicalseed.WithContext(context.Background(), historical), time.Date(2025, 1, 3, 0, 0, 0, 0, location))
+	ctx = withHistoricalPlanTaskDiscoveryRecorder(ctx, func(_ historicalseed.Context, recovery HistoricalPlanTaskRecovery) error {
+		discovered[recovery.TaskID] = struct{}{}
+		return nil
+	})
 	if _, err := dailySimulationStageEnrollPlan(ctx, state); err != nil {
 		t.Fatal(err)
 	}
@@ -224,6 +233,142 @@ func TestHistoricalPlanCompletesEveryDeterministicallySelectedTaskBeforeCutoff(t
 	}
 	if _, ok := opened["9999"]; ok {
 		t.Fatal("task after the inclusive backfill cutoff was opened")
+	}
+}
+
+func TestHistoricalPlanResumeUsesServerEnrollmentAndTaskFactsWithoutMutation(t *testing.T) {
+	location, _ := time.LoadLocation(historicalTimezone)
+	runDate := time.Date(2025, 1, 1, 0, 0, 0, 0, location)
+	taskID := ""
+	for candidate := 1000; candidate < 2000; candidate++ {
+		value := strconv.Itoa(candidate)
+		if deterministicHistoricalInt("batch", runDate, 7, "task-complete:"+value, 100) < 60 {
+			taskID = value
+			break
+		}
+	}
+	if taskID == "" {
+		t.Fatal("failed to find deterministic selected task")
+	}
+	plannedAt := "2025-01-01T09:00:00+08:00"
+	mutationCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/internal/v1/plans/tasks/window":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": PlanTaskWindowResponse{
+				Tasks: []TaskResponse{{ID: taskID, PlanID: "77", TesteeID: "42", PlannedAt: plannedAt}}, Page: 1, PageSize: 100,
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/plans/77":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": PlanResponse{ID: "77", ScaleCode: "MODEL"}})
+		case r.Method == http.MethodPost && (r.URL.Path == "/api/v1/plans/enroll" || strings.HasSuffix(r.URL.Path, "/open")):
+			mutationCalls++
+			t.Fatalf("resume repeated historical mutation %s", r.URL.Path)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "token", log.New(log.NewOptions()))
+	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "parent", OrgID: 1, Version: historicalseed.Version1}
+	childID := fmt.Sprintf("2025-01-01/7/%s/%s", dailySimulationJourneySubmitAnswer, taskID)
+	snapshot := &HistoricalDaySnapshot{Scenarios: map[string]HistoricalScenarioSnapshot{
+		"parent": {Server: map[string]HistoricalStageRecord{
+			"plan_enrollment": {ID: 1, Stage: "plan_enrollment", Status: "completed", ResourceID: "88", PayloadHash: "hash", BusinessAt: runDate.Add(8 * time.Hour), PayloadJSON: json.RawMessage(fmt.Sprintf(`{"enrollment_id":"88","plan_id":"77","task_ids":[%q]}`, taskID))},
+		}},
+		childID: {Server: map[string]HistoricalStageRecord{
+			"task_open": {ID: 2, Stage: "task_open", Status: "completed", ResourceID: taskID, PayloadHash: "hash", BusinessAt: runDate.Add(9 * time.Hour)},
+		}},
+	}}
+	state := &dailySimulationJourneyState{
+		deps: &dependencies{APIClient: client}, planID: "77", testee: &TesteeResponse{ID: "42"},
+		profile: dailySimulationProfile{RunDate: runDate, Index: 7},
+		target:  &dailySimulationResolvedTarget{TargetType: "scale", TargetCode: "MODEL"},
+	}
+	discoveries := 0
+	ctx := historicalseed.WithContext(context.Background(), historical)
+	ctx = withHistoricalCutoff(ctx, runDate.AddDate(0, 0, 2))
+	ctx = withHistoricalDaySnapshot(ctx, snapshot)
+	ctx = withHistoricalPlanTaskDiscoveryRecorder(ctx, func(_ historicalseed.Context, recovery HistoricalPlanTaskRecovery) error {
+		discoveries++
+		if recovery.TaskID != taskID || recovery.ScenarioID != childID {
+			t.Fatalf("unexpected recovery: %+v", recovery)
+		}
+		return nil
+	})
+	if _, err := dailySimulationStageEnrollPlan(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	if mutationCalls != 0 || discoveries != 1 || state.outcome.EnrollmentID != "88" || len(state.selectedTasks) != 1 || state.selectedTasks[0].ID != taskID {
+		t.Fatalf("resume outcome=%+v selected=%+v mutations=%d discoveries=%d", state.outcome, state.selectedTasks, mutationCalls, discoveries)
+	}
+}
+
+func TestHistoricalAnswerResumeMergesServerTerminalWithoutSubmitting(t *testing.T) {
+	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "scenario", OrgID: 1, Version: historicalseed.Version1}
+	serverStages := map[string]HistoricalStageRecord{
+		"answersheet_submit":   {Stage: "answersheet_submit", Status: "completed", ResourceID: "answer-1"},
+		"assessment_created":   {Stage: "assessment_created", Status: "completed", ResourceID: "assessment-1"},
+		"assessment_submitted": {Stage: "assessment_submitted", Status: "completed", ResourceID: "assessment-1"},
+		"outcome_committed":    {Stage: "outcome_committed", Status: "completed", ResourceID: "outcome-1"},
+		"report_generated":     {Stage: "report_generated", Status: "completed", ResourceID: "report-1"},
+	}
+	ctx := historicalseed.WithContext(context.Background(), historical)
+	ctx = withHistoricalDaySnapshot(ctx, &HistoricalDaySnapshot{Scenarios: map[string]HistoricalScenarioSnapshot{
+		historical.ScenarioID: {Server: serverStages},
+	}})
+	recorded := make(map[string]int)
+	ctx = withHistoricalLocalStageRecorder(ctx, func(_ historicalseed.Context, stage dailySimulationJourneyStage, _ dailySimulationOutcome, _ *dailySimulationResolvedTarget) error {
+		recorded[string(stage)]++
+		return nil
+	})
+	state := &dailySimulationJourneyState{
+		deps: &dependencies{}, entry: &AssessmentEntryResponse{ID: "entry-1"}, testee: &TesteeResponse{ID: "42"},
+		profile: dailySimulationProfile{RunDate: time.Date(2025, 1, 1, 0, 0, 0, 0, time.Local)},
+		target: &dailySimulationResolvedTarget{
+			QuestionnaireCode: "Q", QuestionnaireVersion: "1", RequiresAssessment: true,
+			QuestionnaireDetail: &QuestionnaireDetailResponse{},
+		},
+	}
+	if _, err := dailySimulationStageSubmitAnswerSheet(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	if state.outcome.AnswerSheetID != "answer-1" || state.outcome.AssessmentID != "assessment-1" {
+		t.Fatalf("restored outcome=%+v", state.outcome)
+	}
+	for _, stage := range []string{"answersheet_submit", "assessment_created", "outcome_committed", "report_generated"} {
+		if recorded[stage] != 1 {
+			t.Fatalf("local stage %s recorded %d times", stage, recorded[stage])
+		}
+	}
+}
+
+func TestHistoricalEntryResumeUsesServerFactsWithoutRepeatingPublicAPIs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("entry resume repeated public API %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "scenario", OrgID: 1, Version: historicalseed.Version1}
+	ctx := historicalseed.WithContext(context.Background(), historical)
+	ctx = withHistoricalDaySnapshot(ctx, &HistoricalDaySnapshot{Scenarios: map[string]HistoricalScenarioSnapshot{
+		historical.ScenarioID: {Server: map[string]HistoricalStageRecord{
+			"entry_resolve": {Stage: "entry_resolve", Status: "completed", ResourceID: "entry-1", PayloadHash: "hash", BusinessAt: time.Now()},
+			"entry_intake":  {Stage: "entry_intake", Status: "completed", ResourceID: "42", PayloadHash: "hash", BusinessAt: time.Now()},
+		}},
+	}})
+	state := &dailySimulationJourneyState{
+		deps:  &dependencies{APIClient: NewAPIClient(server.URL, "token", log.New(log.NewOptions()))},
+		entry: &AssessmentEntryResponse{ID: "entry-1", Token: "entry-token"}, testee: &TesteeResponse{ID: "42"},
+	}
+	if _, err := dailySimulationStageResolveEntry(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dailySimulationStageIntakeEntry(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	if !state.outcome.EntryResolved || !state.outcome.EntryIntaked {
+		t.Fatalf("entry facts were not restored: %+v", state.outcome)
 	}
 }
 

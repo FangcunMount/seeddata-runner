@@ -2,10 +2,12 @@ package dailysim
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"math/rand"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -345,6 +347,21 @@ func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *daily
 		userCreated    bool
 		err            error
 	)
+	if historical, ok := historicalseed.FromContext(ctx); ok {
+		if snapshot, exists := historicalScenarioSnapshot(ctx, historical.ScenarioID); exists {
+			if record, completed := snapshot.Local[string(dailySimulationJourneyStageGuardianAccount)]; completed && record.Status == "completed" {
+				guardianUserID = strings.TrimSpace(record.GuardianUserID)
+				if guardianUserID == "" {
+					return toolchain.Decision{}, fmt.Errorf("historical guardian_account stage has empty guardian_user_id")
+				}
+				guardianToken, err = restoreDailySimulationGuardianSession(ctx, state.deps, state.cfg, state.profile)
+				if err != nil {
+					return toolchain.Decision{}, err
+				}
+				return completeDailySimulationGuardianStage(ctx, state, guardianUserID, guardianToken, record.UserCreated)
+			}
+		}
+	}
 	if dailySimulationUsesIAMMockConsumer(state.deps.Config.IAM) {
 		release, err := acquireDailySimulationMockIAMLimiter(ctx, state.mockIAMLimiter)
 		if err != nil {
@@ -369,7 +386,10 @@ func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *daily
 	if err != nil {
 		return toolchain.Decision{}, err
 	}
+	return completeDailySimulationGuardianStage(ctx, state, guardianUserID, guardianToken, userCreated)
+}
 
+func completeDailySimulationGuardianStage(ctx context.Context, state *dailySimulationJourneyState, guardianUserID, guardianToken string, userCreated bool) (toolchain.Decision, error) {
 	state.guardianUserID = guardianUserID
 	state.outcome.GuardianUserID = guardianUserID
 	state.guardianToken = guardianToken
@@ -402,6 +422,18 @@ func dailySimulationStageEnsureTestee(ctx context.Context, state *dailySimulatio
 		state.outcome.TesteeCreated = false
 		state.outcome.TesteeID = testeeID
 		state.outcome.IAMProfileID = state.testee.IAMProfileID
+		if historical, ok := historicalseed.FromContext(ctx); ok {
+			if snapshot, exists := historicalScenarioSnapshot(ctx, historical.ScenarioID); exists {
+				if record, completed := snapshot.Local[string(dailySimulationJourneyStageTesteeProfile)]; completed && record.Status == "completed" {
+					if strings.TrimSpace(record.TesteeID) != testeeID {
+						return toolchain.Decision{}, fmt.Errorf("historical testee_profile resource %s conflicts with restored testee %s", record.TesteeID, testeeID)
+					}
+					state.outcome.TesteeCreated = record.TesteeCreated
+					state.outcome.IAMProfileID = firstHistoricalValue(record.IAMProfileID, state.outcome.IAMProfileID)
+					state.outcome.IAMProfileLinkID = strings.TrimSpace(record.IAMProfileLinkID)
+				}
+			}
+		}
 		if err := state.recordHistoricalLocalStage(ctx, dailySimulationJourneyStageTesteeProfile); err != nil {
 			return toolchain.Decision{}, err
 		}
@@ -440,13 +472,29 @@ func dailySimulationStageEnrollPlan(ctx context.Context, state *dailySimulationJ
 	if state.testee == nil || strings.TrimSpace(state.testee.ID) == "" {
 		return toolchain.Decision{}, fmt.Errorf("testee is not initialized before plan enrollment")
 	}
-	enrollment, err := state.deps.APIClient.EnrollTesteeInPlan(ctx, EnrollTesteeRequest{
-		PlanID:    state.planID,
-		TesteeID:  state.testee.ID,
-		StartDate: state.profile.RunDate.Format("2006-01-02"),
-	})
-	if err != nil {
-		return toolchain.Decision{}, err
+	var enrollment *EnrollmentResponse
+	if historical, ok := historicalseed.FromContext(ctx); ok {
+		record, completed, err := completedHistoricalServerStage(ctx, historical.ScenarioID, string(dailySimulationJourneyStagePlanEnrollment))
+		if err != nil {
+			return toolchain.Decision{}, err
+		}
+		if completed {
+			enrollment, err = restoreHistoricalEnrollment(ctx, state, record)
+			if err != nil {
+				return toolchain.Decision{}, err
+			}
+		}
+	}
+	if enrollment == nil {
+		var err error
+		enrollment, err = state.deps.APIClient.EnrollTesteeInPlan(ctx, EnrollTesteeRequest{
+			PlanID:    state.planID,
+			TesteeID:  state.testee.ID,
+			StartDate: state.profile.RunDate.Format("2006-01-02"),
+		})
+		if err != nil {
+			return toolchain.Decision{}, err
+		}
 	}
 	state.outcome.PlanEnrolled = true
 	if enrollment != nil {
@@ -493,7 +541,22 @@ func dailySimulationStageEnrollPlan(ctx context.Context, state *dailySimulationJ
 				Timeline:   timeline,
 			}
 			taskCtx := historicalseed.WithContext(ctx, child)
-			if _, err := state.deps.APIClient.OpenPlanTask(taskCtx, taskID); err != nil {
+			recovery := HistoricalPlanTaskRecovery{
+				ScenarioID: child.ScenarioID,
+				TaskID:     taskID,
+				PlannedAt:  plannedAt.Format(time.RFC3339Nano),
+				TargetKey:  strings.Join([]string{state.target.TargetType, state.target.TargetCode}, "/"),
+			}
+			if err := recordHistoricalPlanTaskDiscovery(ctx, historical, recovery); err != nil {
+				return toolchain.Decision{}, fmt.Errorf("persist historical plan task %s discovery: %w", taskID, err)
+			}
+			if record, completed, err := completedHistoricalServerStage(taskCtx, child.ScenarioID, "task_open"); err != nil {
+				return toolchain.Decision{}, err
+			} else if completed {
+				if record.ResourceID != taskID {
+					return toolchain.Decision{}, fmt.Errorf("historical task_open resource %s conflicts with task %s", record.ResourceID, taskID)
+				}
+			} else if _, err := state.deps.APIClient.OpenPlanTask(taskCtx, taskID); err != nil {
 				return toolchain.Decision{}, fmt.Errorf("open historical plan task %s: %w", taskID, err)
 			}
 			state.selectedTasks = append(state.selectedTasks, historicalSelectedTask{ID: taskID, Context: child, PlannedAt: plannedAt})
@@ -507,6 +570,101 @@ func dailySimulationStageEnrollPlan(ctx context.Context, state *dailySimulationJ
 		return toolchain.Decision{}, err
 	}
 	return toolchain.Next(), nil
+}
+
+func restoreHistoricalEnrollment(ctx context.Context, state *dailySimulationJourneyState, record HistoricalStageRecord) (*EnrollmentResponse, error) {
+	var payload struct {
+		EnrollmentID string   `json:"enrollment_id"`
+		PlanID       string   `json:"plan_id"`
+		TaskIDs      []string `json:"task_ids"`
+	}
+	if len(record.PayloadJSON) == 0 {
+		return nil, fmt.Errorf("historical plan_enrollment stage %d has no payload", record.ID)
+	}
+	if err := json.Unmarshal(record.PayloadJSON, &payload); err != nil {
+		return nil, fmt.Errorf("decode historical plan_enrollment payload: %w", err)
+	}
+	payload.EnrollmentID = strings.TrimSpace(payload.EnrollmentID)
+	payload.PlanID = strings.TrimSpace(payload.PlanID)
+	if payload.EnrollmentID == "" || payload.EnrollmentID != strings.TrimSpace(record.ResourceID) {
+		return nil, fmt.Errorf("historical plan_enrollment resource %s conflicts with payload enrollment %s", record.ResourceID, payload.EnrollmentID)
+	}
+	if payload.PlanID != strings.TrimSpace(state.planID) {
+		return nil, fmt.Errorf("historical plan_enrollment plan %s conflicts with scenario plan %s", payload.PlanID, state.planID)
+	}
+	wanted := make(map[string]struct{}, len(payload.TaskIDs))
+	for _, rawID := range payload.TaskIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			return nil, fmt.Errorf("historical plan_enrollment %s contains empty task id", payload.EnrollmentID)
+		}
+		if _, exists := wanted[id]; exists {
+			return nil, fmt.Errorf("historical plan_enrollment %s contains duplicate task %s", payload.EnrollmentID, id)
+		}
+		wanted[id] = struct{}{}
+	}
+	tasks, err := loadHistoricalEnrollmentTasks(ctx, state, wanted)
+	if err != nil {
+		return nil, err
+	}
+	return &EnrollmentResponse{PlanID: payload.PlanID, EnrollmentID: payload.EnrollmentID, Idempotent: true, Tasks: tasks}, nil
+}
+
+func loadHistoricalEnrollmentTasks(ctx context.Context, state *dailySimulationJourneyState, wanted map[string]struct{}) ([]TaskResponse, error) {
+	if len(wanted) == 0 {
+		return nil, nil
+	}
+	location := state.profile.RunDate.Location()
+	before := state.profile.RunDate.AddDate(5, 0, 0)
+	if cutoff, ok := historicalCutoffFromContext(ctx); ok {
+		before = cutoff.Add(-time.Second)
+	}
+	tasks := make([]TaskResponse, 0, len(wanted))
+	seen := make(map[string]struct{}, len(wanted))
+	for page := 1; ; page++ {
+		response, err := state.deps.APIClient.ListPlanTaskWindow(ctx, ListPlanTaskWindowRequest{
+			PlanID:        state.planID,
+			TesteeIDs:     []string{state.testee.ID},
+			PlannedAfter:  state.profile.RunDate.In(location).Format("2006-01-02 00:00:00"),
+			PlannedBefore: before.In(location).Format("2006-01-02 15:04:05"),
+			Page:          page,
+			PageSize:      100,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("load historical enrollment tasks: %w", err)
+		}
+		if response == nil {
+			return nil, fmt.Errorf("load historical enrollment tasks returned nil page %d", page)
+		}
+		for _, task := range response.Tasks {
+			id := strings.TrimSpace(task.ID)
+			if _, ok := wanted[id]; !ok {
+				continue
+			}
+			if _, duplicate := seen[id]; duplicate {
+				return nil, fmt.Errorf("historical enrollment task %s appears more than once", id)
+			}
+			seen[id] = struct{}{}
+			tasks = append(tasks, task)
+		}
+		if !response.HasMore {
+			break
+		}
+		if page >= 10000 {
+			return nil, fmt.Errorf("historical enrollment task pagination exceeded safety limit")
+		}
+	}
+	if len(seen) != len(wanted) {
+		missing := make([]string, 0, len(wanted)-len(seen))
+		for id := range wanted {
+			if _, ok := seen[id]; !ok {
+				missing = append(missing, id)
+			}
+		}
+		sort.Strings(missing)
+		return nil, fmt.Errorf("historical enrollment tasks missing from server read model: %s", strings.Join(missing, ","))
+	}
+	return tasks, nil
 }
 
 func parseHistoricalTaskPlannedAt(raw string, location *time.Location) (time.Time, error) {
@@ -535,6 +693,20 @@ func dailySimulationStageResolveEntry(ctx context.Context, state *dailySimulatio
 	if state.entry == nil || strings.TrimSpace(state.entry.ID) == "" || strings.TrimSpace(state.entry.Token) == "" {
 		return toolchain.Decision{}, fmt.Errorf("assessment entry is not initialized")
 	}
+	if historical, ok := historicalseed.FromContext(ctx); ok {
+		if record, completed, err := completedHistoricalServerStage(ctx, historical.ScenarioID, string(dailySimulationJourneyStageEntryResolve)); err != nil {
+			return toolchain.Decision{}, err
+		} else if completed {
+			if record.ResourceID != strings.TrimSpace(state.entry.ID) {
+				return toolchain.Decision{}, fmt.Errorf("historical entry_resolve resource %s conflicts with entry %s", record.ResourceID, state.entry.ID)
+			}
+			state.outcome.EntryResolved = true
+			if err := state.recordHistoricalLocalStage(ctx, dailySimulationJourneyStageEntryResolve); err != nil {
+				return toolchain.Decision{}, err
+			}
+			return state.nextDecision(dailySimulationJourneyStageEntryResolve), nil
+		}
+	}
 	// 每次访问都走公开 resolve，确保 entry_opened 行为事件落到对应 clinician。
 	if _, err := state.deps.APIClient.ResolveAssessmentEntry(ctx, state.entry.Token); err != nil {
 		return toolchain.Decision{}, err
@@ -549,6 +721,20 @@ func dailySimulationStageResolveEntry(ctx context.Context, state *dailySimulatio
 func dailySimulationStageIntakeEntry(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
 	if state.entry == nil || strings.TrimSpace(state.entry.ID) == "" || strings.TrimSpace(state.entry.Token) == "" {
 		return toolchain.Decision{}, fmt.Errorf("assessment entry is not initialized")
+	}
+	if historical, ok := historicalseed.FromContext(ctx); ok {
+		if record, completed, err := completedHistoricalServerStage(ctx, historical.ScenarioID, string(dailySimulationJourneyStageEntryIntake)); err != nil {
+			return toolchain.Decision{}, err
+		} else if completed {
+			if state.testee == nil || record.ResourceID != strings.TrimSpace(state.testee.ID) {
+				return toolchain.Decision{}, fmt.Errorf("historical entry_intake resource %s conflicts with restored testee", record.ResourceID)
+			}
+			state.outcome.EntryIntaked = true
+			if err := state.recordHistoricalLocalStage(ctx, dailySimulationJourneyStageEntryIntake); err != nil {
+				return toolchain.Decision{}, err
+			}
+			return state.nextDecision(dailySimulationJourneyStageEntryIntake), nil
+		}
 	}
 	hasEntryRelation := false
 	if state.testee != nil && strings.TrimSpace(state.testee.ID) != "" {
@@ -610,25 +796,31 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 	}
 
 	submit := func(submitCtx context.Context, taskID string) error {
-		rng := newDailySimulationRand(
-			"answers:" + state.profile.RunDate.Format("20060102") + ":" + strconv.Itoa(state.profile.Index) + ":" + state.target.QuestionnaireCode + ":" + taskID,
-		)
-		answers := buildAnswers(questionnaireDetail, rng)
-		if invalidAnswers := validateAnswers(questionnaireDetail, answers); len(invalidAnswers) > 0 {
-			return fmt.Errorf("generated invalid answers for questionnaire %s: %v", state.target.QuestionnaireCode, invalidAnswers)
-		}
-		req := SubmitAnswerSheetRequest{
-			QuestionnaireCode: state.target.QuestionnaireCode, QuestionnaireVersion: state.target.QuestionnaireVersion,
-			Title: state.target.QuestionnaireTitle, TesteeID: testeeID,
-			OriginRef: &OriginRef{Type: "assessment_entry", ID: strings.TrimSpace(state.entry.ID)}, Answers: answers,
-		}
-		if taskID != "" {
-			req.TaskID = taskID
-			req.OriginRef = &OriginRef{Type: "plan_task", ID: taskID}
-		}
-		submission, err := submitDailySimulationAnswerSheet(submitCtx, state, req)
+		submission, restored, err := restoreDailySimulationHistoricalSubmission(submitCtx, state, taskID)
 		if err != nil {
 			return err
+		}
+		if !restored {
+			rng := newDailySimulationRand(
+				"answers:" + state.profile.RunDate.Format("20060102") + ":" + strconv.Itoa(state.profile.Index) + ":" + state.target.QuestionnaireCode + ":" + taskID,
+			)
+			answers := buildAnswers(questionnaireDetail, rng)
+			if invalidAnswers := validateAnswers(questionnaireDetail, answers); len(invalidAnswers) > 0 {
+				return fmt.Errorf("generated invalid answers for questionnaire %s: %v", state.target.QuestionnaireCode, invalidAnswers)
+			}
+			req := SubmitAnswerSheetRequest{
+				QuestionnaireCode: state.target.QuestionnaireCode, QuestionnaireVersion: state.target.QuestionnaireVersion,
+				Title: state.target.QuestionnaireTitle, TesteeID: testeeID,
+				OriginRef: &OriginRef{Type: "assessment_entry", ID: strings.TrimSpace(state.entry.ID)}, Answers: answers,
+			}
+			if taskID != "" {
+				req.TaskID = taskID
+				req.OriginRef = &OriginRef{Type: "plan_task", ID: taskID}
+			}
+			submission, err = submitDailySimulationAnswerSheet(submitCtx, state, req)
+			if err != nil {
+				return err
+			}
 		}
 		state.outcome.AnswerSheetID = submission.AnswerSheetID
 		state.outcome.AssessmentID = submission.AssessmentID
@@ -676,6 +868,32 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 		}
 	}
 	return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
+}
+
+func restoreDailySimulationHistoricalSubmission(
+	ctx context.Context,
+	state *dailySimulationJourneyState,
+	taskID string,
+) (dailySimulationSubmissionResult, bool, error) {
+	historical, ok := historicalseed.FromContext(ctx)
+	if !ok {
+		return dailySimulationSubmissionResult{}, false, nil
+	}
+	snapshot, ok := historicalScenarioSnapshot(ctx, historical.ScenarioID)
+	if !ok {
+		return dailySimulationSubmissionResult{}, false, nil
+	}
+	if _, completed := snapshot.Server[string(dailySimulationJourneyStageAnswerSheet)]; !completed {
+		return dailySimulationSubmissionResult{}, false, nil
+	}
+	result, err := verifyHistoricalSubmissionStageMap(historical, taskID, state.target.RequiresAssessment, dailySimulationSubmissionResult{}, snapshot.Server)
+	if err != nil {
+		if errors.Is(err, errHistoricalSubmissionPending) {
+			return dailySimulationSubmissionResult{}, false, nil
+		}
+		return result, false, err
+	}
+	return result, true, nil
 }
 
 func buildDailySimulationAssessmentEntryIntakeRequest(state *dailySimulationJourneyState) (IntakeAssessmentEntryRequest, error) {
@@ -1278,6 +1496,34 @@ func ensureDailySimulationGuardianAccount(
 	}
 
 	return "", "", false, fmt.Errorf("login existing guardian %s: %w; IAM v2 password onboarding is only available through iam.mockConsumer REST ensure", profile.GuardianEmail, err)
+}
+
+func restoreDailySimulationGuardianSession(
+	ctx context.Context,
+	deps *dependencies,
+	cfg DailySimulationConfig,
+	profile dailySimulationProfile,
+) (string, error) {
+	if deps == nil || deps.Config == nil {
+		return "", fmt.Errorf("daily simulation dependencies are required")
+	}
+	loginURL, err := resolveDailySimulationIAMLoginURL(deps.Config.IAM)
+	if err != nil {
+		return "", err
+	}
+	tenantID := resolveDailySimulationTenantID(deps.Config.IAM, deps.Config.Global.OrgID)
+	if dailySimulationUsesIAMMockConsumer(deps.Config.IAM) {
+		tenantID = ""
+	}
+	deviceID := fmt.Sprintf("%s-%s-%03d", dailySimulationDeviceIDPrefix, profile.RunDate.Format("20060102"), profile.Index+1)
+	token, err := tryDailySimulationGuardianLoginWithRetry(
+		ctx, loginURL, tenantID, deviceID, profile.GuardianEmail, profile.GuardianPhone,
+		normalizeDailySimulationPassword(cfg.UserPassword), deps.Logger,
+	)
+	if err != nil {
+		return "", fmt.Errorf("restore historical guardian session %s: %w", profile.GuardianEmail, err)
+	}
+	return token, nil
 }
 
 func ensureDailySimulationGuardianMockConsumer(

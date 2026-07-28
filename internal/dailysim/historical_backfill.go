@@ -22,6 +22,8 @@ const historicalTimezone = "Asia/Shanghai"
 
 type historicalCutoffKey struct{}
 type historicalFrozenTargetVersionsKey struct{}
+type historicalDaySnapshotKey struct{}
+type historicalPlanTaskDiscoveryRecorderKey struct{}
 
 func withHistoricalCutoff(ctx context.Context, cutoff time.Time) context.Context {
 	return context.WithValue(ctx, historicalCutoffKey{}, cutoff)
@@ -47,6 +49,52 @@ func historicalFrozenTargetVersion(ctx context.Context, code string) (string, bo
 	}
 	version, exists := versions[strings.TrimSpace(code)]
 	return strings.TrimSpace(version), exists
+}
+
+type HistoricalPlanTaskRecovery struct {
+	ScenarioID string `json:"scenario_id"`
+	TaskID     string `json:"task_id"`
+	PlannedAt  string `json:"planned_at"`
+	TargetKey  string `json:"target_key"`
+}
+
+type HistoricalScenarioSnapshot struct {
+	Scenario HistoricalScenarioManifest
+	Local    map[string]HistoricalLocalStageRecord
+	Server   map[string]HistoricalStageRecord
+}
+
+type HistoricalDaySnapshot struct {
+	BusinessDate string
+	Expected     map[string]HistoricalScenarioManifest
+	Scenarios    map[string]HistoricalScenarioSnapshot
+}
+
+func withHistoricalDaySnapshot(ctx context.Context, snapshot *HistoricalDaySnapshot) context.Context {
+	return context.WithValue(ctx, historicalDaySnapshotKey{}, snapshot)
+}
+
+func historicalScenarioSnapshot(ctx context.Context, scenarioID string) (HistoricalScenarioSnapshot, bool) {
+	snapshot, _ := ctx.Value(historicalDaySnapshotKey{}).(*HistoricalDaySnapshot)
+	if snapshot == nil {
+		return HistoricalScenarioSnapshot{}, false
+	}
+	value, ok := snapshot.Scenarios[strings.TrimSpace(scenarioID)]
+	return value, ok
+}
+
+type historicalPlanTaskDiscoveryRecorder func(historicalseed.Context, HistoricalPlanTaskRecovery) error
+
+func withHistoricalPlanTaskDiscoveryRecorder(ctx context.Context, recorder historicalPlanTaskDiscoveryRecorder) context.Context {
+	return context.WithValue(ctx, historicalPlanTaskDiscoveryRecorderKey{}, recorder)
+}
+
+func recordHistoricalPlanTaskDiscovery(ctx context.Context, historical historicalseed.Context, recovery HistoricalPlanTaskRecovery) error {
+	recorder, _ := ctx.Value(historicalPlanTaskDiscoveryRecorderKey{}).(historicalPlanTaskDiscoveryRecorder)
+	if recorder == nil {
+		return nil
+	}
+	return recorder(historical, recovery)
 }
 
 type HistoricalBackfillOptions struct {
@@ -121,6 +169,7 @@ type HistoricalScenarioManifest struct {
 	CompletedTaskIDs    []string                               `json:"completed_task_ids,omitempty"`
 	ChildScenarioIDs    []string                               `json:"child_scenario_ids,omitempty"`
 	AdditionalScenarios []HistoricalAdditionalScenarioManifest `json:"additional_scenarios,omitempty"`
+	PlanTaskRecoveries  []HistoricalPlanTaskRecovery           `json:"plan_task_recoveries,omitempty"`
 	AnswerSheetID       string                                 `json:"answersheet_id,omitempty"`
 	AnswerSheetIDs      []string                               `json:"answersheet_ids,omitempty"`
 	AssessmentID        string                                 `json:"assessment_id,omitempty"`
@@ -279,6 +328,15 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 			return err
 		}
 		count := DeterministicHistoricalCount(opts.BatchID, day, opts.CountMin, opts.CountMax)
+		daySnapshot, snapshotErr := buildHistoricalDaySnapshot(dayCtx, deps, cfg, &manifest, day, count, opts.StateDir)
+		if snapshotErr != nil {
+			return fmt.Errorf("historical snapshot stopped on %s: %w", dayKey, snapshotErr)
+		}
+		manifest.UpdatedAt = time.Now().UTC()
+		if err := saveSecureJSON(manifestPath, &manifest); err != nil {
+			return err
+		}
+		dayCtx = withHistoricalDaySnapshot(dayCtx, daySnapshot)
 		cfg.Workers = opts.Workers
 		err := runDailySimulationBatchWithOptions(dayCtx, deps, cfg, day, count, "historical_backfill_"+dayKey, dailySimulationBatchOptions{
 			HistoricalBatchID: opts.BatchID,
@@ -324,6 +382,28 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 					return err
 				}
 				return nil
+			},
+			OnHistoricalPlanTaskFound: func(_ dailySimulationProfile, _ dailySimulationScenario, historical historicalseed.Context, recovery HistoricalPlanTaskRecovery) error {
+				manifestMu.Lock()
+				defer manifestMu.Unlock()
+				parent := manifest.Scenarios[historical.ScenarioID]
+				if strings.TrimSpace(parent.ScenarioID) == "" {
+					return fmt.Errorf("historical parent scenario %s is not materialized before task discovery", historical.ScenarioID)
+				}
+				for _, existing := range parent.PlanTaskRecoveries {
+					if existing.TaskID == recovery.TaskID {
+						if existing != recovery {
+							return fmt.Errorf("historical plan task recovery conflict for %s", recovery.TaskID)
+						}
+						return nil
+					}
+				}
+				parent.PlanTaskRecoveries = append(parent.PlanTaskRecoveries, recovery)
+				parent.ChildScenarioIDs = appendUniqueString(parent.ChildScenarioIDs, recovery.ScenarioID)
+				parent.TaskIDs = appendUniqueString(parent.TaskIDs, recovery.TaskID)
+				manifest.Scenarios[historical.ScenarioID] = parent
+				manifest.UpdatedAt = time.Now().UTC()
+				return saveSecureJSON(manifestPath, &manifest)
 			},
 		})
 		var dayVerifyErr error
@@ -585,56 +665,16 @@ func VerifyHistoricalBackfillWithServer(ctx context.Context, deps *Dependencies,
 	if err != nil {
 		return HistoricalVerification{}, fmt.Errorf("load server historical stages: %w", err)
 	}
-	localStages, err := loadAllHistoricalLocalStages(stateDir, batchID)
-	if err != nil {
-		return HistoricalVerification{}, fmt.Errorf("load local historical stages: %w", err)
-	}
-	byScenario := make(map[string]map[string]struct{})
-	for _, record := range allStages {
-		if byScenario[record.ScenarioID] == nil {
-			byScenario[record.ScenarioID] = make(map[string]struct{})
-		}
-		byScenario[record.ScenarioID][record.Stage] = struct{}{}
-	}
 	missing := make([]string, 0)
-	for scenarioID, scenario := range manifest.Scenarios {
-		for _, stage := range expectedLocalStages(manifest, scenario) {
-			if _, ok := localStages[scenarioID+"\x00"+stage]; !ok {
-				missing = append(missing, "local:"+scenarioID+":"+stage)
-			}
-		}
-		expected := expectedServerStages(manifest, scenario)
-		for _, stage := range expected {
-			if _, ok := byScenario[scenarioID][stage]; !ok {
-				missing = append(missing, scenarioID+":"+stage)
-			}
-		}
-		for _, childScenarioID := range scenario.ChildScenarioIDs {
-			for _, stage := range expectedChildLocalStages(manifest, scenario.TargetKey) {
-				if _, ok := localStages[childScenarioID+"\x00"+stage]; !ok {
-					missing = append(missing, "local:"+childScenarioID+":"+stage)
-				}
-			}
-			for _, stage := range expectedChildServerStages(manifest, scenario) {
-				if _, ok := byScenario[childScenarioID][stage]; !ok {
-					missing = append(missing, childScenarioID+":"+stage)
-				}
-			}
-		}
-		for _, additional := range scenario.AdditionalScenarios {
-			for _, stage := range expectedChildLocalStages(manifest, additional.TargetKey) {
-				if stage == "task_open" || stage == "task_complete" {
-					continue
-				}
-				if _, ok := localStages[additional.ScenarioID+"\x00"+stage]; !ok {
-					missing = append(missing, "local:"+additional.ScenarioID+":"+stage)
-				}
-			}
-			for _, stage := range expectedAdditionalServerStages(manifest, additional) {
-				if _, ok := byScenario[additional.ScenarioID][stage]; !ok {
-					missing = append(missing, additional.ScenarioID+":"+stage)
-				}
-			}
+	location, _ := time.LoadLocation(historicalTimezone)
+	from, to, rangeErr := parseHistoricalDateRange(manifest.From, manifest.To, location)
+	if rangeErr != nil {
+		return HistoricalVerification{}, rangeErr
+	}
+	for day := from; !day.After(to); day = day.AddDate(0, 0, 1) {
+		expectedCount := manifest.DailyCounts[day.Format("2006-01-02")]
+		if err := verifyHistoricalDay(stateDir, &manifest, day, expectedCount, allStages); err != nil {
+			missing = append(missing, day.Format("2006-01-02")+":"+err.Error())
 		}
 	}
 	verification.ServerStageCount = len(allStages)
@@ -659,6 +699,332 @@ func loadHistoricalSeedStages(ctx context.Context, client *APIClient, batchID st
 			return allStages, nil
 		}
 	}
+}
+
+func buildHistoricalDaySnapshot(
+	ctx context.Context,
+	deps *Dependencies,
+	cfg DailySimulationConfig,
+	manifest *HistoricalManifest,
+	day time.Time,
+	expectedCount int,
+	stateDir string,
+) (*HistoricalDaySnapshot, error) {
+	if deps == nil || deps.APIClient == nil || manifest == nil {
+		return nil, fmt.Errorf("historical day snapshot dependencies are required")
+	}
+	scenarios, err := resolveDailySimulationScenariosForRun(ctx, deps, cfg, day)
+	if err != nil {
+		return nil, err
+	}
+	if len(scenarios) == 0 {
+		return nil, fmt.Errorf("historical day snapshot resolved zero scenarios")
+	}
+	additionalTargets, err := resolveDailySimulationAdditionalTargetsForRun(ctx, deps, cfg)
+	if err != nil {
+		return nil, err
+	}
+	snapshot := &HistoricalDaySnapshot{
+		BusinessDate: day.Format("2006-01-02"), Expected: make(map[string]HistoricalScenarioManifest, expectedCount),
+		Scenarios: make(map[string]HistoricalScenarioSnapshot),
+	}
+	for index := 0; index < expectedCount; index++ {
+		profile := namespaceHistoricalProfile(manifest.BatchID, buildDailySimulationProfile(cfg, day, index))
+		scenario := scenarios[index%len(scenarios)]
+		historical := buildHistoricalScenarioContext(manifest.BatchID, uint64(manifest.OrgID), cfg, profile, scenario)
+		journey := resolveDailySimulationJourneyTarget(cfg, day, index)
+		targetKey := strings.Join([]string{scenario.Target.TargetType, scenario.Target.TargetCode}, "/")
+		planID := selectDailySimulationPlanID(cfg, day, index)
+		record := manifest.Scenarios[historical.ScenarioID]
+		if strings.TrimSpace(record.ScenarioID) == "" {
+			record = HistoricalScenarioManifest{
+				ScenarioID: historical.ScenarioID, BusinessDate: snapshot.BusinessDate, Journey: string(journey), TargetKey: targetKey,
+				EntryID: scenario.Entry.ID, PlanID: planID,
+			}
+		}
+		if record.PlanID == "" {
+			record.PlanID = planID
+		}
+		if record.BusinessDate != snapshot.BusinessDate || record.Journey != string(journey) || record.TargetKey != targetKey || record.EntryID != scenario.Entry.ID || record.PlanID != planID {
+			return nil, fmt.Errorf("historical parent scenario identity conflict for %s", historical.ScenarioID)
+		}
+		if journey == dailySimulationJourneySubmitAnswer {
+			for _, target := range selectDailySimulationAdditionalTargetsForTestee(additionalTargets, cfg, day, index) {
+				additionalID := fmt.Sprintf("%s/%d/%s/%s", snapshot.BusinessDate, index, dailySimulationJourneySubmitAnswer, target.TargetCode)
+				targetKey := strings.Join([]string{target.TargetType, target.TargetCode}, "/")
+				for _, existing := range record.AdditionalScenarios {
+					if existing.ScenarioID == additionalID && existing.TargetKey != targetKey {
+						return nil, fmt.Errorf("historical additional scenario identity conflict for %s", additionalID)
+					}
+				}
+				record.AdditionalScenarios = appendHistoricalAdditionalScenario(record.AdditionalScenarios, HistoricalAdditionalScenarioManifest{
+					ScenarioID: additionalID, TargetKey: targetKey,
+				})
+			}
+		}
+		manifest.Scenarios[historical.ScenarioID] = record
+		snapshot.Expected[historical.ScenarioID] = record
+	}
+
+	scenarioIDs := make(map[string]struct{})
+	for scenarioID, scenario := range snapshot.Expected {
+		scenarioIDs[scenarioID] = struct{}{}
+		for _, childID := range scenario.ChildScenarioIDs {
+			scenarioIDs[childID] = struct{}{}
+		}
+		for _, recovery := range scenario.PlanTaskRecoveries {
+			scenarioIDs[recovery.ScenarioID] = struct{}{}
+		}
+		for _, additional := range scenario.AdditionalScenarios {
+			scenarioIDs[additional.ScenarioID] = struct{}{}
+		}
+	}
+	ordered := make([]string, 0, len(scenarioIDs))
+	for scenarioID := range scenarioIDs {
+		ordered = append(ordered, scenarioID)
+	}
+	sort.Strings(ordered)
+	for _, scenarioID := range ordered {
+		local, err := loadHistoricalLocalScenarioStages(stateDir, manifest.BatchID, day, scenarioID)
+		if err != nil {
+			return nil, err
+		}
+		for stage, record := range local {
+			if record.ScenarioID != scenarioID || record.Stage != stage || record.Status != "completed" || strings.TrimSpace(record.PayloadHash) == "" {
+				return nil, fmt.Errorf("historical snapshot scenario %s has invalid local stage %s", scenarioID, stage)
+			}
+		}
+		response, err := deps.APIClient.ListHistoricalScenarioStages(ctx, manifest.BatchID, scenarioID)
+		if err != nil {
+			return nil, fmt.Errorf("load historical snapshot scenario %s: %w", scenarioID, err)
+		}
+		server := make(map[string]HistoricalStageRecord, len(response.Stages))
+		for _, record := range response.Stages {
+			stage := strings.TrimSpace(record.Stage)
+			if stage == "" {
+				return nil, fmt.Errorf("historical snapshot scenario %s has empty server stage", scenarioID)
+			}
+			if _, exists := server[stage]; exists {
+				return nil, fmt.Errorf("historical snapshot scenario %s has duplicate server stage %s", scenarioID, stage)
+			}
+			if record.ScenarioID != scenarioID || record.BatchID != manifest.BatchID || !strings.EqualFold(strings.TrimSpace(record.Status), "completed") || strings.TrimSpace(record.ResourceID) == "" || strings.TrimSpace(record.PayloadHash) == "" || record.BusinessAt.IsZero() {
+				return nil, fmt.Errorf("historical snapshot scenario %s has invalid completed server stage %s", scenarioID, stage)
+			}
+			server[stage] = record
+		}
+		scenario := manifest.Scenarios[scenarioID]
+		parent := scenario
+		if strings.TrimSpace(scenario.ScenarioID) == "" {
+			for _, candidate := range snapshot.Expected {
+				if historicalScenarioContains(candidate, scenarioID) {
+					parent = candidate
+					scenario = candidate
+					scenario.ScenarioID = scenarioID
+					scenario.BusinessDate = scenarioDateFromID(scenarioID)
+					break
+				}
+			}
+		}
+		if err := validateHistoricalScenarioStageSet(manifest, parent, scenarioID, server); err != nil {
+			return nil, err
+		}
+		snapshot.Scenarios[scenarioID] = HistoricalScenarioSnapshot{Scenario: scenario, Local: local, Server: server}
+	}
+	allStages := make([]HistoricalStageRecord, 0)
+	for _, scenario := range snapshot.Scenarios {
+		for _, record := range scenario.Server {
+			allStages = append(allStages, record)
+		}
+	}
+	mergeHistoricalStageResources(manifest, allStages)
+	return snapshot, nil
+}
+
+func validateHistoricalScenarioStageSet(
+	manifest *HistoricalManifest,
+	parent HistoricalScenarioManifest,
+	scenarioID string,
+	records map[string]HistoricalStageRecord,
+) error {
+	if manifest == nil {
+		return fmt.Errorf("historical manifest is required")
+	}
+	location, err := time.LoadLocation(historicalTimezone)
+	if err != nil {
+		return err
+	}
+	businessDay, err := time.ParseInLocation("2006-01-02", scenarioDateFromID(scenarioID), location)
+	if err != nil {
+		return fmt.Errorf("historical scenario %s has invalid business date: %w", scenarioID, err)
+	}
+	dayEnd := businessDay.AddDate(0, 0, 1)
+	expectedResourceTypes := map[string]string{
+		"entry_resolve":        "assessment_entry",
+		"entry_intake":         "testee",
+		"plan_enrollment":      "plan_enrollment",
+		"task_open":            "plan_task",
+		"task_complete":        "plan_task",
+		"answersheet_submit":   "answer_sheet",
+		"assessment_created":   "assessment",
+		"assessment_submitted": "assessment",
+		"outcome_committed":    "evaluation_outcome",
+		"report_generated":     "interpretation_report",
+	}
+	expectedTaskID := ""
+	for _, recovery := range parent.PlanTaskRecoveries {
+		if recovery.ScenarioID == scenarioID {
+			expectedTaskID = strings.TrimSpace(recovery.TaskID)
+			break
+		}
+	}
+	if expectedTaskID == "" {
+		expectedTaskID = historicalTaskIDForScenario(parent, scenarioID)
+	}
+	for stage, record := range records {
+		resourceType, supported := expectedResourceTypes[stage]
+		if !supported {
+			return fmt.Errorf("historical scenario %s has unsupported server stage %s", scenarioID, stage)
+		}
+		if record.OrgID != uint64(manifest.OrgID) || record.ResourceType != resourceType {
+			return fmt.Errorf("historical scenario %s stage %s has org/resource type conflict", scenarioID, stage)
+		}
+		businessAt := record.BusinessAt.In(location)
+		if businessAt.Before(businessDay) || !businessAt.Before(dayEnd) {
+			return fmt.Errorf("historical scenario %s stage %s business_at %s is outside its business day", scenarioID, stage, record.BusinessAt.Format(time.RFC3339Nano))
+		}
+		if len(record.PayloadJSON) == 0 || !json.Valid(record.PayloadJSON) {
+			return fmt.Errorf("historical scenario %s stage %s has invalid payload", scenarioID, stage)
+		}
+		if err := validateHistoricalStagePayload(parent, scenarioID, expectedTaskID, stage, record, records); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateHistoricalStagePayload(
+	parent HistoricalScenarioManifest,
+	scenarioID, expectedTaskID, stage string,
+	record HistoricalStageRecord,
+	records map[string]HistoricalStageRecord,
+) error {
+	payload := make(map[string]any)
+	decoder := json.NewDecoder(strings.NewReader(string(record.PayloadJSON)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
+		return fmt.Errorf("decode historical scenario %s stage %s payload: %w", scenarioID, stage, err)
+	}
+	requireValue := func(key, expected string) error {
+		value := strings.TrimSpace(fmt.Sprint(payload[key]))
+		if expected == "" {
+			if value != "" && value != "<nil>" {
+				return fmt.Errorf("historical scenario %s stage %s payload %s=%s must be empty", scenarioID, stage, key, value)
+			}
+			return nil
+		}
+		if value != expected {
+			return fmt.Errorf("historical scenario %s stage %s payload %s=%s want=%s", scenarioID, stage, key, value, expected)
+		}
+		return nil
+	}
+	switch stage {
+	case "entry_resolve":
+		return requireValue("entry_id", record.ResourceID)
+	case "entry_intake":
+		if err := requireValue("testee_id", record.ResourceID); err != nil {
+			return err
+		}
+		return requireValue("entry_id", parent.EntryID)
+	case "plan_enrollment":
+		if err := requireValue("enrollment_id", record.ResourceID); err != nil {
+			return err
+		}
+		return requireValue("plan_id", parent.PlanID)
+	case "task_open", "task_complete":
+		if expectedTaskID == "" {
+			return fmt.Errorf("historical scenario %s stage %s has no discovered plan task", scenarioID, stage)
+		}
+		return requireValue("task_id", expectedTaskID)
+	case "answersheet_submit":
+		if value := payload["answersheet_id"]; fmt.Sprint(value) != record.ResourceID {
+			return fmt.Errorf("historical scenario %s answersheet payload conflicts with resource %s", scenarioID, record.ResourceID)
+		}
+		return requireValue("task_id", expectedTaskID)
+	case "assessment_created":
+		if answer, ok := records["answersheet_submit"]; ok {
+			return requireValue("answersheet_id", answer.ResourceID)
+		}
+	case "assessment_submitted":
+		return requireValue("assessment_id", record.ResourceID)
+	case "outcome_committed":
+		if err := requireValue("outcome_id", record.ResourceID); err != nil {
+			return err
+		}
+		if assessment, ok := records["assessment_created"]; ok {
+			return requireValue("assessment_id", assessment.ResourceID)
+		}
+	case "report_generated":
+		if err := requireValue("report_id", record.ResourceID); err != nil {
+			return err
+		}
+		for _, key := range []string{"generation_id", "run_id"} {
+			if value := strings.TrimSpace(fmt.Sprint(payload[key])); value == "" || value == "<nil>" {
+				return fmt.Errorf("historical scenario %s report payload has empty %s", scenarioID, key)
+			}
+		}
+	}
+	return nil
+}
+
+func appendHistoricalAdditionalScenario(values []HistoricalAdditionalScenarioManifest, candidate HistoricalAdditionalScenarioManifest) []HistoricalAdditionalScenarioManifest {
+	for _, existing := range values {
+		if existing.ScenarioID == candidate.ScenarioID {
+			if existing.TargetKey != candidate.TargetKey {
+				return values
+			}
+			return values
+		}
+	}
+	return append(values, candidate)
+}
+
+func historicalScenarioContains(parent HistoricalScenarioManifest, scenarioID string) bool {
+	for _, child := range parent.ChildScenarioIDs {
+		if child == scenarioID {
+			return true
+		}
+	}
+	for _, recovery := range parent.PlanTaskRecoveries {
+		if recovery.ScenarioID == scenarioID {
+			return true
+		}
+	}
+	for _, additional := range parent.AdditionalScenarios {
+		if additional.ScenarioID == scenarioID {
+			return true
+		}
+	}
+	return false
+}
+
+func scenarioDateFromID(scenarioID string) string {
+	date, _, _ := strings.Cut(strings.TrimSpace(scenarioID), "/")
+	return date
+}
+
+func completedHistoricalServerStage(ctx context.Context, scenarioID, stage string) (HistoricalStageRecord, bool, error) {
+	snapshot, ok := historicalScenarioSnapshot(ctx, scenarioID)
+	if !ok {
+		return HistoricalStageRecord{}, false, nil
+	}
+	record, ok := snapshot.Server[strings.TrimSpace(stage)]
+	if !ok {
+		return HistoricalStageRecord{}, false, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(record.Status), "completed") || strings.TrimSpace(record.ResourceID) == "" || record.BusinessAt.IsZero() || strings.TrimSpace(record.PayloadHash) == "" {
+		return HistoricalStageRecord{}, false, fmt.Errorf("scenario %s server stage %s is not a valid completion fact", scenarioID, stage)
+	}
+	return record, true, nil
 }
 
 func loadHistoricalSeedStagesForDay(ctx context.Context, client *APIClient, manifest HistoricalManifest, day time.Time) ([]HistoricalStageRecord, error) {
@@ -1010,14 +1376,35 @@ func recordHistoricalScenario(manifest *HistoricalManifest, batchID string, prof
 	}
 	manifest.Scenarios[context.ScenarioID] = HistoricalScenarioManifest{
 		ScenarioID: context.ScenarioID, BusinessDate: profile.RunDate.Format("2006-01-02"), Journey: outcome.JourneyTarget, TargetKey: targetKey,
-		GuardianUserID: outcome.GuardianUserID, IAMProfileID: outcome.IAMProfileID, IAMProfileLinkID: outcome.IAMProfileLinkID, TesteeID: outcome.TesteeID,
+		GuardianUserID: firstHistoricalValue(outcome.GuardianUserID, existing.GuardianUserID), IAMProfileID: firstHistoricalValue(outcome.IAMProfileID, existing.IAMProfileID), IAMProfileLinkID: firstHistoricalValue(outcome.IAMProfileLinkID, existing.IAMProfileLinkID), TesteeID: firstHistoricalValue(outcome.TesteeID, existing.TesteeID),
 		TesteeCreated: outcome.TesteeCreated || existing.TesteeCreated,
-		EntryID:       scenario.Entry.ID, PlanID: outcome.PlanID, EnrollmentID: outcome.EnrollmentID, TaskIDs: append([]string(nil), outcome.TaskIDs...),
-		CompletedTaskIDs: append([]string(nil), outcome.CompletedTaskIDs...), ChildScenarioIDs: append([]string(nil), outcome.ChildScenarioIDs...),
-		AdditionalScenarios: append([]HistoricalAdditionalScenarioManifest(nil), outcome.AdditionalScenarios...),
-		AnswerSheetID:       outcome.AnswerSheetID, AnswerSheetIDs: append([]string(nil), outcome.AnswerSheetIDs...),
-		AssessmentID: outcome.AssessmentID, AssessmentIDs: append([]string(nil), outcome.AssessmentIDs...),
+		EntryID:       firstHistoricalValue(scenario.Entry.ID, existing.EntryID), PlanID: firstHistoricalValue(outcome.PlanID, existing.PlanID), EnrollmentID: firstHistoricalValue(outcome.EnrollmentID, existing.EnrollmentID), TaskIDs: appendUniqueStrings(append([]string(nil), existing.TaskIDs...), outcome.TaskIDs),
+		CompletedTaskIDs: appendUniqueStrings(append([]string(nil), existing.CompletedTaskIDs...), outcome.CompletedTaskIDs), ChildScenarioIDs: appendUniqueStrings(append([]string(nil), existing.ChildScenarioIDs...), outcome.ChildScenarioIDs),
+		AdditionalScenarios: appendHistoricalAdditionalScenarios(existing.AdditionalScenarios, outcome.AdditionalScenarios),
+		PlanTaskRecoveries:  append([]HistoricalPlanTaskRecovery(nil), existing.PlanTaskRecoveries...),
+		AnswerSheetID:       firstHistoricalValue(outcome.AnswerSheetID, existing.AnswerSheetID), AnswerSheetIDs: appendUniqueStrings(append([]string(nil), existing.AnswerSheetIDs...), outcome.AnswerSheetIDs),
+		AssessmentID: firstHistoricalValue(outcome.AssessmentID, existing.AssessmentID), AssessmentIDs: appendUniqueStrings(append([]string(nil), existing.AssessmentIDs...), outcome.AssessmentIDs),
+		OutcomeID: firstHistoricalValue(existing.OutcomeID, ""), OutcomeIDs: append([]string(nil), existing.OutcomeIDs...),
+		ReportID: firstHistoricalValue(existing.ReportID, ""), ReportIDs: append([]string(nil), existing.ReportIDs...),
+		GenerationID: existing.GenerationID, ReportRunID: existing.ReportRunID, Terminal: existing.Terminal,
 	}
+}
+
+func appendHistoricalAdditionalScenarios(values, candidates []HistoricalAdditionalScenarioManifest) []HistoricalAdditionalScenarioManifest {
+	result := append([]HistoricalAdditionalScenarioManifest(nil), values...)
+	for _, candidate := range candidates {
+		found := false
+		for _, existing := range result {
+			if existing.ScenarioID == candidate.ScenarioID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, candidate)
+		}
+	}
+	return result
 }
 
 func verifyHistoricalDay(stateDir string, manifest *HistoricalManifest, day time.Time, expectedCount int, stages []HistoricalStageRecord) error {
@@ -1047,17 +1434,40 @@ func verifyHistoricalDay(stateDir string, manifest *HistoricalManifest, day time
 	}
 	for _, scenarioID := range parentIDs {
 		scenario := manifest.Scenarios[scenarioID]
+		if err := validateHistoricalPlanRecoveries(scenario); err != nil {
+			return err
+		}
 		if err := requireHistoricalLocalStages(localStages, scenarioID, expectedLocalStages(*manifest, scenario)); err != nil {
 			return err
 		}
-		if err := requireHistoricalServerStages(serverByScenario, scenarioID, expectedServerStages(*manifest, scenario)); err != nil {
+		parentExpected := expectedServerStages(*manifest, scenario)
+		if err := requireHistoricalServerStages(serverByScenario, scenarioID, parentExpected); err != nil {
+			return err
+		}
+		if err := requireExactHistoricalServerStageSet(serverByScenario[scenarioID], scenarioID, parentExpected); err != nil {
+			return err
+		}
+		if err := validateHistoricalScenarioStageSet(manifest, scenario, scenarioID, serverByScenario[scenarioID]); err != nil {
+			return err
+		}
+		if err := validateHistoricalScenarioResources(scenario, scenarioID, localStages, serverByScenario[scenarioID], ""); err != nil {
 			return err
 		}
 		for _, childID := range scenario.ChildScenarioIDs {
 			if err := requireHistoricalLocalStages(localStages, childID, expectedChildLocalStages(*manifest, scenario.TargetKey)); err != nil {
 				return err
 			}
-			if err := requireHistoricalServerStages(serverByScenario, childID, expectedChildServerStages(*manifest, scenario)); err != nil {
+			childExpected := expectedChildServerStages(*manifest, scenario)
+			if err := requireHistoricalServerStages(serverByScenario, childID, childExpected); err != nil {
+				return err
+			}
+			if err := requireExactHistoricalServerStageSet(serverByScenario[childID], childID, childExpected); err != nil {
+				return err
+			}
+			if err := validateHistoricalScenarioStageSet(manifest, scenario, childID, serverByScenario[childID]); err != nil {
+				return err
+			}
+			if err := validateHistoricalScenarioResources(scenario, childID, localStages, serverByScenario[childID], historicalTaskIDForScenario(scenario, childID)); err != nil {
 				return err
 			}
 		}
@@ -1071,7 +1481,17 @@ func verifyHistoricalDay(stateDir string, manifest *HistoricalManifest, day time
 			if err := requireHistoricalLocalStages(localStages, additional.ScenarioID, localExpected); err != nil {
 				return err
 			}
-			if err := requireHistoricalServerStages(serverByScenario, additional.ScenarioID, expectedAdditionalServerStages(*manifest, additional)); err != nil {
+			additionalExpected := expectedAdditionalServerStages(*manifest, additional)
+			if err := requireHistoricalServerStages(serverByScenario, additional.ScenarioID, additionalExpected); err != nil {
+				return err
+			}
+			if err := requireExactHistoricalServerStageSet(serverByScenario[additional.ScenarioID], additional.ScenarioID, additionalExpected); err != nil {
+				return err
+			}
+			if err := validateHistoricalScenarioStageSet(manifest, scenario, additional.ScenarioID, serverByScenario[additional.ScenarioID]); err != nil {
+				return err
+			}
+			if err := validateHistoricalScenarioResources(scenario, additional.ScenarioID, localStages, serverByScenario[additional.ScenarioID], ""); err != nil {
 				return err
 			}
 		}
@@ -1080,6 +1500,156 @@ func verifyHistoricalDay(stateDir string, manifest *HistoricalManifest, day time
 	}
 	manifest.DailyCounts[dayKey] = expectedCount
 	return nil
+}
+
+func validateHistoricalPlanRecoveries(parent HistoricalScenarioManifest) error {
+	byTask := make(map[string]string, len(parent.PlanTaskRecoveries))
+	byScenario := make(map[string]string, len(parent.PlanTaskRecoveries))
+	location, _ := time.LoadLocation(historicalTimezone)
+	for _, recovery := range parent.PlanTaskRecoveries {
+		taskID := strings.TrimSpace(recovery.TaskID)
+		scenarioID := strings.TrimSpace(recovery.ScenarioID)
+		if taskID == "" || scenarioID == "" || strings.TrimSpace(recovery.TargetKey) != strings.TrimSpace(parent.TargetKey) {
+			return fmt.Errorf("scenario %s has invalid plan task recovery %+v", parent.ScenarioID, recovery)
+		}
+		if existing, ok := byTask[taskID]; ok && existing != scenarioID {
+			return fmt.Errorf("scenario %s maps task %s to multiple child scenarios", parent.ScenarioID, taskID)
+		}
+		if existing, ok := byScenario[scenarioID]; ok && existing != taskID {
+			return fmt.Errorf("scenario %s maps child %s to multiple tasks", parent.ScenarioID, scenarioID)
+		}
+		plannedAt, err := parseHistoricalTaskPlannedAt(recovery.PlannedAt, location)
+		if err != nil || plannedAt.In(location).Format("2006-01-02") != scenarioDateFromID(scenarioID) {
+			return fmt.Errorf("scenario %s has invalid planned_at for child %s", parent.ScenarioID, scenarioID)
+		}
+		if !containsHistoricalString(parent.TaskIDs, taskID) || !containsHistoricalString(parent.ChildScenarioIDs, scenarioID) {
+			return fmt.Errorf("scenario %s plan task recovery %s is missing from manifest resources", parent.ScenarioID, taskID)
+		}
+		byTask[taskID], byScenario[scenarioID] = scenarioID, taskID
+	}
+	return nil
+}
+
+func requireExactHistoricalServerStageSet(records map[string]HistoricalStageRecord, scenarioID string, expected []string) error {
+	wanted := make(map[string]struct{}, len(expected))
+	for _, stage := range expected {
+		wanted[stage] = struct{}{}
+	}
+	for stage := range records {
+		if _, ok := wanted[stage]; !ok {
+			return fmt.Errorf("scenario %s has unexpected completed server stage %s", scenarioID, stage)
+		}
+	}
+	return nil
+}
+
+func historicalTaskIDForScenario(parent HistoricalScenarioManifest, scenarioID string) string {
+	for _, recovery := range parent.PlanTaskRecoveries {
+		if recovery.ScenarioID == scenarioID {
+			return strings.TrimSpace(recovery.TaskID)
+		}
+	}
+	_, suffix, found := strings.Cut(strings.TrimSpace(scenarioID), "/")
+	for found {
+		var next string
+		suffix, next, found = strings.Cut(suffix, "/")
+		if found {
+			suffix = next
+		}
+	}
+	if containsHistoricalString(parent.TaskIDs, suffix) {
+		return suffix
+	}
+	return ""
+}
+
+func validateHistoricalScenarioResources(
+	parent HistoricalScenarioManifest,
+	scenarioID string,
+	local map[string]HistoricalLocalStageRecord,
+	server map[string]HistoricalStageRecord,
+	expectedTaskID string,
+) error {
+	requireServerID := func(stage, expected string) error {
+		record, exists := server[stage]
+		if !exists || expected == "" {
+			return nil
+		}
+		if record.ResourceID != expected {
+			return fmt.Errorf("scenario %s stage %s resource %s conflicts with manifest %s", scenarioID, stage, record.ResourceID, expected)
+		}
+		return nil
+	}
+	if scenarioID == parent.ScenarioID {
+		for stage, expected := range map[string]string{
+			"entry_resolve": parent.EntryID, "entry_intake": parent.TesteeID, "plan_enrollment": parent.EnrollmentID,
+		} {
+			if err := requireServerID(stage, expected); err != nil {
+				return err
+			}
+		}
+	}
+	if expectedTaskID != "" {
+		if err := requireServerID("task_open", expectedTaskID); err != nil {
+			return err
+		}
+		if err := requireServerID("task_complete", expectedTaskID); err != nil {
+			return err
+		}
+		if !containsHistoricalString(parent.TaskIDs, expectedTaskID) || !containsHistoricalString(parent.CompletedTaskIDs, expectedTaskID) {
+			return fmt.Errorf("scenario %s task %s is not fully represented in manifest", scenarioID, expectedTaskID)
+		}
+	}
+	resourceLists := map[string][]string{
+		"answersheet_submit":   parent.AnswerSheetIDs,
+		"assessment_created":   parent.AssessmentIDs,
+		"assessment_submitted": parent.AssessmentIDs,
+		"outcome_committed":    parent.OutcomeIDs,
+		"report_generated":     parent.ReportIDs,
+	}
+	for stage, ids := range resourceLists {
+		if record, exists := server[stage]; exists && !containsHistoricalString(ids, record.ResourceID) {
+			return fmt.Errorf("scenario %s stage %s resource %s is missing from manifest", scenarioID, stage, record.ResourceID)
+		}
+	}
+	for stage, record := range server {
+		localRecord, exists := local[scenarioID+"\x00"+stage]
+		if !exists {
+			continue
+		}
+		switch stage {
+		case "entry_intake":
+			if localRecord.TesteeID != record.ResourceID {
+				return fmt.Errorf("scenario %s local testee %s conflicts with server %s", scenarioID, localRecord.TesteeID, record.ResourceID)
+			}
+		case "plan_enrollment":
+			if localRecord.EnrollmentID != record.ResourceID {
+				return fmt.Errorf("scenario %s local enrollment %s conflicts with server %s", scenarioID, localRecord.EnrollmentID, record.ResourceID)
+			}
+		case "task_open", "task_complete":
+			if !containsHistoricalString(localRecord.TaskIDs, record.ResourceID) {
+				return fmt.Errorf("scenario %s local stage %s is missing task %s", scenarioID, stage, record.ResourceID)
+			}
+		case "answersheet_submit":
+			if !containsHistoricalString(localRecord.AnswerSheetIDs, record.ResourceID) {
+				return fmt.Errorf("scenario %s local answersheet stage is missing resource %s", scenarioID, record.ResourceID)
+			}
+		case "assessment_created", "assessment_submitted":
+			if !containsHistoricalString(localRecord.AssessmentIDs, record.ResourceID) {
+				return fmt.Errorf("scenario %s local assessment stage is missing resource %s", scenarioID, record.ResourceID)
+			}
+		}
+	}
+	return nil
+}
+
+func containsHistoricalString(values []string, candidate string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == strings.TrimSpace(candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func requireHistoricalLocalStages(records map[string]HistoricalLocalStageRecord, scenarioID string, expected []string) error {

@@ -271,6 +271,59 @@ func TestRequireHistoricalServerStagesRejectsMissingReport(t *testing.T) {
 	}
 }
 
+func TestValidateHistoricalScenarioStageSetRejectsResourcePayloadAndTimeDrift(t *testing.T) {
+	location, _ := time.LoadLocation(historicalTimezone)
+	businessAt := time.Date(2025, 1, 1, 9, 0, 0, 0, location)
+	manifest := &HistoricalManifest{BatchID: "batch", OrgID: 9}
+	parent := HistoricalScenarioManifest{ScenarioID: "2025-01-01/7/submit_answer/MODEL", EntryID: "entry-1"}
+	valid := HistoricalStageRecord{
+		OrgID: 9, BatchID: "batch", ScenarioID: parent.ScenarioID, Stage: "answersheet_submit",
+		Status: "completed", BusinessAt: businessAt, ResourceType: "answer_sheet", ResourceID: "9007199254740993",
+		PayloadHash: "hash", PayloadJSON: json.RawMessage(`{"answersheet_id":9007199254740993}`),
+	}
+	if err := validateHistoricalScenarioStageSet(manifest, parent, parent.ScenarioID, map[string]HistoricalStageRecord{valid.Stage: valid}); err != nil {
+		t.Fatalf("valid stage rejected: %v", err)
+	}
+	tests := map[string]func(*HistoricalStageRecord){
+		"resource_type": func(record *HistoricalStageRecord) { record.ResourceType = "assessment" },
+		"payload":       func(record *HistoricalStageRecord) { record.PayloadJSON = json.RawMessage(`{"answersheet_id":1}`) },
+		"business_day":  func(record *HistoricalStageRecord) { record.BusinessAt = businessAt.AddDate(0, 0, 1) },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			record := valid
+			mutate(&record)
+			if err := validateHistoricalScenarioStageSet(manifest, parent, parent.ScenarioID, map[string]HistoricalStageRecord{record.Stage: record}); err == nil {
+				t.Fatalf("%s drift must be rejected", name)
+			}
+		})
+	}
+}
+
+func TestVerifyHistoricalSubmissionStageMapRequiresEveryTerminalFact(t *testing.T) {
+	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "2025-01-01/7/submit_answer/task-1", OrgID: 9, Version: historicalseed.Version1}
+	all := map[string]HistoricalStageRecord{
+		"task_open":            {Status: "completed", ResourceID: "task-1"},
+		"answersheet_submit":   {Status: "completed", ResourceID: "answer-1"},
+		"assessment_created":   {Status: "completed", ResourceID: "assessment-1"},
+		"assessment_submitted": {Status: "completed", ResourceID: "assessment-1"},
+		"task_complete":        {Status: "completed", ResourceID: "task-1"},
+		"outcome_committed":    {Status: "completed", ResourceID: "outcome-1"},
+		"report_generated":     {Status: "completed", ResourceID: "report-1"},
+	}
+	for missing := range all {
+		stages := make(map[string]HistoricalStageRecord, len(all)-1)
+		for stage, record := range all {
+			if stage != missing {
+				stages[stage] = record
+			}
+		}
+		if _, err := verifyHistoricalSubmissionStageMap(historical, "task-1", true, dailySimulationSubmissionResult{}, stages); err == nil {
+			t.Fatalf("missing %s must reject terminal restore", missing)
+		}
+	}
+}
+
 func equalStrings(left, right []string) bool {
 	if len(left) != len(right) {
 		return false

@@ -53,6 +53,7 @@ type dailySimulationBatchOptions struct {
 	RestoreExistingTestee     func(dailySimulationProfile, dailySimulationScenario) (*ApiserverTesteeResponse, error)
 	OnScenarioComplete        func(dailySimulationProfile, dailySimulationScenario, dailySimulationOutcome) error
 	OnHistoricalStageComplete func(dailySimulationProfile, dailySimulationScenario, historicalseed.Context, dailySimulationJourneyStage, dailySimulationOutcome, *dailySimulationResolvedTarget) error
+	OnHistoricalPlanTaskFound func(dailySimulationProfile, dailySimulationScenario, historicalseed.Context, HistoricalPlanTaskRecovery) error
 }
 
 /**
@@ -445,6 +446,11 @@ func runDailySimulationBatchWithOptions(
 					if options.OnHistoricalStageComplete != nil {
 						userCtx = withHistoricalLocalStageRecorder(userCtx, func(historical historicalseed.Context, stage dailySimulationJourneyStage, outcome dailySimulationOutcome, target *dailySimulationResolvedTarget) error {
 							return options.OnHistoricalStageComplete(profile, scenario, historical, stage, outcome, target)
+						})
+					}
+					if options.OnHistoricalPlanTaskFound != nil {
+						userCtx = withHistoricalPlanTaskDiscoveryRecorder(userCtx, func(historical historicalseed.Context, recovery HistoricalPlanTaskRecovery) error {
+							return options.OnHistoricalPlanTaskFound(profile, scenario, historical, recovery)
 						})
 					}
 				}
