@@ -19,30 +19,51 @@ const (
 	dailySimulationReadinessMaxDelay     = 10 * time.Second
 )
 
-var errDailySimulationAssessmentPending = errors.New("assessment remains pending")
+var (
+	errDailySimulationAssessmentPending = errors.New("assessment remains pending")
+	errHistoricalSubmissionPending      = errors.New("historical submission has not reached its required terminal stage")
+)
+
+type dailySimulationSubmissionStatus string
+
+const (
+	dailySimulationSubmissionDurableAccepted dailySimulationSubmissionStatus = "durable_accepted"
+	dailySimulationSubmissionAcceptedPending dailySimulationSubmissionStatus = "accepted_pending"
+	dailySimulationSubmissionAssessmentReady dailySimulationSubmissionStatus = "assessment_ready"
+	dailySimulationSubmissionReportGenerated dailySimulationSubmissionStatus = "report_generated"
+)
+
+type dailySimulationSubmissionResult struct {
+	Status        dailySimulationSubmissionStatus
+	AnswerSheetID string
+	AssessmentID  string
+	OutcomeID     string
+	ReportID      string
+	ServerStages  map[string]HistoricalStageRecord
+}
 
 var (
 	dailySimulationReadinessNow  = time.Now
 	dailySimulationReadinessWait = scheduler.Wait
 )
 
-func submitDailySimulationAnswerSheet(ctx context.Context, state *dailySimulationJourneyState, req SubmitAnswerSheetRequest) error {
+func submitDailySimulationAnswerSheet(ctx context.Context, state *dailySimulationJourneyState, req SubmitAnswerSheetRequest) (dailySimulationSubmissionResult, error) {
 	if state == nil || state.deps == nil {
-		return fmt.Errorf("daily simulation state is not initialized")
+		return dailySimulationSubmissionResult{}, fmt.Errorf("daily simulation state is not initialized")
 	}
 	ledger := state.deps.DailySubmissionLedger
 	if ledger == nil {
-		return fmt.Errorf("daily submission ledger is not initialized")
+		return dailySimulationSubmissionResult{}, fmt.Errorf("daily submission ledger is not initialized")
 	}
 	client := state.collectionClient
 	if client == nil {
-		return fmt.Errorf("guardian collection client is not initialized")
+		return dailySimulationSubmissionResult{}, fmt.Errorf("guardian collection client is not initialized")
 	}
 	logicalID := dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID)
 
 	_, exists, err := ledger.Get(logicalID)
 	if err != nil {
-		return err
+		return dailySimulationSubmissionResult{}, err
 	}
 	_, historical := historicalseed.FromContext(ctx)
 	if !exists && !historical && strings.TrimSpace(state.guardianUserID) != "" {
@@ -50,14 +71,13 @@ func submitDailySimulationAnswerSheet(ctx context.Context, state *dailySimulatio
 			ctx, state.deps.APIClient, req.QuestionnaireCode, state.guardianUserID,
 		)
 		if err != nil {
-			return err
+			return dailySimulationSubmissionResult{}, err
 		}
 		if legacy != nil {
 			record, err := ledger.ReconcileLegacy(logicalID, legacy.ID, req)
 			if err != nil {
-				return err
+				return dailySimulationSubmissionResult{}, err
 			}
-			state.outcome.AnswerSheetID = record.AnswerSheetID
 			state.outcome.SkippedSubmission = true
 			return finishDailySimulationReadiness(ctx, state, ledger, logicalID, req.TesteeID, record.AnswerSheetID)
 		}
@@ -65,25 +85,31 @@ func submitDailySimulationAnswerSheet(ctx context.Context, state *dailySimulatio
 
 	prepared, err := ledger.Prepare(logicalID, req)
 	if err != nil {
-		return err
+		return dailySimulationSubmissionResult{}, err
 	}
 	req.IdempotencyKey = prepared.Record.IdempotencyKey
 	answerSheetID := strings.TrimSpace(prepared.Record.AnswerSheetID)
 	if prepared.ShouldSubmit {
 		accepted, err := client.AcceptCollectionAnswerSheet(ctx, req, prepared.Record.RequestID)
 		if err != nil {
-			return err
+			return dailySimulationSubmissionResult{}, err
 		}
 		record, err := ledger.MarkAccepted(logicalID, accepted.AnswerSheetID)
 		if err != nil {
-			return err
+			return dailySimulationSubmissionResult{}, err
 		}
 		answerSheetID = record.AnswerSheetID
 	} else {
 		state.outcome.SkippedSubmission = true
 	}
-	state.outcome.AnswerSheetID = answerSheetID
-	return finishDailySimulationReadiness(ctx, state, ledger, logicalID, req.TesteeID, answerSheetID)
+	result, err := finishDailySimulationReadiness(ctx, state, ledger, logicalID, req.TesteeID, answerSheetID)
+	if err != nil {
+		return result, err
+	}
+	if historical, ok := historicalseed.FromContext(ctx); ok {
+		return verifyHistoricalSubmissionStages(ctx, state.deps.APIClient, historical, req.TaskID, state.target.RequiresAssessment, result)
+	}
+	return result, nil
 }
 
 func finishDailySimulationReadiness(
@@ -93,37 +119,108 @@ func finishDailySimulationReadiness(
 	logicalID string,
 	testeeID uint64,
 	answerSheetID string,
-) error {
+) (dailySimulationSubmissionResult, error) {
+	result := dailySimulationSubmissionResult{AnswerSheetID: strings.TrimSpace(answerSheetID)}
 	if !state.target.RequiresAssessment {
 		record, ok, err := ledger.Get(logicalID)
 		if err != nil {
-			return err
+			return result, err
 		}
 		if ok && record.Status == toolanswersheet.SubmissionStatusLegacy {
-			return nil
+			result.Status = dailySimulationSubmissionDurableAccepted
+			return result, nil
 		}
 		_, err = ledger.MarkCompleted(logicalID, answerSheetID)
-		return err
+		result.Status = dailySimulationSubmissionDurableAccepted
+		return result, err
 	}
 	assessmentID, err := waitForDailySimulationReadiness(ctx, state.collectionClient, answerSheetID, testeeID)
 	if errors.Is(err, errDailySimulationAssessmentPending) {
 		_, markErr := ledger.MarkAcceptedPending(logicalID)
-		return markErr
+		result.Status = dailySimulationSubmissionAcceptedPending
+		if markErr != nil {
+			return result, markErr
+		}
+		if _, historical := historicalseed.FromContext(ctx); historical {
+			return result, fmt.Errorf("%w: answersheet_id=%s", errHistoricalSubmissionPending, answerSheetID)
+		}
+		return result, nil
 	}
 	if err != nil {
-		return err
+		return result, err
 	}
+	result.AssessmentID = strings.TrimSpace(assessmentID)
+	result.Status = dailySimulationSubmissionAssessmentReady
 	if _, historical := historicalseed.FromContext(ctx); historical {
 		if err := waitForDailySimulationReport(ctx, state.collectionClient, assessmentID, testeeID); err != nil {
-			return err
+			return result, err
 		}
+		result.Status = dailySimulationSubmissionReportGenerated
 	}
 	record, err := ledger.MarkReady(logicalID, assessmentID)
 	if err != nil {
-		return err
+		return result, err
 	}
-	state.outcome.AssessmentID = record.AssessmentID
-	return nil
+	result.AssessmentID = record.AssessmentID
+	return result, nil
+}
+
+func verifyHistoricalSubmissionStages(
+	ctx context.Context,
+	client *APIClient,
+	historical historicalseed.Context,
+	taskID string,
+	requiresAssessment bool,
+	result dailySimulationSubmissionResult,
+) (dailySimulationSubmissionResult, error) {
+	if client == nil {
+		return result, fmt.Errorf("historical stage API client is not initialized")
+	}
+	response, err := client.ListHistoricalScenarioStages(ctx, historical.BatchID, historical.ScenarioID)
+	if err != nil {
+		return result, fmt.Errorf("load historical terminal stages for %s: %w", historical.ScenarioID, err)
+	}
+	byStage := make(map[string]HistoricalStageRecord, len(response.Stages))
+	for _, record := range response.Stages {
+		if !strings.EqualFold(strings.TrimSpace(record.Status), "completed") || strings.TrimSpace(record.ResourceID) == "" {
+			continue
+		}
+		byStage[strings.TrimSpace(record.Stage)] = record
+	}
+	required := []string{"answersheet_submit"}
+	if strings.TrimSpace(taskID) != "" {
+		required = append([]string{"task_open"}, required...)
+		required = append(required, "task_complete")
+	}
+	if requiresAssessment {
+		required = append(required, "assessment_created", "assessment_submitted", "outcome_committed", "report_generated")
+	}
+	for _, stage := range required {
+		if _, ok := byStage[stage]; !ok {
+			return result, fmt.Errorf("%w: scenario=%s missing_stage=%s", errHistoricalSubmissionPending, historical.ScenarioID, stage)
+		}
+	}
+	if got := byStage["answersheet_submit"].ResourceID; result.AnswerSheetID != "" && got != result.AnswerSheetID {
+		return result, fmt.Errorf("historical answersheet stage resource %s conflicts with accepted answersheet %s", got, result.AnswerSheetID)
+	}
+	if taskID = strings.TrimSpace(taskID); taskID != "" {
+		if byStage["task_open"].ResourceID != taskID || byStage["task_complete"].ResourceID != taskID {
+			return result, fmt.Errorf("historical task stages conflict with task %s", taskID)
+		}
+	}
+	if requiresAssessment {
+		createdID := byStage["assessment_created"].ResourceID
+		if createdID != byStage["assessment_submitted"].ResourceID || result.AssessmentID != "" && createdID != result.AssessmentID {
+			return result, fmt.Errorf("historical assessment stages conflict with ready assessment %s", result.AssessmentID)
+		}
+		result.AssessmentID = createdID
+		result.OutcomeID = byStage["outcome_committed"].ResourceID
+		result.ReportID = byStage["report_generated"].ResourceID
+		result.Status = dailySimulationSubmissionReportGenerated
+	}
+	result.AnswerSheetID = byStage["answersheet_submit"].ResourceID
+	result.ServerStages = byStage
+	return result, nil
 }
 
 func waitForDailySimulationReport(ctx context.Context, client *APIClient, assessmentID string, testeeID uint64) error {

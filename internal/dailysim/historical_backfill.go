@@ -1,6 +1,7 @@
 package dailysim
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,11 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
-
-	"context"
 
 	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
 )
@@ -21,6 +21,7 @@ import (
 const historicalTimezone = "Asia/Shanghai"
 
 type historicalCutoffKey struct{}
+type historicalFrozenTargetVersionsKey struct{}
 
 func withHistoricalCutoff(ctx context.Context, cutoff time.Time) context.Context {
 	return context.WithValue(ctx, historicalCutoffKey{}, cutoff)
@@ -29,6 +30,23 @@ func withHistoricalCutoff(ctx context.Context, cutoff time.Time) context.Context
 func historicalCutoffFromContext(ctx context.Context) (time.Time, bool) {
 	cutoff, ok := ctx.Value(historicalCutoffKey{}).(time.Time)
 	return cutoff, ok && !cutoff.IsZero()
+}
+
+func withHistoricalFrozenTargetVersions(ctx context.Context, versions map[string]string) context.Context {
+	copy := make(map[string]string, len(versions))
+	for code, version := range versions {
+		copy[code] = version
+	}
+	return context.WithValue(ctx, historicalFrozenTargetVersionsKey{}, copy)
+}
+
+func historicalFrozenTargetVersion(ctx context.Context, code string) (string, bool) {
+	versions, ok := ctx.Value(historicalFrozenTargetVersionsKey{}).(map[string]string)
+	if !ok {
+		return "", false
+	}
+	version, exists := versions[strings.TrimSpace(code)]
+	return strings.TrimSpace(version), exists
 }
 
 type HistoricalBackfillOptions struct {
@@ -248,7 +266,12 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 	ctx = withHistoricalCutoff(ctx, to.AddDate(0, 0, 1))
 	for day := start; !day.After(to); day = day.AddDate(0, 0, 1) {
 		dayKey := day.Format("2006-01-02")
-		if err := freezeHistoricalPlans(ctx, deps.APIClient, deps.Config.DailySimulation.PlanIDs, &manifest); err != nil {
+		cfg, frozenVersions, freezeErr := freezeHistoricalConfiguredTargets(ctx, deps, deps.Config.DailySimulation, &manifest)
+		if freezeErr != nil {
+			return fmt.Errorf("historical target drift on %s: %w", dayKey, freezeErr)
+		}
+		dayCtx := withHistoricalFrozenTargetVersions(ctx, frozenVersions)
+		if err := freezeHistoricalPlans(dayCtx, deps.APIClient, deps.Config.DailySimulation.PlanIDs, &manifest); err != nil {
 			return fmt.Errorf("historical plan drift on %s: %w", dayKey, err)
 		}
 		manifest.UpdatedAt = time.Now().UTC()
@@ -256,9 +279,8 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 			return err
 		}
 		count := DeterministicHistoricalCount(opts.BatchID, day, opts.CountMin, opts.CountMax)
-		cfg := deps.Config.DailySimulation
 		cfg.Workers = opts.Workers
-		err := runDailySimulationBatchWithOptions(ctx, deps, cfg, day, count, "historical_backfill_"+dayKey, dailySimulationBatchOptions{
+		err := runDailySimulationBatchWithOptions(dayCtx, deps, cfg, day, count, "historical_backfill_"+dayKey, dailySimulationBatchOptions{
 			HistoricalBatchID: opts.BatchID,
 			ShouldSkipScenario: func(profile dailySimulationProfile, scenario dailySimulationScenario) bool {
 				historical := buildHistoricalScenarioContext(opts.BatchID, uint64(deps.Config.Global.OrgID), cfg, profile, scenario)
@@ -304,11 +326,20 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 				return nil
 			},
 		})
+		var dayVerifyErr error
+		if err == nil {
+			stages, stageErr := loadHistoricalSeedStagesForDay(ctx, deps.APIClient, manifest, day)
+			if stageErr != nil {
+				dayVerifyErr = fmt.Errorf("load historical stages for %s: %w", dayKey, stageErr)
+			} else {
+				manifestMu.Lock()
+				mergeHistoricalStageResources(&manifest, stages)
+				dayVerifyErr = verifyHistoricalDay(opts.StateDir, &manifest, day, count, stages)
+				manifestMu.Unlock()
+			}
+		}
 		manifestMu.Lock()
 		manifest.UpdatedAt = time.Now().UTC()
-		if err == nil {
-			manifest.DailyCounts[dayKey] = count
-		}
 		saveErr := saveSecureJSON(manifestPath, &manifest)
 		manifestMu.Unlock()
 		if saveErr != nil {
@@ -316,6 +347,9 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 		}
 		if err != nil {
 			return fmt.Errorf("historical backfill stopped on %s: %w", dayKey, err)
+		}
+		if dayVerifyErr != nil {
+			return fmt.Errorf("historical backfill verification stopped on %s: %w", dayKey, dayVerifyErr)
 		}
 		checkpoint.CompletedThrough = dayKey
 		checkpoint.UpdatedAt = time.Now().UTC()
@@ -333,6 +367,49 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 		return err
 	}
 	return nil
+}
+
+func freezeHistoricalConfiguredTargets(ctx context.Context, deps *Dependencies, cfg DailySimulationConfig, manifest *HistoricalManifest) (DailySimulationConfig, map[string]string, error) {
+	if deps == nil || deps.APIClient == nil || deps.CollectionClient == nil || manifest == nil {
+		return cfg, nil, fmt.Errorf("historical target freeze dependencies are required")
+	}
+	var (
+		target *dailySimulationResolvedTarget
+		err    error
+	)
+	if !cfg.EntryID.IsZero() {
+		entry, getErr := deps.APIClient.GetAssessmentEntry(ctx, cfg.EntryID.String())
+		if getErr != nil {
+			return cfg, nil, fmt.Errorf("load configured assessment entry %s: %w", cfg.EntryID.String(), getErr)
+		}
+		if entry == nil {
+			return cfg, nil, fmt.Errorf("configured assessment entry %s not found", cfg.EntryID.String())
+		}
+		target, err = resolveDailySimulationTarget(ctx, deps.APIClient, deps.CollectionClient, entry.TargetType, entry.TargetCode, entry.TargetVersion)
+	} else {
+		target, err = resolveDailySimulationTarget(ctx, deps.APIClient, deps.CollectionClient, cfg.TargetType, cfg.TargetCode, cfg.TargetVersion)
+	}
+	if err != nil {
+		return cfg, nil, err
+	}
+	if err := freezeHistoricalTarget(manifest, dailySimulationScenario{Target: target}); err != nil {
+		return cfg, nil, err
+	}
+	versions := map[string]string{target.TargetCode: target.TargetVersion}
+	if cfg.EntryID.IsZero() {
+		cfg.TargetType, cfg.TargetCode, cfg.TargetVersion = target.TargetType, target.TargetCode, target.TargetVersion
+	}
+	for _, code := range collectDailySimulationAdditionalTargetCodes(cfg) {
+		additional, resolveErr := resolveDailySimulationTarget(ctx, deps.APIClient, deps.CollectionClient, target.TargetType, code, "")
+		if resolveErr != nil {
+			return cfg, nil, resolveErr
+		}
+		if err := freezeHistoricalTarget(manifest, dailySimulationScenario{Target: additional}); err != nil {
+			return cfg, nil, err
+		}
+		versions[additional.TargetCode] = additional.TargetVersion
+	}
+	return cfg, versions, nil
 }
 
 func restoreHistoricalExistingTestee(stateDir, batchID string, profile dailySimulationProfile, scenarioID string, cfg DailySimulationConfig) (*ApiserverTesteeResponse, error) {
@@ -584,6 +661,46 @@ func loadHistoricalSeedStages(ctx context.Context, client *APIClient, batchID st
 	}
 }
 
+func loadHistoricalSeedStagesForDay(ctx context.Context, client *APIClient, manifest HistoricalManifest, day time.Time) ([]HistoricalStageRecord, error) {
+	if client == nil {
+		return nil, fmt.Errorf("historical stage API client is required")
+	}
+	dayKey := day.Format("2006-01-02")
+	scenarioIDs := make(map[string]struct{})
+	for scenarioID, scenario := range manifest.Scenarios {
+		if scenario.BusinessDate != dayKey {
+			continue
+		}
+		if len(expectedServerStages(manifest, scenario)) > 0 {
+			scenarioIDs[scenarioID] = struct{}{}
+		}
+		for _, childID := range scenario.ChildScenarioIDs {
+			if len(expectedChildServerStages(manifest, scenario)) > 0 {
+				scenarioIDs[childID] = struct{}{}
+			}
+		}
+		for _, additional := range scenario.AdditionalScenarios {
+			if len(expectedAdditionalServerStages(manifest, additional)) > 0 {
+				scenarioIDs[additional.ScenarioID] = struct{}{}
+			}
+		}
+	}
+	ordered := make([]string, 0, len(scenarioIDs))
+	for scenarioID := range scenarioIDs {
+		ordered = append(ordered, scenarioID)
+	}
+	sort.Strings(ordered)
+	all := make([]HistoricalStageRecord, 0)
+	for _, scenarioID := range ordered {
+		response, err := client.ListHistoricalScenarioStages(ctx, manifest.BatchID, scenarioID)
+		if err != nil {
+			return nil, fmt.Errorf("scenario %s: %w", scenarioID, err)
+		}
+		all = append(all, response.Stages...)
+	}
+	return all, nil
+}
+
 func mergeHistoricalStageResources(manifest *HistoricalManifest, stages []HistoricalStageRecord) {
 	if manifest == nil {
 		return
@@ -675,9 +792,11 @@ func expectedServerStages(manifest HistoricalManifest, scenario HistoricalScenar
 }
 
 func expectedChildServerStages(manifest HistoricalManifest, scenario HistoricalScenarioManifest) []string {
-	stages := []string{"task_open", "task_complete", "answersheet_submit"}
+	stages := []string{"task_open", "answersheet_submit"}
 	if target, ok := manifest.Targets[scenario.TargetKey]; ok && target.RequiresAssessment {
-		stages = append(stages, "assessment_created", "assessment_submitted", "outcome_committed", "report_generated")
+		stages = append(stages, "assessment_created", "assessment_submitted", "task_complete", "outcome_committed", "report_generated")
+	} else {
+		stages = append(stages, "task_complete")
 	}
 	return stages
 }
@@ -897,8 +1016,97 @@ func recordHistoricalScenario(manifest *HistoricalManifest, batchID string, prof
 		CompletedTaskIDs: append([]string(nil), outcome.CompletedTaskIDs...), ChildScenarioIDs: append([]string(nil), outcome.ChildScenarioIDs...),
 		AdditionalScenarios: append([]HistoricalAdditionalScenarioManifest(nil), outcome.AdditionalScenarios...),
 		AnswerSheetID:       outcome.AnswerSheetID, AnswerSheetIDs: append([]string(nil), outcome.AnswerSheetIDs...),
-		AssessmentID: outcome.AssessmentID, AssessmentIDs: append([]string(nil), outcome.AssessmentIDs...), Terminal: outcome.StopReason,
+		AssessmentID: outcome.AssessmentID, AssessmentIDs: append([]string(nil), outcome.AssessmentIDs...),
 	}
+}
+
+func verifyHistoricalDay(stateDir string, manifest *HistoricalManifest, day time.Time, expectedCount int, stages []HistoricalStageRecord) error {
+	if manifest == nil {
+		return fmt.Errorf("historical manifest is required")
+	}
+	dayKey := day.Format("2006-01-02")
+	localStages, err := loadAllHistoricalLocalStages(stateDir, manifest.BatchID)
+	if err != nil {
+		return err
+	}
+	serverByScenario := make(map[string]map[string]HistoricalStageRecord)
+	for _, record := range stages {
+		if serverByScenario[record.ScenarioID] == nil {
+			serverByScenario[record.ScenarioID] = make(map[string]HistoricalStageRecord)
+		}
+		serverByScenario[record.ScenarioID][record.Stage] = record
+	}
+	parentIDs := make([]string, 0, expectedCount)
+	for scenarioID, scenario := range manifest.Scenarios {
+		if scenario.BusinessDate == dayKey {
+			parentIDs = append(parentIDs, scenarioID)
+		}
+	}
+	if len(parentIDs) != expectedCount {
+		return fmt.Errorf("recorded parent scenarios=%d want=%d", len(parentIDs), expectedCount)
+	}
+	for _, scenarioID := range parentIDs {
+		scenario := manifest.Scenarios[scenarioID]
+		if err := requireHistoricalLocalStages(localStages, scenarioID, expectedLocalStages(*manifest, scenario)); err != nil {
+			return err
+		}
+		if err := requireHistoricalServerStages(serverByScenario, scenarioID, expectedServerStages(*manifest, scenario)); err != nil {
+			return err
+		}
+		for _, childID := range scenario.ChildScenarioIDs {
+			if err := requireHistoricalLocalStages(localStages, childID, expectedChildLocalStages(*manifest, scenario.TargetKey)); err != nil {
+				return err
+			}
+			if err := requireHistoricalServerStages(serverByScenario, childID, expectedChildServerStages(*manifest, scenario)); err != nil {
+				return err
+			}
+		}
+		for _, additional := range scenario.AdditionalScenarios {
+			localExpected := make([]string, 0)
+			for _, stage := range expectedChildLocalStages(*manifest, additional.TargetKey) {
+				if stage != "task_open" && stage != "task_complete" {
+					localExpected = append(localExpected, stage)
+				}
+			}
+			if err := requireHistoricalLocalStages(localStages, additional.ScenarioID, localExpected); err != nil {
+				return err
+			}
+			if err := requireHistoricalServerStages(serverByScenario, additional.ScenarioID, expectedAdditionalServerStages(*manifest, additional)); err != nil {
+				return err
+			}
+		}
+		scenario.Terminal = "verified"
+		manifest.Scenarios[scenarioID] = scenario
+	}
+	manifest.DailyCounts[dayKey] = expectedCount
+	return nil
+}
+
+func requireHistoricalLocalStages(records map[string]HistoricalLocalStageRecord, scenarioID string, expected []string) error {
+	for _, stage := range expected {
+		record, ok := records[scenarioID+"\x00"+stage]
+		if !ok || record.Status != "completed" {
+			return fmt.Errorf("scenario %s missing completed local stage %s", scenarioID, stage)
+		}
+	}
+	return nil
+}
+
+func requireHistoricalServerStages(records map[string]map[string]HistoricalStageRecord, scenarioID string, expected []string) error {
+	ordered := make([]time.Time, 0, len(expected))
+	for _, stage := range expected {
+		record, ok := records[scenarioID][stage]
+		if !ok || !strings.EqualFold(strings.TrimSpace(record.Status), "completed") || strings.TrimSpace(record.ResourceID) == "" || record.BusinessAt.IsZero() {
+			return fmt.Errorf("scenario %s missing completed server stage %s", scenarioID, stage)
+		}
+		ordered = append(ordered, record.BusinessAt)
+	}
+	for index := 1; index < len(ordered); index++ {
+		if ordered[index].Before(ordered[index-1]) {
+			return fmt.Errorf("scenario %s server stage timeline is out of order", scenarioID)
+		}
+	}
+	return nil
 }
 
 func VerifyHistoricalBackfill(stateDir, batchID string) (HistoricalVerification, error) {
@@ -927,8 +1135,15 @@ func VerifyHistoricalBackfill(stateDir, batchID string) (HistoricalVerification,
 	for _, count := range manifest.DailyCounts {
 		expectedScenarios += count
 	}
+	allTerminalsVerified := true
+	for _, scenario := range manifest.Scenarios {
+		if scenario.Terminal != "verified" {
+			allTerminalsVerified = false
+			break
+		}
+	}
 	return HistoricalVerification{
-		BatchID: batchID, Complete: checkpoint.CompletedThrough == manifest.To && len(manifest.DailyCounts) == expectedDays && len(manifest.Scenarios) == expectedScenarios,
+		BatchID: batchID, Complete: checkpoint.CompletedThrough == manifest.To && len(manifest.DailyCounts) == expectedDays && len(manifest.Scenarios) == expectedScenarios && allTerminalsVerified,
 		CompletedThrough: checkpoint.CompletedThrough, ExpectedDays: expectedDays, RecordedDays: len(manifest.DailyCounts),
 		ExpectedScenarios: expectedScenarios, RecordedScenarios: len(manifest.Scenarios),
 	}, nil

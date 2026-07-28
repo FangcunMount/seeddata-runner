@@ -857,7 +857,11 @@ func resolveDailySimulationAdditionalTargetsForRun(
 	}
 	targets := make([]*dailySimulationResolvedTarget, 0, len(codes))
 	for _, code := range codes {
-		target, err := resolveDailySimulationTarget(ctx, deps.APIClient, deps.CollectionClient, cfg.TargetType, code, cfg.TargetVersion)
+		version := cfg.TargetVersion
+		if frozen, ok := historicalFrozenTargetVersion(ctx, code); ok {
+			version = frozen
+		}
+		target, err := resolveDailySimulationTarget(ctx, deps.APIClient, deps.CollectionClient, cfg.TargetType, code, version)
 		if err != nil {
 			return nil, err
 		}

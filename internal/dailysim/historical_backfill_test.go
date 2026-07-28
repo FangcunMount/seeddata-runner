@@ -116,7 +116,7 @@ func TestHistoricalExpectedStagesSeparateParentAndPlanTaskChild(t *testing.T) {
 		t.Fatalf("parent expected stages=%v", got)
 	}
 	if got := expectedChildServerStages(manifest, parent); !equalStrings(got, []string{
-		"task_open", "task_complete", "answersheet_submit", "assessment_created", "assessment_submitted", "outcome_committed", "report_generated",
+		"task_open", "answersheet_submit", "assessment_created", "assessment_submitted", "task_complete", "outcome_committed", "report_generated",
 	}) {
 		t.Fatalf("child expected stages=%v", got)
 	}
@@ -206,6 +206,68 @@ func TestHistoricalLocalStageLedgerRejectsFrozenPayloadDrift(t *testing.T) {
 	drifted.QuestionnaireVersion = "2"
 	if err := recordHistoricalLocalStage(stateDir, &manifest, profile, scenario, historical, dailySimulationJourneyStageAnswerSheet, outcome, &drifted); err == nil {
 		t.Fatal("payload drift must conflict")
+	}
+}
+
+func TestVerifyHistoricalDayIsTheOnlyWriterOfScenarioTerminalAndCheckpointCount(t *testing.T) {
+	stateDir := t.TempDir()
+	day := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	profile := dailySimulationProfile{RunDate: day, Index: 0}
+	target := &dailySimulationResolvedTarget{TargetType: "scale", TargetCode: "MODEL", TargetVersion: "1", QuestionnaireCode: "Q", QuestionnaireVersion: "1", RequiresAssessment: true}
+	scenario := dailySimulationScenario{Entry: &AssessmentEntryResponse{ID: "entry-1"}, Target: target}
+	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "2025-01-01/0/register_only/MODEL", OrgID: 9, Version: historicalseed.Version1}
+	manifest := HistoricalManifest{Version: 1, BatchID: "batch", OrgID: 9, Targets: map[string]HistoricalTargetManifest{"scale/MODEL": {RequiresAssessment: true}}, Scenarios: map[string]HistoricalScenarioManifest{}, DailyCounts: map[string]int{}}
+	outcome := dailySimulationOutcome{JourneyTarget: string(dailySimulationJourneyRegisterOnly), StopReason: "journey_target_reached", GuardianUserID: "user-1"}
+	if err := recordHistoricalLocalStage(stateDir, &manifest, profile, scenario, historical, dailySimulationJourneyStageGuardianAccount, outcome, target); err != nil {
+		t.Fatal(err)
+	}
+	local, err := loadHistoricalLocalScenarioStages(stateDir, "batch", day, historical.ScenarioID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordHistoricalScenario(&manifest, "batch", profile, scenario, outcome, local)
+	if manifest.Scenarios[historical.ScenarioID].Terminal != "" {
+		t.Fatal("scenario callback must not infer a terminal result")
+	}
+	if err := verifyHistoricalDay(stateDir, &manifest, day, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Scenarios[historical.ScenarioID].Terminal != "verified" || manifest.DailyCounts["2025-01-01"] != 1 {
+		t.Fatalf("verified manifest=%+v", manifest)
+	}
+}
+
+func TestVerifyHistoricalBackfillRejectsUnverifiedScenarioTerminal(t *testing.T) {
+	stateDir := t.TempDir()
+	batchID := "terminal-contract"
+	checkpointPath, manifestPath := historicalPaths(stateDir, batchID)
+	checkpoint := HistoricalCheckpoint{Version: 1, BatchID: batchID, From: "2025-01-01", To: "2025-01-01", CompletedThrough: "2025-01-01"}
+	manifest := HistoricalManifest{
+		Version: 1, BatchID: batchID, From: "2025-01-01", To: "2025-01-01", Timezone: historicalTimezone,
+		DailyCounts: map[string]int{"2025-01-01": 1},
+		Scenarios:   map[string]HistoricalScenarioManifest{"scenario": {ScenarioID: "scenario", BusinessDate: "2025-01-01"}},
+	}
+	if err := saveSecureJSON(checkpointPath, &checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveSecureJSON(manifestPath, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	verification, err := VerifyHistoricalBackfill(stateDir, batchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verification.Complete {
+		t.Fatal("unverified scenario terminal must keep batch verification incomplete")
+	}
+}
+
+func TestRequireHistoricalServerStagesRejectsMissingReport(t *testing.T) {
+	stages := map[string]map[string]HistoricalStageRecord{"scenario": {
+		"answersheet_submit": {Stage: "answersheet_submit", Status: "completed", ResourceID: "answer-1", BusinessAt: time.Now()},
+	}}
+	if err := requireHistoricalServerStages(stages, "scenario", []string{"answersheet_submit", "report_generated"}); err == nil {
+		t.Fatal("missing report_generated must fail the day")
 	}
 }
 

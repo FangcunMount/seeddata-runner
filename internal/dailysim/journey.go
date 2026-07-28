@@ -497,7 +497,6 @@ func dailySimulationStageEnrollPlan(ctx context.Context, state *dailySimulationJ
 				return toolchain.Decision{}, fmt.Errorf("open historical plan task %s: %w", taskID, err)
 			}
 			state.selectedTasks = append(state.selectedTasks, historicalSelectedTask{ID: taskID, Context: child, PlannedAt: plannedAt})
-			state.outcome.CompletedTaskIDs = append(state.outcome.CompletedTaskIDs, taskID)
 			state.outcome.ChildScenarioIDs = append(state.outcome.ChildScenarioIDs, child.ScenarioID)
 			if err := state.recordHistoricalLocalStage(taskCtx, dailySimulationJourneyStage("task_open")); err != nil {
 				return toolchain.Decision{}, err
@@ -627,9 +626,12 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 			req.TaskID = taskID
 			req.OriginRef = &OriginRef{Type: "plan_task", ID: taskID}
 		}
-		if err := submitDailySimulationAnswerSheet(submitCtx, state, req); err != nil {
+		submission, err := submitDailySimulationAnswerSheet(submitCtx, state, req)
+		if err != nil {
 			return err
 		}
+		state.outcome.AnswerSheetID = submission.AnswerSheetID
+		state.outcome.AssessmentID = submission.AssessmentID
 		state.outcome.AnswerSheetIDs = append(state.outcome.AnswerSheetIDs, state.outcome.AnswerSheetID)
 		if state.outcome.AssessmentID != "" {
 			state.outcome.AssessmentIDs = append(state.outcome.AssessmentIDs, state.outcome.AssessmentID)
@@ -639,15 +641,26 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 		}
 		if state.target.RequiresAssessment {
 			for _, stage := range []dailySimulationJourneyStage{"assessment_created", "outcome_committed", "report_generated"} {
+				if _, historical := historicalseed.FromContext(submitCtx); historical {
+					if _, verified := submission.ServerStages[string(stage)]; !verified {
+						return fmt.Errorf("historical server stage %s was not verified", stage)
+					}
+				}
 				if err := state.recordHistoricalLocalStage(submitCtx, stage); err != nil {
 					return err
 				}
 			}
 		}
 		if taskID != "" {
+			if _, historical := historicalseed.FromContext(submitCtx); historical {
+				if _, verified := submission.ServerStages["task_complete"]; !verified {
+					return fmt.Errorf("historical server stage task_complete was not verified")
+				}
+			}
 			if err := state.recordHistoricalLocalStage(submitCtx, dailySimulationJourneyStage("task_complete")); err != nil {
 				return err
 			}
+			state.outcome.CompletedTaskIDs = appendUniqueString(state.outcome.CompletedTaskIDs, taskID)
 		}
 		return nil
 	}
@@ -1048,6 +1061,15 @@ func ensureDailySimulationEntryAndTarget(
 	if targetType == "" || targetCode == "" {
 		return nil, nil, "", fmt.Errorf("dailySimulation targetType and targetCode are required when entryId is not set")
 	}
+	var frozenTarget *dailySimulationResolvedTarget
+	if _, historical := historicalseed.FromContext(ctx); historical && targetVersion == "" {
+		resolved, resolveErr := resolveDailySimulationTarget(ctx, deps.APIClient, deps.CollectionClient, targetType, targetCode, "")
+		if resolveErr != nil {
+			return nil, nil, "", resolveErr
+		}
+		frozenTarget = resolved
+		targetVersion = resolved.TargetVersion
+	}
 
 	entries, err := listAllClinicianAssessmentEntries(ctx, deps.APIClient, clinicianID)
 	if err != nil {
@@ -1081,6 +1103,9 @@ func ensureDailySimulationEntryAndTarget(
 	})
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("create daily simulation entry: %w", err)
+	}
+	if frozenTarget != nil && strings.TrimSpace(entry.TargetVersion) == targetVersion {
+		return entry, frozenTarget, clinicianID, nil
 	}
 	target, err := resolveDailySimulationTarget(ctx, deps.APIClient, deps.CollectionClient, entry.TargetType, entry.TargetCode, entry.TargetVersion)
 	if err != nil {
@@ -1117,6 +1142,13 @@ func resolveDailySimulationTarget(
 		if scaleItem == nil {
 			return nil, fmt.Errorf("scale %s not found", targetCode)
 		}
+		resolvedTargetVersion := strings.TrimSpace(scaleItem.Version)
+		if resolvedTargetVersion == "" {
+			return nil, fmt.Errorf("published assessment model %s has empty version", targetCode)
+		}
+		if targetVersion != "" && targetVersion != resolvedTargetVersion {
+			return nil, fmt.Errorf("published assessment model %s version drift: requested=%s loaded=%s", targetCode, targetVersion, resolvedTargetVersion)
+		}
 		questionnaireVersion := strings.TrimSpace(scaleItem.QuestionnaireVersion)
 		if questionnaireVersion == "" {
 			return nil, fmt.Errorf("published assessment model %s has empty questionnaire_version", targetCode)
@@ -1128,7 +1160,7 @@ func resolveDailySimulationTarget(
 		return &dailySimulationResolvedTarget{
 			TargetType:           targetType,
 			TargetCode:           targetCode,
-			TargetVersion:        targetVersion,
+			TargetVersion:        resolvedTargetVersion,
 			QuestionnaireCode:    strings.TrimSpace(scaleItem.QuestionnaireCode),
 			QuestionnaireVersion: questionnaireVersion,
 			QuestionnaireTitle:   strings.TrimSpace(detail.Title),
@@ -1146,14 +1178,17 @@ func resolveDailySimulationTarget(
 		if detail == nil {
 			return nil, fmt.Errorf("questionnaire %s not found", targetCode)
 		}
-		version := targetVersion
+		version := strings.TrimSpace(detail.Version)
 		if version == "" {
-			version = strings.TrimSpace(detail.Version)
+			return nil, fmt.Errorf("published questionnaire %s has empty version", targetCode)
+		}
+		if targetVersion != "" && targetVersion != version {
+			return nil, fmt.Errorf("published questionnaire %s version drift: requested=%s loaded=%s", targetCode, targetVersion, version)
 		}
 		return &dailySimulationResolvedTarget{
 			TargetType:           targetType,
 			TargetCode:           targetCode,
-			TargetVersion:        targetVersion,
+			TargetVersion:        version,
 			QuestionnaireCode:    targetCode,
 			QuestionnaireVersion: version,
 			QuestionnaireTitle:   strings.TrimSpace(detail.Title),

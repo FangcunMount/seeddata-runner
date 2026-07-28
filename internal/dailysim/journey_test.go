@@ -50,6 +50,33 @@ func TestResolveDailySimulationJourneyTargetDefaultsToSubmit(t *testing.T) {
 	}
 }
 
+func TestResolveDailySimulationTargetFreezesPublishedModelAndQuestionnaireVersions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/assessment-models/published/MODEL":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"code":"MODEL","title":"Model","status":"published","version":"2.0.0","questionnaire_code":"Q","questionnaire_version":"3.0.0"}}`))
+		case "/api/v1/questionnaires/Q":
+			if got := r.URL.Query().Get("version"); got != "3.0.0" {
+				t.Fatalf("questionnaire version=%q", got)
+			}
+			_, _ = w.Write([]byte(`{"code":0,"data":{"code":"Q","version":"3.0.0","title":"Questionnaire","questions":[]}}`))
+		default:
+			t.Fatalf("unexpected request %s", r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "token", log.New(log.NewOptions()))
+	target, err := resolveDailySimulationTarget(context.Background(), client, client, "scale", "MODEL", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.TargetVersion != "2.0.0" || target.QuestionnaireVersion != "3.0.0" {
+		t.Fatalf("resolved target=%+v", target)
+	}
+}
+
 func TestResolveDailySimulationJourneyTargetStableWithMockConsumerEnabled(t *testing.T) {
 	cfg := DailySimulationConfig{
 		JourneyMix: DailySimulationJourneyMixConfig{

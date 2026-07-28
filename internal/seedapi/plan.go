@@ -3,6 +3,7 @@ package seedapi
 import (
 	"context"
 	"fmt"
+	"net/url"
 )
 
 func (c *APIClient) ListHistoricalSeedStages(ctx context.Context, batchID string, offset, limit int) (*HistoricalStageBatchResponse, error) {
@@ -14,6 +15,19 @@ func (c *APIClient) ListHistoricalSeedStages(ctx context.Context, batchID string
 	var result HistoricalStageBatchResponse
 	if err := decodeResponseData(resp, &result); err != nil {
 		return nil, fmt.Errorf("decode historical stage response: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *APIClient) ListHistoricalScenarioStages(ctx context.Context, batchID, scenarioID string) (*HistoricalStageBatchResponse, error) {
+	path := fmt.Sprintf("/internal/v1/historical-seed/batches/%s/scenarios?scenario_id=%s", url.PathEscape(batchID), url.QueryEscape(scenarioID))
+	resp, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var result HistoricalStageBatchResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode historical scenario stage response: %w", err)
 	}
 	return &result, nil
 }
