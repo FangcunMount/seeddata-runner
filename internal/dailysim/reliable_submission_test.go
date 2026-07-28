@@ -102,6 +102,51 @@ func TestDailySimulationReadinessDelayClampsServerHint(t *testing.T) {
 	}
 }
 
+func TestWaitForDailySimulationReportRequiresInterpretedTerminal(t *testing.T) {
+	var calls atomic.Int32
+	originalWait := dailySimulationReadinessWait
+	dailySimulationReadinessWait = func(context.Context, time.Duration) error { return nil }
+	t.Cleanup(func() { dailySimulationReadinessWait = originalWait })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/assessments/assessment-1/wait-report" {
+			t.Fatalf("unexpected report request: %s %s", r.Method, r.URL.String())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) == 1 {
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"processing","next_poll_after_ms":1}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"status":"interpreted"}}`))
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "guardian-token", log.New(log.NewOptions()))
+	if err := waitForDailySimulationReport(context.Background(), client, "assessment-1", 42); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("report calls=%d, want 2", calls.Load())
+	}
+}
+
+func TestDailySimulationSubmissionLogicalIDPreservesLegacyWithoutTask(t *testing.T) {
+	state := &dailySimulationJourneyState{
+		profile: dailySimulationProfile{RunDate: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Index: 7},
+		target: &dailySimulationResolvedTarget{
+			TargetType: "scale", TargetCode: "MODEL", TargetVersion: "1",
+			QuestionnaireCode: "Q", QuestionnaireVersion: "2",
+		},
+	}
+	legacy := "daily|20250101|7|42|scale|MODEL|1|Q|2"
+	if got := dailySimulationSubmissionLogicalID(state, 42, ""); got != legacy {
+		t.Fatalf("logical id=%q, want legacy %q", got, legacy)
+	}
+	if got := dailySimulationSubmissionLogicalID(state, 42, "task-1"); got != legacy+"|task-1" {
+		t.Fatalf("task logical id=%q", got)
+	}
+}
+
 func TestDailySimulationReadinessTimeoutPersistsAcceptedPending(t *testing.T) {
 	current := time.Date(2026, 7, 18, 10, 0, 0, 0, time.UTC)
 	originalNow := dailySimulationReadinessNow
@@ -161,7 +206,7 @@ func TestDailySimulationReadinessTimeoutPersistsAcceptedPending(t *testing.T) {
 	if err := submitDailySimulationAnswerSheet(context.Background(), state, req); err != nil {
 		t.Fatal(err)
 	}
-	record, ok, err := ledger.Get(dailySimulationSubmissionLogicalID(state, req.TesteeID))
+	record, ok, err := ledger.Get(dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID))
 	if err != nil || !ok {
 		t.Fatalf("load pending submission: ok=%v err=%v", ok, err)
 	}

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
 	toolprogress "github.com/FangcunMount/seeddata-runner/internal/progress"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 )
@@ -43,9 +44,15 @@ type dailySimulationSchedule struct {
 }
 
 type dailySimulationBatchOptions struct {
-	ReuseOnly              bool
-	ExistingTesteesByIndex map[int]*ApiserverTesteeResponse
-	JobIndexes             []int
+	ReuseOnly                 bool
+	ExistingTesteesByIndex    map[int]*ApiserverTesteeResponse
+	JobIndexes                []int
+	HistoricalBatchID         string
+	ValidateScenario          func(dailySimulationScenario) error
+	ShouldSkipScenario        func(dailySimulationProfile, dailySimulationScenario) bool
+	RestoreExistingTestee     func(dailySimulationProfile, dailySimulationScenario) (*ApiserverTesteeResponse, error)
+	OnScenarioComplete        func(dailySimulationProfile, dailySimulationScenario, dailySimulationOutcome) error
+	OnHistoricalStageComplete func(dailySimulationProfile, dailySimulationScenario, historicalseed.Context, dailySimulationJourneyStage, dailySimulationOutcome, *dailySimulationResolvedTarget) error
 }
 
 /**
@@ -299,9 +306,23 @@ func runDailySimulationBatchWithOptions(
 	if len(scenarios) == 0 {
 		return fmt.Errorf("%s resolved zero scenarios", progressLabel)
 	}
+	if options.ValidateScenario != nil {
+		for _, scenario := range scenarios {
+			if err := options.ValidateScenario(scenario); err != nil {
+				return err
+			}
+		}
+	}
 	additionalTargets, err := resolveDailySimulationAdditionalTargetsForRun(ctx, deps, cfg)
 	if err != nil {
 		return err
+	}
+	if options.ValidateScenario != nil {
+		for _, target := range additionalTargets {
+			if err := options.ValidateScenario(dailySimulationScenario{Target: target}); err != nil {
+				return err
+			}
+		}
 	}
 
 	existingTesteesByIndex := options.ExistingTesteesByIndex
@@ -371,7 +392,26 @@ func runDailySimulationBatchWithOptions(
 
 				// 构建每日模拟用户配置
 				profile := buildDailySimulationProfile(cfg, runDate, idx)
+				if strings.TrimSpace(options.HistoricalBatchID) != "" {
+					profile = namespaceHistoricalProfile(options.HistoricalBatchID, profile)
+				}
 				existingTestee := existingTesteesByIndex[profile.Index]
+				scenario := scenarios[idx%len(scenarios)]
+				if existingTestee == nil && options.RestoreExistingTestee != nil {
+					restoredTestee, restoreErr := options.RestoreExistingTestee(profile, scenario)
+					if restoreErr != nil {
+						deps.Logger.Warnw("Daily simulation historical testee restore failed", "index", profile.Index, "run_date", runDate.Format("2006-01-02"), "error", restoreErr.Error())
+						counters.addFailure()
+						failureMu.Lock()
+						if len(failures) < 8 {
+							failures = append(failures, fmt.Sprintf("idx=%d guardian=%s child=%s journey=%s err=%v", profile.Index, profile.GuardianEmail, profile.ChildName, dailySimulationJourneySubmitAnswer, restoreErr))
+						}
+						failureMu.Unlock()
+						progress.Increment()
+						continue
+					}
+					existingTestee = restoredTestee
+				}
 				if options.ReuseOnly && existingTestee == nil {
 					counters.addFailure()
 					failureMu.Lock()
@@ -382,7 +422,10 @@ func runDailySimulationBatchWithOptions(
 					progress.Increment()
 					continue
 				}
-				scenario := scenarios[idx%len(scenarios)]
+				if options.ShouldSkipScenario != nil && options.ShouldSkipScenario(profile, scenario) {
+					progress.Increment()
+					continue
+				}
 				selectedAdditionalTargets := selectDailySimulationAdditionalTargetsForTestee(
 					additionalTargets,
 					cfg,
@@ -390,8 +433,23 @@ func runDailySimulationBatchWithOptions(
 					profile.Index,
 				)
 				// 模拟每日模拟用户
+				userCtx := ctx
+				if strings.TrimSpace(options.HistoricalBatchID) != "" {
+					userCtx = historicalseed.WithContext(ctx, buildHistoricalScenarioContext(
+						options.HistoricalBatchID,
+						uint64(deps.Config.Global.OrgID),
+						cfg,
+						profile,
+						scenario,
+					))
+					if options.OnHistoricalStageComplete != nil {
+						userCtx = withHistoricalLocalStageRecorder(userCtx, func(historical historicalseed.Context, stage dailySimulationJourneyStage, outcome dailySimulationOutcome, target *dailySimulationResolvedTarget) error {
+							return options.OnHistoricalStageComplete(profile, scenario, historical, stage, outcome, target)
+						})
+					}
+				}
 				outcome, simErr := simulateDailyUserWithAdditionalTargets(
-					ctx,
+					userCtx,
 					deps,
 					iamBundle,
 					cfg,
@@ -403,6 +461,9 @@ func runDailySimulationBatchWithOptions(
 					mockIAMLimiter,
 					existingTestee,
 				)
+				if simErr == nil && options.OnScenarioComplete != nil {
+					simErr = options.OnScenarioComplete(profile, scenario, outcome)
+				}
 				// 如果模拟用户失败，则记录失败
 				if simErr != nil {
 					deps.Logger.Warnw("Daily simulation user failed",

@@ -17,6 +17,7 @@ import (
 	sdkerrors "github.com/FangcunMount/iam/v2/pkg/sdk/errors"
 	"github.com/FangcunMount/iam/v2/pkg/sdk/identity"
 	toolchain "github.com/FangcunMount/seeddata-runner/internal/chain"
+	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 	"github.com/FangcunMount/seeddata-runner/internal/seediauth"
 )
@@ -68,17 +69,28 @@ type dailySimulationProfile struct {
 }
 
 type dailySimulationOutcome struct {
-	UserCreated       bool
-	TesteeCreated     bool
-	PlanEnrolled      bool
-	PlanID            string
-	EntryResolved     bool
-	EntryIntaked      bool
-	AnswerSheetID     string
-	AssessmentID      string
-	SkippedSubmission bool
-	JourneyTarget     string
-	StopReason        string
+	GuardianUserID      string
+	TesteeID            string
+	IAMProfileID        string
+	IAMProfileLinkID    string
+	EnrollmentID        string
+	TaskIDs             []string
+	CompletedTaskIDs    []string
+	ChildScenarioIDs    []string
+	AdditionalScenarios []HistoricalAdditionalScenarioManifest
+	AnswerSheetIDs      []string
+	AssessmentIDs       []string
+	UserCreated         bool
+	TesteeCreated       bool
+	PlanEnrolled        bool
+	PlanID              string
+	EntryResolved       bool
+	EntryIntaked        bool
+	AnswerSheetID       string
+	AssessmentID        string
+	SkippedSubmission   bool
+	JourneyTarget       string
+	StopReason          string
 }
 
 type dailySimulationCounters struct {
@@ -107,20 +119,22 @@ type dailySimulationJourneyStage string
 const (
 	dailySimulationJourneyStageGuardianAccount dailySimulationJourneyStage = "guardian_account"
 	dailySimulationJourneyStageTesteeProfile   dailySimulationJourneyStage = "testee_profile"
+	dailySimulationJourneyStageEntryResolve    dailySimulationJourneyStage = "entry_resolve"
+	dailySimulationJourneyStageEntryIntake     dailySimulationJourneyStage = "entry_intake"
 	dailySimulationJourneyStagePlanEnrollment  dailySimulationJourneyStage = "plan_enrollment"
-	dailySimulationJourneyStageAssessmentEntry dailySimulationJourneyStage = "assessment_entry"
 	dailySimulationJourneyStageAnswerSheet     dailySimulationJourneyStage = "answersheet_submit"
 )
 
 type dailySimulationJourneyState struct {
-	deps        *dependencies
-	iamBundle   *dailySimulationIAMBundle
-	cfg         DailySimulationConfig
-	profile     dailySimulationProfile
-	clinicianID string
-	entry       *AssessmentEntryResponse
-	target      *dailySimulationResolvedTarget
-	planID      string
+	deps          *dependencies
+	iamBundle     *dailySimulationIAMBundle
+	cfg           DailySimulationConfig
+	profile       dailySimulationProfile
+	clinicianID   string
+	entry         *AssessmentEntryResponse
+	target        *dailySimulationResolvedTarget
+	planID        string
+	selectedTasks []historicalSelectedTask
 
 	journeyTarget    dailySimulationJourneyTarget
 	guardianUserID   string
@@ -130,6 +144,12 @@ type dailySimulationJourneyState struct {
 	existingTestee   *ApiserverTesteeResponse
 	testee           *TesteeResponse
 	outcome          dailySimulationOutcome
+}
+
+type historicalSelectedTask struct {
+	ID        string
+	Context   historicalseed.Context
+	PlannedAt time.Time
 }
 
 func (c *dailySimulationCounters) add(outcome dailySimulationOutcome) {
@@ -238,7 +258,8 @@ func simulateDailyUserWithAdditionalTargets(
 	decision, err := toolchain.Run(ctx, "daily_simulation_user", state,
 		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStageGuardianAccount), HandlerFunc: dailySimulationStageEnsureGuardianAccount},
 		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStageTesteeProfile), HandlerFunc: dailySimulationStageEnsureTestee},
-		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStageAssessmentEntry), HandlerFunc: dailySimulationStageEnsureEntryAccess},
+		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStageEntryResolve), HandlerFunc: dailySimulationStageResolveEntry},
+		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStageEntryIntake), HandlerFunc: dailySimulationStageIntakeEntry},
 		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStagePlanEnrollment), HandlerFunc: dailySimulationStageEnrollPlan},
 		toolchain.FuncHandler[dailySimulationJourneyState]{HandlerName: string(dailySimulationJourneyStageAnswerSheet), HandlerFunc: dailySimulationStageSubmitAnswerSheet},
 	)
@@ -290,6 +311,17 @@ func simulateDailyUserAdditionalTarget(
 	state.outcome.AnswerSheetID = ""
 	state.outcome.AssessmentID = ""
 	state.outcome.SkippedSubmission = false
+	selectedTasks := state.selectedTasks
+	state.selectedTasks = nil
+	defer func() { state.selectedTasks = selectedTasks }()
+	if historical, ok := historicalseed.FromContext(ctx); ok {
+		historical.ScenarioID = fmt.Sprintf("%s/%d/%s/%s", profile.RunDate.Format("2006-01-02"), profile.Index, dailySimulationJourneySubmitAnswer, target.TargetCode)
+		ctx = historicalseed.WithContext(ctx, historical)
+		state.outcome.AdditionalScenarios = append(state.outcome.AdditionalScenarios, HistoricalAdditionalScenarioManifest{
+			ScenarioID: historical.ScenarioID,
+			TargetKey:  strings.Join([]string{target.TargetType, target.TargetCode}, "/"),
+		})
+	}
 
 	if _, err := dailySimulationStageSubmitAnswerSheet(ctx, state); err != nil {
 		return err
@@ -339,6 +371,7 @@ func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *daily
 	}
 
 	state.guardianUserID = guardianUserID
+	state.outcome.GuardianUserID = guardianUserID
 	state.guardianToken = guardianToken
 	state.outcome.UserCreated = userCreated
 
@@ -348,6 +381,10 @@ func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *daily
 
 	state.collectionClient = NewAPIClient(state.deps.CollectionClient.BaseURL(), guardianToken, state.deps.Logger)
 	state.collectionClient.SetRetryConfig(state.deps.Config.API.Retry)
+	state.collectionClient.SetHistoricalSecret(state.deps.CollectionClient.HistoricalSecret())
+	if err := state.recordHistoricalLocalStage(ctx, dailySimulationJourneyStageGuardianAccount); err != nil {
+		return toolchain.Decision{}, err
+	}
 	return state.nextDecision(dailySimulationJourneyStageGuardianAccount), nil
 }
 
@@ -363,6 +400,11 @@ func dailySimulationStageEnsureTestee(ctx context.Context, state *dailySimulatio
 			IAMProfileID: strings.TrimSpace(nullableString(state.existingTestee.ProfileID)),
 		}
 		state.outcome.TesteeCreated = false
+		state.outcome.TesteeID = testeeID
+		state.outcome.IAMProfileID = state.testee.IAMProfileID
+		if err := state.recordHistoricalLocalStage(ctx, dailySimulationJourneyStageTesteeProfile); err != nil {
+			return toolchain.Decision{}, err
+		}
 		return state.nextDecision(dailySimulationJourneyStageTesteeProfile), nil
 	}
 	// collection CreateTestee 会创建 IAM profile 并建立 guardian ProfileLink；
@@ -382,6 +424,12 @@ func dailySimulationStageEnsureTestee(ctx context.Context, state *dailySimulatio
 	}
 	state.testee = testee
 	state.outcome.TesteeCreated = created
+	state.outcome.TesteeID = strings.TrimSpace(testee.ID)
+	state.outcome.IAMProfileID = strings.TrimSpace(testee.IAMProfileID)
+	state.outcome.IAMProfileLinkID = strings.TrimSpace(testee.IAMProfileLinkID)
+	if err := state.recordHistoricalLocalStage(ctx, dailySimulationJourneyStageTesteeProfile); err != nil {
+		return toolchain.Decision{}, err
+	}
 	return state.nextDecision(dailySimulationJourneyStageTesteeProfile), nil
 }
 
@@ -392,18 +440,114 @@ func dailySimulationStageEnrollPlan(ctx context.Context, state *dailySimulationJ
 	if state.testee == nil || strings.TrimSpace(state.testee.ID) == "" {
 		return toolchain.Decision{}, fmt.Errorf("testee is not initialized before plan enrollment")
 	}
-	if _, err := state.deps.APIClient.EnrollTesteeInPlan(ctx, EnrollTesteeRequest{
+	enrollment, err := state.deps.APIClient.EnrollTesteeInPlan(ctx, EnrollTesteeRequest{
 		PlanID:    state.planID,
 		TesteeID:  state.testee.ID,
 		StartDate: state.profile.RunDate.Format("2006-01-02"),
-	}); err != nil {
+	})
+	if err != nil {
 		return toolchain.Decision{}, err
 	}
 	state.outcome.PlanEnrolled = true
+	if enrollment != nil {
+		state.outcome.EnrollmentID = strings.TrimSpace(enrollment.EnrollmentID)
+		for _, task := range enrollment.Tasks {
+			if taskID := strings.TrimSpace(task.ID); taskID != "" {
+				state.outcome.TaskIDs = append(state.outcome.TaskIDs, taskID)
+			}
+		}
+	}
+	if historical, ok := historicalseed.FromContext(ctx); ok && enrollment != nil {
+		planSnapshot, err := state.deps.APIClient.GetPlan(ctx, state.planID)
+		if err != nil {
+			return toolchain.Decision{}, fmt.Errorf("load historical plan %s: %w", state.planID, err)
+		}
+		if !strings.EqualFold(strings.TrimSpace(planSnapshot.ScaleCode), strings.TrimSpace(state.target.TargetCode)) {
+			return toolchain.Decision{}, fmt.Errorf("historical plan %s scale %s does not match scenario target %s", state.planID, planSnapshot.ScaleCode, state.target.TargetCode)
+		}
+		for _, task := range enrollment.Tasks {
+			taskID := strings.TrimSpace(task.ID)
+			if taskID == "" {
+				continue
+			}
+			plannedAt, parseErr := parseHistoricalTaskPlannedAt(task.PlannedAt, state.profile.RunDate.Location())
+			if parseErr != nil {
+				return toolchain.Decision{}, fmt.Errorf("parse historical plan task %s planned_at: %w", taskID, parseErr)
+			}
+			if cutoff, limited := historicalCutoffFromContext(ctx); limited {
+				if !plannedAt.Before(cutoff) {
+					continue
+				}
+			}
+			if deterministicHistoricalInt(historical.BatchID, state.profile.RunDate, state.profile.Index, "task-complete:"+taskID, 100) >= 60 {
+				continue
+			}
+			businessDay := plannedAt.In(state.profile.RunDate.Location())
+			timeline, timelineErr := BuildHistoricalTaskTimeline(historical.BatchID, businessDay, state.profile.Index)
+			if timelineErr != nil {
+				return toolchain.Decision{}, fmt.Errorf("build historical plan task %s timeline: %w", taskID, timelineErr)
+			}
+			child := historicalseed.Context{
+				BatchID: historical.BatchID, OrgID: historical.OrgID, Version: historicalseed.Version1,
+				ScenarioID: fmt.Sprintf("%s/%d/%s/%s", businessDay.Format("2006-01-02"), state.profile.Index, dailySimulationJourneySubmitAnswer, taskID),
+				Timeline:   timeline,
+			}
+			taskCtx := historicalseed.WithContext(ctx, child)
+			if _, err := state.deps.APIClient.OpenPlanTask(taskCtx, taskID); err != nil {
+				return toolchain.Decision{}, fmt.Errorf("open historical plan task %s: %w", taskID, err)
+			}
+			state.selectedTasks = append(state.selectedTasks, historicalSelectedTask{ID: taskID, Context: child, PlannedAt: plannedAt})
+			state.outcome.CompletedTaskIDs = append(state.outcome.CompletedTaskIDs, taskID)
+			state.outcome.ChildScenarioIDs = append(state.outcome.ChildScenarioIDs, child.ScenarioID)
+			if err := state.recordHistoricalLocalStage(taskCtx, dailySimulationJourneyStage("task_open")); err != nil {
+				return toolchain.Decision{}, err
+			}
+		}
+	}
+	if err := state.recordHistoricalLocalStage(ctx, dailySimulationJourneyStagePlanEnrollment); err != nil {
+		return toolchain.Decision{}, err
+	}
 	return toolchain.Next(), nil
 }
 
-func dailySimulationStageEnsureEntryAccess(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
+func parseHistoricalTaskPlannedAt(raw string, location *time.Location) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, fmt.Errorf("planned_at is empty")
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+		var (
+			parsed time.Time
+			err    error
+		)
+		if layout == "2006-01-02 15:04:05" || layout == "2006-01-02" {
+			parsed, err = time.ParseInLocation(layout, raw, location)
+		} else {
+			parsed, err = time.Parse(layout, raw)
+		}
+		if err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unsupported time %q", raw)
+}
+
+func dailySimulationStageResolveEntry(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
+	if state.entry == nil || strings.TrimSpace(state.entry.ID) == "" || strings.TrimSpace(state.entry.Token) == "" {
+		return toolchain.Decision{}, fmt.Errorf("assessment entry is not initialized")
+	}
+	// 每次访问都走公开 resolve，确保 entry_opened 行为事件落到对应 clinician。
+	if _, err := state.deps.APIClient.ResolveAssessmentEntry(ctx, state.entry.Token); err != nil {
+		return toolchain.Decision{}, err
+	}
+	state.outcome.EntryResolved = true
+	if err := state.recordHistoricalLocalStage(ctx, dailySimulationJourneyStageEntryResolve); err != nil {
+		return toolchain.Decision{}, err
+	}
+	return state.nextDecision(dailySimulationJourneyStageEntryResolve), nil
+}
+
+func dailySimulationStageIntakeEntry(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
 	if state.entry == nil || strings.TrimSpace(state.entry.ID) == "" || strings.TrimSpace(state.entry.Token) == "" {
 		return toolchain.Decision{}, fmt.Errorf("assessment entry is not initialized")
 	}
@@ -415,15 +559,12 @@ func dailySimulationStageEnsureEntryAccess(ctx context.Context, state *dailySimu
 			return toolchain.Decision{}, err
 		}
 	}
-
-	// 每次访问都走公开 resolve，确保 entry_opened 行为事件落到对应 clinician。
-	if _, err := state.deps.APIClient.ResolveAssessmentEntry(ctx, state.entry.Token); err != nil {
-		return toolchain.Decision{}, err
-	}
-	state.outcome.EntryResolved = true
 	if hasEntryRelation {
 		state.outcome.EntryIntaked = true
-		return state.nextDecision(dailySimulationJourneyStageAssessmentEntry), nil
+		if err := state.recordHistoricalLocalStage(ctx, dailySimulationJourneyStageEntryIntake); err != nil {
+			return toolchain.Decision{}, err
+		}
+		return state.nextDecision(dailySimulationJourneyStageEntryIntake), nil
 	}
 
 	req, err := buildDailySimulationAssessmentEntryIntakeRequest(state)
@@ -439,7 +580,10 @@ func dailySimulationStageEnsureEntryAccess(ctx context.Context, state *dailySimu
 		return toolchain.Decision{}, err
 	}
 	state.outcome.EntryIntaked = true
-	return state.nextDecision(dailySimulationJourneyStageAssessmentEntry), nil
+	if err := state.recordHistoricalLocalStage(ctx, dailySimulationJourneyStageEntryIntake); err != nil {
+		return toolchain.Decision{}, err
+	}
+	return state.nextDecision(dailySimulationJourneyStageEntryIntake), nil
 }
 
 func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimulationJourneyState) (toolchain.Decision, error) {
@@ -466,27 +610,57 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 		return toolchain.Decision{}, fmt.Errorf("questionnaire detail for %s is not preloaded", state.target.QuestionnaireCode)
 	}
 
-	rng := newDailySimulationRand(
-		"answers:" + state.profile.RunDate.Format("20060102") + ":" + strconv.Itoa(state.profile.Index) + ":" + state.target.QuestionnaireCode,
-	)
-	answers := buildAnswers(questionnaireDetail, rng)
-	invalidAnswers := validateAnswers(questionnaireDetail, answers)
-	if len(invalidAnswers) > 0 {
-		return toolchain.Decision{}, fmt.Errorf(
-			"generated invalid answers for questionnaire %s: %v",
-			state.target.QuestionnaireCode,
-			invalidAnswers,
+	submit := func(submitCtx context.Context, taskID string) error {
+		rng := newDailySimulationRand(
+			"answers:" + state.profile.RunDate.Format("20060102") + ":" + strconv.Itoa(state.profile.Index) + ":" + state.target.QuestionnaireCode + ":" + taskID,
 		)
+		answers := buildAnswers(questionnaireDetail, rng)
+		if invalidAnswers := validateAnswers(questionnaireDetail, answers); len(invalidAnswers) > 0 {
+			return fmt.Errorf("generated invalid answers for questionnaire %s: %v", state.target.QuestionnaireCode, invalidAnswers)
+		}
+		req := SubmitAnswerSheetRequest{
+			QuestionnaireCode: state.target.QuestionnaireCode, QuestionnaireVersion: state.target.QuestionnaireVersion,
+			Title: state.target.QuestionnaireTitle, TesteeID: testeeID,
+			OriginRef: &OriginRef{Type: "assessment_entry", ID: strings.TrimSpace(state.entry.ID)}, Answers: answers,
+		}
+		if taskID != "" {
+			req.TaskID = taskID
+			req.OriginRef = &OriginRef{Type: "plan_task", ID: taskID}
+		}
+		if err := submitDailySimulationAnswerSheet(submitCtx, state, req); err != nil {
+			return err
+		}
+		state.outcome.AnswerSheetIDs = append(state.outcome.AnswerSheetIDs, state.outcome.AnswerSheetID)
+		if state.outcome.AssessmentID != "" {
+			state.outcome.AssessmentIDs = append(state.outcome.AssessmentIDs, state.outcome.AssessmentID)
+		}
+		if err := state.recordHistoricalLocalStage(submitCtx, dailySimulationJourneyStageAnswerSheet); err != nil {
+			return err
+		}
+		if state.target.RequiresAssessment {
+			for _, stage := range []dailySimulationJourneyStage{"assessment_created", "outcome_committed", "report_generated"} {
+				if err := state.recordHistoricalLocalStage(submitCtx, stage); err != nil {
+					return err
+				}
+			}
+		}
+		if taskID != "" {
+			if err := state.recordHistoricalLocalStage(submitCtx, dailySimulationJourneyStage("task_complete")); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	submitReq := SubmitAnswerSheetRequest{
-		QuestionnaireCode:    state.target.QuestionnaireCode,
-		QuestionnaireVersion: state.target.QuestionnaireVersion,
-		Title:                state.target.QuestionnaireTitle,
-		TesteeID:             testeeID,
-		Answers:              answers,
-	}
-	if err := submitDailySimulationAnswerSheet(ctx, state, submitReq); err != nil {
-		return toolchain.Decision{}, err
+	if len(state.selectedTasks) == 0 {
+		if err := submit(ctx, ""); err != nil {
+			return toolchain.Decision{}, err
+		}
+	} else {
+		for _, task := range state.selectedTasks {
+			if err := submit(historicalseed.WithContext(ctx, task.Context), task.ID); err != nil {
+				return toolchain.Decision{}, fmt.Errorf("submit historical plan task %s: %w", task.ID, err)
+			}
+		}
 	}
 	return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
 }
@@ -680,14 +854,37 @@ func (state *dailySimulationJourneyState) nextDecision(stage dailySimulationJour
 	return toolchain.Next()
 }
 
+type historicalLocalStageRecorder func(historicalseed.Context, dailySimulationJourneyStage, dailySimulationOutcome, *dailySimulationResolvedTarget) error
+
+type historicalLocalStageRecorderKey struct{}
+
+func withHistoricalLocalStageRecorder(ctx context.Context, recorder historicalLocalStageRecorder) context.Context {
+	return context.WithValue(ctx, historicalLocalStageRecorderKey{}, recorder)
+}
+
+func (state *dailySimulationJourneyState) recordHistoricalLocalStage(ctx context.Context, stage dailySimulationJourneyStage) error {
+	if state == nil {
+		return nil
+	}
+	historical, ok := historicalseed.FromContext(ctx)
+	if !ok {
+		return nil
+	}
+	recorder, _ := ctx.Value(historicalLocalStageRecorderKey{}).(historicalLocalStageRecorder)
+	if recorder == nil {
+		return nil
+	}
+	return recorder(historical, stage, state.outcome, state.target)
+}
+
 func shouldStopDailySimulationJourneyAfter(target dailySimulationJourneyTarget, stage dailySimulationJourneyStage) bool {
 	switch target {
 	case dailySimulationJourneyRegisterOnly:
 		return stage == dailySimulationJourneyStageGuardianAccount
 	case dailySimulationJourneyCreateTestee:
-		return stage == dailySimulationJourneyStageAssessmentEntry
+		return stage == dailySimulationJourneyStageTesteeProfile
 	case dailySimulationJourneyResolveEntry:
-		return stage == dailySimulationJourneyStageAssessmentEntry
+		return stage == dailySimulationJourneyStageEntryResolve
 	case dailySimulationJourneySubmitAnswer:
 		return stage == dailySimulationJourneyStageAnswerSheet
 	default:
@@ -1068,12 +1265,14 @@ func ensureDailySimulationGuardianMockConsumer(
 	client := NewAPIClient(baseURL, "", deps.Logger)
 	configureDailySimulationMockIAMClient(client)
 
-	ensureResp, err := client.EnsureIAMMockConsumer(ctx, endpointPath, EnsureIAMMockConsumerRequest{
+	ensureRequest := EnsureIAMMockConsumerRequest{
 		Name:     profile.GuardianName,
 		Phone:    profile.GuardianPhone,
 		Email:    profile.GuardianEmail,
 		Password: password,
-	}, sharedSecret)
+	}
+	ensureRequest = withHistoricalIAMMetadata(ctx, ensureRequest, profile.GuardianName)
+	ensureResp, err := client.EnsureIAMMockConsumer(ctx, endpointPath, ensureRequest, sharedSecret)
 	if err != nil {
 		return "", "", false, fmt.Errorf("ensure guardian mock-consumer %s: %w", profile.GuardianEmail, err)
 	}
@@ -1096,6 +1295,20 @@ func ensureDailySimulationGuardianMockConsumer(
 		return "", "", false, fmt.Errorf("login guardian %s after ensuring mock-consumer: %w", profile.GuardianEmail, err)
 	}
 	return strings.TrimSpace(ensureResp.UserID), token, ensureResp.IsNewUser, nil
+}
+
+func withHistoricalIAMMetadata(ctx context.Context, request EnsureIAMMockConsumerRequest, nickname string) EnsureIAMMockConsumerRequest {
+	historical, ok := historicalseed.FromContext(ctx)
+	if !ok {
+		return request
+	}
+	request.Profile = map[string]string{"nickname": strings.TrimSpace(nickname)}
+	request.Meta = map[string]string{
+		"source":           "seeddata_historical",
+		"seed_batch_id":    historical.BatchID,
+		"seed_scenario_id": historical.ScenarioID,
+	}
+	return request
 }
 
 func findDailySimulationIAMUser(

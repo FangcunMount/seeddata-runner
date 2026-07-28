@@ -26,6 +26,7 @@ type PlanTaskWindowResponse = seedapi.PlanTaskWindowResponse
 type ListPlanTaskWindowRequest = seedapi.ListPlanTaskWindowRequest
 type QuestionnaireDetailResponse = seedapi.QuestionnaireDetailResponse
 type SubmitAnswerSheetRequest = seedapi.SubmitAnswerSheetRequest
+type OriginRef = seedapi.OriginRef
 type AdminSubmitAnswerSheetRequest = seedapi.AdminSubmitAnswerSheetRequest
 type Answer = seedapi.Answer
 type SubmitAnswerSheetResponse = seedapi.SubmitAnswerSheetResponse

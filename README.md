@@ -138,6 +138,9 @@ sudo systemctl restart seeddata-runner
 
 ```bash
 sudo systemctl status seeddata-runner --no-pager
+```
+
+```bash
 sudo journalctl -u seeddata-runner -n 200 --no-pager
 ```
 

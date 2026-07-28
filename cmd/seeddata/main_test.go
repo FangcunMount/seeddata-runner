@@ -15,8 +15,35 @@ func TestParseCLIOptionsDefaults(t *testing.T) {
 	if opts.configPath != "./configs/seeddata.yaml" {
 		t.Fatalf("unexpected default config path: %q", opts.configPath)
 	}
+	if opts.command != "daemon" {
+		t.Fatalf("unexpected default command: %q", opts.command)
+	}
 	if opts.verbose {
 		t.Fatalf("expected verbose=false by default")
+	}
+}
+
+func TestParseHistoricalBackfillCLI(t *testing.T) {
+	opts, err := parseCLIOptions([]string{
+		"historical-backfill", "--config", "/tmp/seeddata.yaml", "--from", "2025-01-01", "--to", "2026-07-27",
+		"--batch-id", "hist-20250101-20260727-v1", "--resume",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.command != "historical-backfill" || opts.from != "2025-01-01" || opts.to != "2026-07-27" || !opts.resume {
+		t.Fatalf("unexpected historical options: %+v", opts)
+	}
+}
+
+func TestParseHistoricalReadOnlyCommandsRequireBatch(t *testing.T) {
+	for _, command := range []string{"historical-verify", "historical-manifest"} {
+		if _, err := parseCLIOptions([]string{command}); err == nil {
+			t.Fatalf("%s accepted without batch id", command)
+		}
+		if opts, err := parseCLIOptions([]string{command, "--batch-id", "batch"}); err != nil || opts.batchID != "batch" {
+			t.Fatalf("%s parse failed: opts=%+v err=%v", command, opts, err)
+		}
 	}
 }
 

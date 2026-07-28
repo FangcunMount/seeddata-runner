@@ -3,6 +3,7 @@ package seedruntime
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -142,6 +143,7 @@ func resolveAPIToken(ctx context.Context, cfg *seedconfig.Config, logger log.Log
 func newConfiguredAPIClient(baseURL, token string, cfg *seedconfig.Config, logger log.Logger) *seedapi.APIClient {
 	client := seedapi.NewAPIClient(baseURL, token, logger)
 	client.SetRetryConfig(cfg.API.Retry)
+	client.SetHistoricalSecret([]byte(strings.TrimSpace(os.Getenv("QS_HISTORICAL_CONTEXT_SECRET"))))
 	return client
 }
 

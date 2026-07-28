@@ -9,6 +9,7 @@ import (
 	"time"
 
 	toolanswersheet "github.com/FangcunMount/seeddata-runner/internal/answersheet"
+	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 )
 
@@ -37,13 +38,14 @@ func submitDailySimulationAnswerSheet(ctx context.Context, state *dailySimulatio
 	if client == nil {
 		return fmt.Errorf("guardian collection client is not initialized")
 	}
-	logicalID := dailySimulationSubmissionLogicalID(state, req.TesteeID)
+	logicalID := dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID)
 
 	_, exists, err := ledger.Get(logicalID)
 	if err != nil {
 		return err
 	}
-	if !exists && strings.TrimSpace(state.guardianUserID) != "" {
+	_, historical := historicalseed.FromContext(ctx)
+	if !exists && !historical && strings.TrimSpace(state.guardianUserID) != "" {
 		legacy, err := findDailySimulationLegacyAnswerSheet(
 			ctx, state.deps.APIClient, req.QuestionnaireCode, state.guardianUserID,
 		)
@@ -111,12 +113,47 @@ func finishDailySimulationReadiness(
 	if err != nil {
 		return err
 	}
+	if _, historical := historicalseed.FromContext(ctx); historical {
+		if err := waitForDailySimulationReport(ctx, state.collectionClient, assessmentID, testeeID); err != nil {
+			return err
+		}
+	}
 	record, err := ledger.MarkReady(logicalID, assessmentID)
 	if err != nil {
 		return err
 	}
 	state.outcome.AssessmentID = record.AssessmentID
 	return nil
+}
+
+func waitForDailySimulationReport(ctx context.Context, client *APIClient, assessmentID string, testeeID uint64) error {
+	deadline := dailySimulationReadinessNow().Add(seedAssessmentPollTimeout)
+	for {
+		result, err := client.WaitAssessmentReport(ctx, assessmentID, testeeID, 20)
+		if err != nil {
+			return err
+		}
+		switch strings.ToLower(strings.TrimSpace(result.Status)) {
+		case "interpreted":
+			return nil
+		case "failed":
+			reason := strings.TrimSpace(result.Reason)
+			if reason == "" {
+				reason = strings.TrimSpace(result.Message)
+			}
+			return fmt.Errorf("report generation failed for assessment %s: %s", assessmentID, reason)
+		case "processing", "pending", "":
+		default:
+			return fmt.Errorf("unexpected report status %q for assessment %s", result.Status, assessmentID)
+		}
+		if dailySimulationReadinessNow().After(deadline) {
+			return fmt.Errorf("report generation timed out for assessment %s", assessmentID)
+		}
+		delay := dailySimulationReadinessDelay(result.NextPollAfterMs)
+		if err := dailySimulationReadinessWait(ctx, delay); err != nil {
+			return err
+		}
+	}
 }
 
 func waitForDailySimulationReadiness(
@@ -169,8 +206,8 @@ func dailySimulationReadinessDelay(nextPollAfterMs int) time.Duration {
 	return delay
 }
 
-func dailySimulationSubmissionLogicalID(state *dailySimulationJourneyState, testeeID uint64) string {
-	return strings.Join([]string{
+func dailySimulationSubmissionLogicalID(state *dailySimulationJourneyState, testeeID uint64, taskID string) string {
+	parts := []string{
 		"daily",
 		state.profile.RunDate.Format("20060102"),
 		strconv.Itoa(state.profile.Index),
@@ -180,7 +217,14 @@ func dailySimulationSubmissionLogicalID(state *dailySimulationJourneyState, test
 		strings.TrimSpace(state.target.TargetVersion),
 		strings.TrimSpace(state.target.QuestionnaireCode),
 		strings.TrimSpace(state.target.QuestionnaireVersion),
-	}, "|")
+	}
+	// Preserve the legacy daemon identity when no Plan task participates. A task
+	// suffix is required only for historical scenarios that may submit several
+	// AnswerSheets for the same target on different tasks.
+	if taskID = strings.TrimSpace(taskID); taskID != "" {
+		parts = append(parts, taskID)
+	}
+	return strings.Join(parts, "|")
 }
 
 func findDailySimulationLegacyAnswerSheet(

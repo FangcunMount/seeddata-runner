@@ -130,4 +130,7 @@ func TestBuildPlanTaskSubmitRequestIsDeterministic(t *testing.T) {
 	if !reflect.DeepEqual(first, second) {
 		t.Fatalf("deterministic requests differ: first=%+v second=%+v", first, second)
 	}
+	if first.OriginRef == nil || first.OriginRef.Type != "plan_task" || first.OriginRef.ID != task.ID || first.TaskID != first.OriginRef.ID {
+		t.Fatalf("plan task origin_ref mismatch: task_id=%q origin=%+v", first.TaskID, first.OriginRef)
+	}
 }

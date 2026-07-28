@@ -2,11 +2,50 @@ package seedapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
 )
+
+func TestAPIClientSignsHistoricalContextWithoutChangingOrdinaryRequests(t *testing.T) {
+	var historicalHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		historicalHeader = r.Header.Get(historicalseed.HeaderContext)
+		if historicalHeader != "" && r.Header.Get(historicalseed.HeaderSignature) == "" {
+			t.Fatal("historical context was not signed")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{}}`))
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "", nil)
+	client.SetHistoricalSecret([]byte("secret"))
+	if _, err := client.doRequest(context.Background(), http.MethodGet, "/ordinary", nil); err != nil {
+		t.Fatal(err)
+	}
+	if historicalHeader != "" {
+		t.Fatal("ordinary request unexpectedly carried historical context")
+	}
+
+	historicalCtx := historicalseed.WithContext(context.Background(), historicalseed.Context{
+		BatchID: "batch", ScenarioID: "scenario", OrgID: 1, Version: historicalseed.Version1,
+		Timeline: historicalseed.Timeline{EntryResolvedAt: timePtr(time.Date(2025, 1, 1, 8, 5, 0, 0, time.UTC))},
+	})
+	if _, err := client.doRequest(historicalCtx, http.MethodGet, "/historical?x=1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if historicalHeader == "" {
+		t.Fatal("historical request did not carry context")
+	}
+}
+
+func timePtr(value time.Time) *time.Time { return &value }
 
 func TestDecodeResponseDataAssessmentEntryListSupportsFormattedTime(t *testing.T) {
 	resp := &Response{
@@ -60,6 +99,16 @@ func TestDecodeResponseDataRejectsInvalidFlexibleTime(t *testing.T) {
 	var result ApiserverTesteeResponse
 	if err := decodeResponseData(resp, &result); err == nil {
 		t.Fatal("expected decodeResponseData to fail for invalid created_at")
+	}
+}
+
+func TestCollectionTesteeResponseCarriesProfileLinkIdentity(t *testing.T) {
+	var result TesteeResponse
+	if err := json.Unmarshal([]byte(`{"id":"10","iam_profile_id":"20","iam_profile_link_id":"30"}`), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ID != "10" || result.IAMProfileID != "20" || result.IAMProfileLinkID != "30" {
+		t.Fatalf("unexpected collection testee identity: %+v", result)
 	}
 }
 

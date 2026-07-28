@@ -20,6 +20,7 @@ func TestSubmitAnswerSheetSerializesCollectionValues(t *testing.T) {
 	}
 	type capturedRequest struct {
 		IdempotencyKey string           `json:"idempotency_key"`
+		OriginRef      *OriginRef       `json:"origin_ref"`
 		Answers        []capturedAnswer `json:"answers"`
 	}
 
@@ -46,6 +47,7 @@ func TestSubmitAnswerSheetSerializesCollectionValues(t *testing.T) {
 		QuestionnaireVersion: "1.0.0",
 		IdempotencyKey:       "seed.daily.1234",
 		TesteeID:             1001,
+		OriginRef:            &OriginRef{Type: "assessment_entry", ID: "88"},
 		Answers: []Answer{
 			{QuestionCode: "q1", QuestionType: "Radio", Value: "A"},
 			{QuestionCode: "q2", QuestionType: "Checkbox", Value: []string{"B", "C"}},
@@ -60,6 +62,9 @@ func TestSubmitAnswerSheetSerializesCollectionValues(t *testing.T) {
 	}
 	if captured.IdempotencyKey != "seed.daily.1234" {
 		t.Fatalf("unexpected idempotency key %q", captured.IdempotencyKey)
+	}
+	if captured.OriginRef == nil || captured.OriginRef.Type != "assessment_entry" || captured.OriginRef.ID != "88" {
+		t.Fatalf("unexpected origin_ref: %+v", captured.OriginRef)
 	}
 
 	if len(captured.Answers) != 3 {

@@ -1,0 +1,222 @@
+package dailysim
+
+import (
+	"encoding/json"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
+)
+
+func TestHistoricalRangeHas573CompleteNaturalDays(t *testing.T) {
+	location, err := time.LoadLocation(historicalTimezone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from, to, err := parseHistoricalDateRange("2025-01-01", "2026-07-27", location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if days := int(to.Sub(from).Hours()/24) + 1; days != 573 {
+		t.Fatalf("historical range days=%d want=573", days)
+	}
+}
+
+func TestHistoricalCountAndTimelineAreDeterministicAndBounded(t *testing.T) {
+	location, _ := time.LoadLocation(historicalTimezone)
+	day := time.Date(2025, 1, 1, 0, 0, 0, 0, location)
+	first := DeterministicHistoricalCount("batch", day, 40, 200)
+	second := DeterministicHistoricalCount("batch", day, 40, 200)
+	if first != second || first < 40 || first > 200 {
+		t.Fatalf("count not deterministic/bounded: %d %d", first, second)
+	}
+	one := BuildHistoricalTimeline("batch", day, 7)
+	two := BuildHistoricalTimeline("batch", day, 7)
+	if one.ReportGeneratedAt == nil || two.ReportGeneratedAt == nil || !one.ReportGeneratedAt.Equal(*two.ReportGeneratedAt) {
+		t.Fatal("timeline is not deterministic")
+	}
+	for name, at := range map[string]*time.Time{
+		"resolve": one.EntryResolvedAt, "intake": one.EntryIntakeAt, "enroll": one.EnrollmentJoinedAt,
+		"filled": one.AnswerSheetFilledAt, "assessment": one.AssessmentCreatedAt, "outcome": one.EvaluatedAt, "report": one.ReportGeneratedAt,
+	} {
+		if at == nil || at.In(location).Format("2006-01-02") != "2025-01-01" {
+			t.Fatalf("%s escaped business day: %v", name, at)
+		}
+	}
+}
+
+func TestHistoricalTaskTimelineStartsAtPlannedAtAndStaysOnBusinessDay(t *testing.T) {
+	location, _ := time.LoadLocation(historicalTimezone)
+	plannedAt := time.Date(2025, 1, 1, 23, 30, 0, 0, location)
+	timeline, err := BuildHistoricalTaskTimeline("batch", plannedAt, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if timeline.TaskOpenedAt == nil || !timeline.TaskOpenedAt.Equal(plannedAt) {
+		t.Fatalf("task_opened_at=%v, want %s", timeline.TaskOpenedAt, plannedAt)
+	}
+	for name, at := range map[string]*time.Time{"filled": timeline.AnswerSheetFilledAt, "assessment": timeline.AssessmentCreatedAt, "outcome": timeline.EvaluatedAt, "report": timeline.ReportGeneratedAt} {
+		if at == nil || at.In(location).Format("2006-01-02") != "2025-01-01" {
+			t.Fatalf("%s escaped business day: %v", name, at)
+		}
+	}
+	if timeline.AnswerSheetFilledAt.Before(*timeline.TaskOpenedAt) || timeline.TaskCompletedAt.Before(*timeline.AssessmentSubmittedAt) || timeline.EvaluatedAt.Before(*timeline.TaskCompletedAt) || timeline.ReportGeneratedAt.Before(*timeline.EvaluatedAt) {
+		t.Fatalf("task timeline ordering is invalid: %+v", timeline)
+	}
+}
+
+func TestHistoricalIdentityNamespaceIsStableAndBatchSpecific(t *testing.T) {
+	location, _ := time.LoadLocation(historicalTimezone)
+	profile := dailySimulationProfile{Index: 7, RunDate: time.Date(2025, 1, 1, 0, 0, 0, 0, location), GuardianPhone: "+8619901010007", GuardianEmail: "guardian@example.com"}
+	first := namespaceHistoricalProfile("batch-a", profile)
+	second := namespaceHistoricalProfile("batch-a", profile)
+	other := namespaceHistoricalProfile("batch-b", profile)
+	if first != second {
+		t.Fatalf("historical identity is not stable: %+v %+v", first, second)
+	}
+	if first.GuardianPhone == other.GuardianPhone || first.GuardianEmail == other.GuardianEmail {
+		t.Fatalf("historical batch namespace did not change identity: first=%+v other=%+v", first, other)
+	}
+}
+
+func TestHistoricalManifestMergesChildTerminalResourcesIntoParent(t *testing.T) {
+	parentID := "2025-01-01/7/submit_answer/MODEL"
+	childID := "2025-01-08/7/submit_answer/task-1"
+	manifest := HistoricalManifest{Scenarios: map[string]HistoricalScenarioManifest{
+		parentID: {ScenarioID: parentID, ChildScenarioIDs: []string{childID}},
+	}}
+	payload, err := json.Marshal(map[string]string{"generation_id": "gen-1", "run_id": "run-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergeHistoricalStageResources(&manifest, []HistoricalStageRecord{
+		{ScenarioID: childID, Stage: "answersheet_submit", ResourceID: "answer-1"},
+		{ScenarioID: childID, Stage: "outcome_committed", ResourceID: "outcome-1"},
+		{ScenarioID: childID, Stage: "report_generated", ResourceID: "report-1", PayloadJSON: payload},
+	})
+	got := manifest.Scenarios[parentID]
+	if len(got.AnswerSheetIDs) != 1 || got.AnswerSheetIDs[0] != "answer-1" ||
+		len(got.OutcomeIDs) != 1 || got.OutcomeIDs[0] != "outcome-1" ||
+		len(got.ReportIDs) != 1 || got.ReportIDs[0] != "report-1" ||
+		got.GenerationID != "gen-1" || got.ReportRunID != "run-1" {
+		t.Fatalf("child resources were not merged into parent: %+v", got)
+	}
+}
+
+func TestHistoricalExpectedStagesSeparateParentAndPlanTaskChild(t *testing.T) {
+	manifest := HistoricalManifest{Targets: map[string]HistoricalTargetManifest{
+		"scale/MODEL": {RequiresAssessment: true},
+	}}
+	parent := HistoricalScenarioManifest{
+		Journey: string(dailySimulationJourneySubmitAnswer), TargetKey: "scale/MODEL",
+		ChildScenarioIDs: []string{"child"},
+	}
+	if got := expectedServerStages(manifest, parent); !equalStrings(got, []string{"entry_resolve", "entry_intake", "plan_enrollment"}) {
+		t.Fatalf("parent expected stages=%v", got)
+	}
+	if got := expectedChildServerStages(manifest, parent); !equalStrings(got, []string{
+		"task_open", "task_complete", "answersheet_submit", "assessment_created", "assessment_submitted", "outcome_committed", "report_generated",
+	}) {
+		t.Fatalf("child expected stages=%v", got)
+	}
+}
+
+func TestHistoricalAdditionalScenarioRequiresAnswerTerminalWithoutPlanTask(t *testing.T) {
+	manifest := HistoricalManifest{Targets: map[string]HistoricalTargetManifest{
+		"scale/EXTRA": {RequiresAssessment: true},
+	}}
+	additional := HistoricalAdditionalScenarioManifest{ScenarioID: "child", TargetKey: "scale/EXTRA"}
+	if got := expectedAdditionalServerStages(manifest, additional); !equalStrings(got, []string{
+		"answersheet_submit", "assessment_created", "assessment_submitted", "outcome_committed", "report_generated",
+	}) {
+		t.Fatalf("additional expected stages=%v", got)
+	}
+}
+
+func TestHistoricalLocalStageLedgerPreservesCreationOwnershipAcrossRetry(t *testing.T) {
+	stateDir := t.TempDir()
+	day := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	profile := dailySimulationProfile{RunDate: day, Index: 7}
+	target := &dailySimulationResolvedTarget{TargetType: "scale", TargetCode: "MODEL", TargetVersion: "1", QuestionnaireCode: "Q", QuestionnaireVersion: "1"}
+	scenario := dailySimulationScenario{Entry: &AssessmentEntryResponse{ID: "entry-1"}, Target: target}
+	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "2025-01-01/7/create_testee/MODEL", OrgID: 9, Version: historicalseed.Version1}
+	manifest := HistoricalManifest{BatchID: "batch"}
+	created := dailySimulationOutcome{JourneyTarget: string(dailySimulationJourneyCreateTestee), GuardianUserID: "user-1", IAMProfileID: "profile-1", TesteeID: "testee-1", UserCreated: true, TesteeCreated: true}
+	if err := recordHistoricalLocalStage(stateDir, &manifest, profile, scenario, historical, dailySimulationJourneyStageTesteeProfile, created, target); err != nil {
+		t.Fatal(err)
+	}
+	retry := created
+	retry.UserCreated, retry.TesteeCreated = false, false
+	if err := recordHistoricalLocalStage(stateDir, &manifest, profile, scenario, historical, dailySimulationJourneyStageTesteeProfile, retry, target); err != nil {
+		t.Fatal(err)
+	}
+	records, err := loadHistoricalLocalScenarioStages(stateDir, "batch", day, historical.ScenarioID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := records[string(dailySimulationJourneyStageTesteeProfile)]
+	if !record.TesteeCreated || record.TesteeID != "testee-1" {
+		t.Fatalf("creation ownership was lost on retry: %+v", record)
+	}
+	info, err := os.Stat(historicalLocalScenarioStagePath(stateDir, "batch", day, historical.ScenarioID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("stage ledger mode=%o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestHistoricalResumeRestoresTesteeWithoutCreatedAtLookup(t *testing.T) {
+	stateDir := t.TempDir()
+	day := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	profile := dailySimulationProfile{RunDate: day, Index: 7, ChildName: "child", ChildGender: 2, ChildDOB: "2018-02-03"}
+	target := &dailySimulationResolvedTarget{TargetType: "scale", TargetCode: "MODEL", TargetVersion: "1", QuestionnaireCode: "Q", QuestionnaireVersion: "1"}
+	scenario := dailySimulationScenario{Entry: &AssessmentEntryResponse{ID: "entry-1"}, Target: target}
+	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "2025-01-01/7/submit_answer/MODEL", OrgID: 9, Version: historicalseed.Version1}
+	manifest := HistoricalManifest{BatchID: "batch"}
+	outcome := dailySimulationOutcome{JourneyTarget: string(dailySimulationJourneySubmitAnswer), TesteeID: "testee-1", IAMProfileID: "profile-1", TesteeCreated: true}
+	if err := recordHistoricalLocalStage(stateDir, &manifest, profile, scenario, historical, dailySimulationJourneyStageTesteeProfile, outcome, target); err != nil {
+		t.Fatal(err)
+	}
+
+	restored, err := restoreHistoricalExistingTestee(stateDir, "batch", profile, historical.ScenarioID, DailySimulationConfig{TesteeSource: "seeddata", TesteeTags: []string{"historical"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored == nil || restored.ID != "testee-1" || restored.ProfileID == nil || *restored.ProfileID != "profile-1" || restored.CreatedAt != (time.Time{}) {
+		t.Fatalf("restored testee = %+v", restored)
+	}
+}
+
+func TestHistoricalLocalStageLedgerRejectsFrozenPayloadDrift(t *testing.T) {
+	stateDir := t.TempDir()
+	day := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	profile := dailySimulationProfile{RunDate: day, Index: 7}
+	scenario := dailySimulationScenario{Entry: &AssessmentEntryResponse{ID: "entry-1"}}
+	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "scenario", OrgID: 9, Version: historicalseed.Version1}
+	manifest := HistoricalManifest{BatchID: "batch"}
+	target := &dailySimulationResolvedTarget{TargetType: "scale", TargetCode: "MODEL", TargetVersion: "1", QuestionnaireCode: "Q", QuestionnaireVersion: "1"}
+	outcome := dailySimulationOutcome{JourneyTarget: string(dailySimulationJourneySubmitAnswer)}
+	if err := recordHistoricalLocalStage(stateDir, &manifest, profile, scenario, historical, dailySimulationJourneyStageAnswerSheet, outcome, target); err != nil {
+		t.Fatal(err)
+	}
+	drifted := *target
+	drifted.QuestionnaireVersion = "2"
+	if err := recordHistoricalLocalStage(stateDir, &manifest, profile, scenario, historical, dailySimulationJourneyStageAnswerSheet, outcome, &drifted); err == nil {
+		t.Fatal("payload drift must conflict")
+	}
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}

@@ -18,6 +18,7 @@ import (
 
 	"github.com/FangcunMount/component-base/pkg/log"
 	authsignup "github.com/FangcunMount/iam/v2/pkg/sdk/auth/signup"
+	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 )
 
@@ -43,6 +44,7 @@ type APIClient struct {
 
 	publishedModelCache *versionedCache[PublishedAssessmentModelResponse]
 	questionnaireCache  *versionedCache[QuestionnaireDetailResponse]
+	historicalSecret    []byte
 }
 
 type TokenProvider struct {
@@ -85,6 +87,20 @@ func (c *APIClient) BaseURL() string {
 		return ""
 	}
 	return c.baseURL
+}
+
+func (c *APIClient) SetHistoricalSecret(secret []byte) {
+	if c == nil {
+		return
+	}
+	c.historicalSecret = append(c.historicalSecret[:0], secret...)
+}
+
+func (c *APIClient) HistoricalSecret() []byte {
+	if c == nil {
+		return nil
+	}
+	return append([]byte(nil), c.historicalSecret...)
 }
 
 // SetHTTPTimeout updates the underlying HTTP client timeout.
@@ -465,8 +481,32 @@ type PlanResponse struct {
 }
 
 type EnrollmentResponse struct {
-	PlanID string         `json:"plan_id"`
-	Tasks  []TaskResponse `json:"tasks"`
+	PlanID       string         `json:"plan_id"`
+	EnrollmentID string         `json:"enrollment_id"`
+	Round        uint32         `json:"round"`
+	Idempotent   bool           `json:"idempotent"`
+	Tasks        []TaskResponse `json:"tasks"`
+}
+
+type HistoricalStageRecord struct {
+	ID           uint64          `json:"id"`
+	OrgID        uint64          `json:"org_id"`
+	BatchID      string          `json:"batch_id"`
+	ScenarioID   string          `json:"scenario_id"`
+	Stage        string          `json:"stage"`
+	PayloadHash  string          `json:"payload_hash"`
+	Status       string          `json:"status"`
+	BusinessAt   time.Time       `json:"business_at"`
+	ResourceType string          `json:"resource_type"`
+	ResourceID   string          `json:"resource_id"`
+	PayloadJSON  json.RawMessage `json:"payload_json,omitempty"`
+}
+
+type HistoricalStageBatchResponse struct {
+	BatchID string                  `json:"batch_id"`
+	Offset  int                     `json:"offset"`
+	Limit   int                     `json:"limit"`
+	Stages  []HistoricalStageRecord `json:"stages"`
 }
 
 // TaskResponse 计划任务响应。
@@ -592,22 +632,24 @@ type ApiserverTesteeListResponse struct {
 
 // TesteeResponse 受试者响应（collection-server）
 type TesteeResponse struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	IAMUserID    string    `json:"iam_user_id,omitempty"`
-	IAMProfileID string    `json:"iam_profile_id,omitempty"`
-	CreatedAt    time.Time `json:"created_at,omitempty"`
-	UpdatedAt    time.Time `json:"updated_at,omitempty"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	IAMUserID        string    `json:"iam_user_id,omitempty"`
+	IAMProfileID     string    `json:"iam_profile_id,omitempty"`
+	IAMProfileLinkID string    `json:"iam_profile_link_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at,omitempty"`
+	UpdatedAt        time.Time `json:"updated_at,omitempty"`
 }
 
 func (r *TesteeResponse) UnmarshalJSON(data []byte) error {
 	type alias struct {
-		ID           string `json:"id"`
-		Name         string `json:"name"`
-		IAMUserID    string `json:"iam_user_id,omitempty"`
-		IAMProfileID string `json:"iam_profile_id,omitempty"`
-		CreatedAt    string `json:"created_at,omitempty"`
-		UpdatedAt    string `json:"updated_at,omitempty"`
+		ID               string `json:"id"`
+		Name             string `json:"name"`
+		IAMUserID        string `json:"iam_user_id,omitempty"`
+		IAMProfileID     string `json:"iam_profile_id,omitempty"`
+		IAMProfileLinkID string `json:"iam_profile_link_id,omitempty"`
+		CreatedAt        string `json:"created_at,omitempty"`
+		UpdatedAt        string `json:"updated_at,omitempty"`
 	}
 
 	var raw alias
@@ -635,6 +677,7 @@ func (r *TesteeResponse) UnmarshalJSON(data []byte) error {
 	r.Name = raw.Name
 	r.IAMUserID = strings.TrimSpace(raw.IAMUserID)
 	r.IAMProfileID = strings.TrimSpace(raw.IAMProfileID)
+	r.IAMProfileLinkID = strings.TrimSpace(raw.IAMProfileLinkID)
 	r.CreatedAt = createdAt
 	r.UpdatedAt = updatedAt
 	return nil
@@ -894,6 +937,15 @@ type AssessmentReadinessResponse struct {
 	NextPollAfterMs int    `json:"next_poll_after_ms,omitempty"`
 }
 
+type AssessmentReportStatusResponse struct {
+	Status          string `json:"status"`
+	Stage           string `json:"stage,omitempty"`
+	Message         string `json:"message,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	NextPollAfterMs int    `json:"next_poll_after_ms,omitempty"`
+	UpdatedAt       int64  `json:"updated_at"`
+}
+
 // QuestionnaireDetailResponse 问卷详情响应（collection-server）
 type QuestionnaireDetailResponse struct {
 	Code      string             `json:"code"`
@@ -928,26 +980,33 @@ type ValidationRuleResponse struct {
 
 // SubmitAnswerSheetRequest 提交答卷请求（collection-server）
 type SubmitAnswerSheetRequest struct {
-	QuestionnaireCode    string   `json:"questionnaire_code"`
-	QuestionnaireVersion string   `json:"questionnaire_version"`
-	IdempotencyKey       string   `json:"idempotency_key"`
-	Title                string   `json:"title"`
-	TesteeID             uint64   `json:"testee_id"`
-	TaskID               string   `json:"task_id,omitempty"`
-	Answers              []Answer `json:"answers"`
+	QuestionnaireCode    string     `json:"questionnaire_code"`
+	QuestionnaireVersion string     `json:"questionnaire_version"`
+	IdempotencyKey       string     `json:"idempotency_key"`
+	Title                string     `json:"title"`
+	TesteeID             uint64     `json:"testee_id"`
+	TaskID               string     `json:"task_id,omitempty"`
+	OriginRef            *OriginRef `json:"origin_ref,omitempty"`
+	Answers              []Answer   `json:"answers"`
+}
+
+type OriginRef struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
 }
 
 // AdminSubmitAnswerSheetRequest 管理员提交答卷请求（apiserver）
 type AdminSubmitAnswerSheetRequest struct {
-	QuestionnaireCode    string   `json:"questionnaire_code"`
-	QuestionnaireVersion string   `json:"questionnaire_version"`
-	IdempotencyKey       string   `json:"idempotency_key,omitempty"`
-	Title                string   `json:"title"`
-	TesteeID             uint64   `json:"testee_id"`
-	TaskID               string   `json:"task_id,omitempty"`
-	WriterID             uint64   `json:"writer_id,omitempty"`
-	FillerID             uint64   `json:"filler_id,omitempty"`
-	Answers              []Answer `json:"answers"`
+	QuestionnaireCode    string     `json:"questionnaire_code"`
+	QuestionnaireVersion string     `json:"questionnaire_version"`
+	IdempotencyKey       string     `json:"idempotency_key,omitempty"`
+	Title                string     `json:"title"`
+	TesteeID             uint64     `json:"testee_id"`
+	TaskID               string     `json:"task_id,omitempty"`
+	OriginRef            *OriginRef `json:"origin_ref,omitempty"`
+	WriterID             uint64     `json:"writer_id,omitempty"`
+	FillerID             uint64     `json:"filler_id,omitempty"`
+	Answers              []Answer   `json:"answers"`
 }
 
 // Answer 提交答案
@@ -1042,12 +1101,14 @@ func (c *APIClient) doRequestWithHeadersRetryTimeoutAndLimit(
 		}
 
 		var reqBody io.Reader
+		var rawBody []byte
 		if body != nil {
 			jsonData, err := json.Marshal(body)
 			if err != nil {
 				return nil, fmt.Errorf("marshal request body: %w", err)
 			}
-			reqBody = bytes.NewBuffer(jsonData)
+			rawBody = jsonData
+			reqBody = bytes.NewBuffer(rawBody)
 		}
 
 		req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
@@ -1065,6 +1126,15 @@ func (c *APIClient) doRequestWithHeadersRetryTimeoutAndLimit(
 				continue
 			}
 			req.Header.Set(key, value)
+		}
+		if historical, ok := historicalseed.FromContext(ctx); ok && len(c.historicalSecret) > 0 {
+			signedHeaders, err := historicalseed.HeadersFor(method, req.URL.RequestURI(), rawBody, historical, time.Now(), c.historicalSecret)
+			if err != nil {
+				return nil, err
+			}
+			for key, value := range signedHeaders {
+				req.Header.Set(key, value)
+			}
 		}
 
 		resp, err := httpClient.Do(req)

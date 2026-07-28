@@ -26,6 +26,7 @@ type collectionSubmitAnswerSheetRequest struct {
 	Title                string                   `json:"title"`
 	TesteeID             uint64                   `json:"testee_id"`
 	TaskID               string                   `json:"task_id,omitempty"`
+	OriginRef            *OriginRef               `json:"origin_ref,omitempty"`
 	Answers              []collectionSubmitAnswer `json:"answers"`
 }
 
@@ -86,6 +87,26 @@ func (c *APIClient) GetAssessmentReadiness(ctx context.Context, answerSheetID st
 	return &readiness, nil
 }
 
+func (c *APIClient) WaitAssessmentReport(ctx context.Context, assessmentID string, testeeID uint64, timeoutSeconds int) (*AssessmentReportStatusResponse, error) {
+	assessmentID = strings.TrimSpace(assessmentID)
+	if assessmentID == "" || testeeID == 0 {
+		return nil, fmt.Errorf("assessment_id and testee_id are required")
+	}
+	if timeoutSeconds < 1 || timeoutSeconds > 25 {
+		timeoutSeconds = 20
+	}
+	path := fmt.Sprintf("/api/v1/assessments/%s/wait-report?testee_id=%d&timeout=%d", urlQueryEscape(assessmentID), testeeID, timeoutSeconds)
+	resp, err := c.doRequestWithRetryTimeoutAndLimit(ctx, http.MethodGet, path, nil, true, time.Duration(timeoutSeconds+5)*time.Second, 0)
+	if err != nil {
+		return nil, err
+	}
+	var result AssessmentReportStatusResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode assessment report status response: %w", err)
+	}
+	return &result, nil
+}
+
 func toCollectionSubmitAnswerSheetRequest(req SubmitAnswerSheetRequest) (collectionSubmitAnswerSheetRequest, error) {
 	req.IdempotencyKey = strings.TrimSpace(req.IdempotencyKey)
 	if !safeSubmissionIdempotencyKey.MatchString(req.IdempotencyKey) {
@@ -112,6 +133,7 @@ func toCollectionSubmitAnswerSheetRequest(req SubmitAnswerSheetRequest) (collect
 		Title:                req.Title,
 		TesteeID:             req.TesteeID,
 		TaskID:               req.TaskID,
+		OriginRef:            req.OriginRef,
 		Answers:              answers,
 	}, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/FangcunMount/component-base/pkg/log"
 	sdkerrors "github.com/FangcunMount/iam/v2/pkg/sdk/errors"
+	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
 	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 )
 
@@ -82,11 +84,12 @@ func TestShouldStopDailySimulationJourneyAfter(t *testing.T) {
 		want   bool
 	}{
 		{name: "register stops after guardian", target: dailySimulationJourneyRegisterOnly, stage: dailySimulationJourneyStageGuardianAccount, want: true},
-		{name: "register does not stop after entry", target: dailySimulationJourneyRegisterOnly, stage: dailySimulationJourneyStageAssessmentEntry, want: false},
-		{name: "testee stops after intake", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStageAssessmentEntry, want: true},
-		{name: "testee does not stop after testee profile", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStageTesteeProfile, want: false},
+		{name: "register does not stop after entry", target: dailySimulationJourneyRegisterOnly, stage: dailySimulationJourneyStageEntryResolve, want: false},
+		{name: "testee stops after testee profile", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStageTesteeProfile, want: true},
+		{name: "testee does not stop after intake", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStageEntryIntake, want: false},
 		{name: "testee does not stop after plan enrollment", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStagePlanEnrollment, want: false},
-		{name: "resolve stops after entry", target: dailySimulationJourneyResolveEntry, stage: dailySimulationJourneyStageAssessmentEntry, want: true},
+		{name: "resolve stops after entry resolve", target: dailySimulationJourneyResolveEntry, stage: dailySimulationJourneyStageEntryResolve, want: true},
+		{name: "resolve does not stop after intake", target: dailySimulationJourneyResolveEntry, stage: dailySimulationJourneyStageEntryIntake, want: false},
 		{name: "submit stops after submit", target: dailySimulationJourneySubmitAnswer, stage: dailySimulationJourneyStageAnswerSheet, want: true},
 	}
 
@@ -124,6 +127,76 @@ func TestDailySimulationTesteeID(t *testing.T) {
 	}
 	if got := dailySimulationTesteeID(&TesteeResponse{ID: " 615 "}); got != "615" {
 		t.Fatalf("expected trimmed testee id, got %q", got)
+	}
+}
+
+func TestHistoricalIAMMetadataIsExplicitAndOrdinaryRequestIsUnchanged(t *testing.T) {
+	base := EnsureIAMMockConsumerRequest{Name: "Guardian"}
+	ordinary := withHistoricalIAMMetadata(context.Background(), base, "Guardian")
+	if ordinary.Profile != nil || ordinary.Meta != nil {
+		t.Fatalf("ordinary mock consumer request changed: %+v", ordinary)
+	}
+	historicalCtx := historicalseed.WithContext(context.Background(), historicalseed.Context{
+		BatchID: "batch", ScenarioID: "2025-01-01/1/register_only/model", OrgID: 1, Version: historicalseed.Version1,
+	})
+	got := withHistoricalIAMMetadata(historicalCtx, base, "Guardian")
+	if got.Profile["nickname"] != "Guardian" || got.Meta["source"] != "seeddata_historical" || got.Meta["seed_batch_id"] != "batch" || got.Meta["seed_scenario_id"] == "" {
+		t.Fatalf("historical IAM metadata mismatch: %+v", got)
+	}
+}
+
+func TestHistoricalPlanCompletesEveryDeterministicallySelectedTaskBeforeCutoff(t *testing.T) {
+	location, _ := time.LoadLocation(historicalTimezone)
+	runDate := time.Date(2025, 1, 1, 0, 0, 0, 0, location)
+	tasks := make([]TaskResponse, 0, 101)
+	wantSelected := map[string]struct{}{}
+	for index := 0; index < 100; index++ {
+		id := fmt.Sprintf("%d", 1000+index)
+		tasks = append(tasks, TaskResponse{ID: id, PlannedAt: "2025-01-01T09:00:00+08:00"})
+		if deterministicHistoricalInt("batch", runDate, 7, "task-complete:"+id, 100) < 60 {
+			wantSelected[id] = struct{}{}
+		}
+	}
+	tasks = append(tasks, TaskResponse{ID: "9999", PlannedAt: "2025-01-04T09:00:00+08:00"})
+	opened := map[string]struct{}{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/plans/enroll":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": EnrollmentResponse{PlanID: "77", EnrollmentID: "88", Tasks: tasks}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/plans/77":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": PlanResponse{ID: "77", ScaleCode: "MODEL"}})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/plans/tasks/") && strings.HasSuffix(r.URL.Path, "/open"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/plans/tasks/"), "/open")
+			opened[id] = struct{}{}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": TaskResponse{ID: id}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "token", log.New(log.NewOptions()))
+	state := &dailySimulationJourneyState{
+		deps: &dependencies{APIClient: client}, planID: "77", testee: &TesteeResponse{ID: "42"},
+		profile: dailySimulationProfile{RunDate: runDate, Index: 7},
+		target:  &dailySimulationResolvedTarget{TargetCode: "MODEL"},
+	}
+	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "parent", OrgID: 1, Version: historicalseed.Version1}
+	ctx := withHistoricalCutoff(historicalseed.WithContext(context.Background(), historical), time.Date(2025, 1, 3, 0, 0, 0, 0, location))
+	if _, err := dailySimulationStageEnrollPlan(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	if len(opened) != len(wantSelected) || len(state.selectedTasks) != len(wantSelected) {
+		t.Fatalf("opened=%d selected=%d want=%d", len(opened), len(state.selectedTasks), len(wantSelected))
+	}
+	for id := range wantSelected {
+		if _, ok := opened[id]; !ok {
+			t.Fatalf("selected task %s was not opened", id)
+		}
+	}
+	if _, ok := opened["9999"]; ok {
+		t.Fatal("task after the inclusive backfill cutoff was opened")
 	}
 }
 

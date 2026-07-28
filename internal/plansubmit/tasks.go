@@ -407,7 +407,11 @@ func buildPlanTaskSubmitRequest(
 		Title:                detail.Title,
 		TesteeID:             testeeIDUint,
 		TaskID:               task.ID,
-		Answers:              answers,
+		OriginRef: &OriginRef{
+			Type: "plan_task",
+			ID:   task.ID,
+		},
+		Answers: answers,
 	}, nil
 }
 
