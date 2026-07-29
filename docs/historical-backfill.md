@@ -25,16 +25,21 @@ export IAM_MOCK_CONSUMER_SHARED_SECRET='<secret>'
 export QS_HISTORICAL_CONTEXT_SECRET='<secret>'
 ```
 
-历史模式默认使用父场景 12、submission 6、report poller 4、待报告队列 24、
-stage reader 6、IAM 1 路并发。IAM 限制同时覆盖
+历史模式默认使用父场景 12、submission 6、downstream reconciler 4、内存调度队列 24、
+持久 pending 安全高水位 4096、stage reader 6、IAM 1 路并发。IAM 限制同时覆盖
 首次创建和历史 guardian 会话恢复，避免恢复批次绕过限流形成登录洪峰。可以在
 `historicalBackfill` 配置块设置，也可以用 `--parent-workers`、`--submission-workers`、
-`--report-workers`、`--report-queue-capacity`、`--stage-read-workers`、`--iam-workers` 临时覆盖。
+`--report-workers`、`--report-queue-capacity`、`--pending-high-watermark`、
+`--stage-read-workers`、`--iam-workers` 临时覆盖。
 普通 daemon 不读取这些参数。
 
-submission worker 只推进到 Assessment ready；需要 Report 的任务随后进入有界队列，由
-report poller 完成 `wait-report`、submission ledger ready 标记和历史 stage 校验。队列达到
-`reportQueueCapacity` 时 submission worker 会阻塞，不会无上限积累待报告任务。
+submission worker 只负责把答卷提交到 accepted，并在同一个 Bbolt 状态库中持久化
+`AnswerSheetID` 和 `submitted` downstream 记录，随后立即成功返回。后台 reconciler 从 Bbolt
+扫描 `submitted/downstream_pending`，以有限 worker 异步解析 Assessment、Outcome 和 Report，
+全部历史 stage（包含 `report_generated`）齐全后改为 `verified`。内存队列仅是调度窗口：达到
+`reportQueueCapacity` 时暂停新的 downstream 调度，不阻塞 submission worker，也不会丢失 Bbolt
+中的 pending。只有 durable pending 数达到 `pendingHighWatermark` 时，才停止新的远端提交并让
+批次以明确的高水位错误退出；修复下游吞吐后使用同一批次 `--resume`。
 
 先用 3 天范围执行本地或 staging 验证；成功后使用正式批次 ID：
 
@@ -47,7 +52,10 @@ tmp/bin/seeddata historical-backfill \
   --batch-id hist-20250101-20260727-v2
 ```
 
-命令仅在当天所有场景达到终态后写 checkpoint。任何终态失败会停止在当天，修复原因后使用
+checkpoint 分为两个游标：当天全部提交任务已完成后推进 `submitted_through`，最终全批次
+downstream drain 和严格 stage 验收通过后推进 `verified_through`。因此提交可以持续向前，
+报告处理不会占用父场景或 submission worker；命令退出前仍会统一等待并验收所有 pending。
+任何提交失败、高水位熔断或最终验收失败都会保留两个游标和 Bbolt pending，修复原因后使用
 同一批次、相同配置和相同版本恢复：
 
 ```bash
@@ -77,9 +85,9 @@ entry、Plan 或非法 journey identity 等其他冻结身份冲突仍会立即�
 `scenario_id` 中的用户 index 是 `Profile.Index`，范围为 `1..当日人数`；runner 仅在内存中将其
 映射为 `0..当日人数-1` 的 worker job index，不会改写持久身份。
 
-运行中每 15 秒输出当前自然日、父场景进度、已发现/完成 submission、Report 数、吞吐、
-submission/report in-flight、待报告队列深度、失败数和 ETA。自然日仍然串行，只有日终完整
-校验通过才推进 checkpoint。
+运行中每 15 秒输出当前自然日、父场景进度、已发现/完成 submission、吞吐、
+submission in-flight、失败数和 ETA。自然日仍然串行推进 `submitted_through`；
+`verified_through` 只代表已经完成严格 stage 验收的连续范围，不能用提交游标替代最终完成判定。
 
 ## ServerA 内网一次性容器
 

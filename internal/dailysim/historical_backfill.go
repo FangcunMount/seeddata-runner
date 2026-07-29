@@ -111,20 +111,21 @@ func recordHistoricalPlanTaskDiscovery(ctx context.Context, historical historica
 }
 
 type HistoricalBackfillOptions struct {
-	From                string
-	To                  string
-	BatchID             string
-	Resume              bool
-	StateDir            string
-	CountMin            int
-	CountMax            int
-	Workers             int
-	SubmissionWorkers   int
-	ReportWorkers       int
-	ReportQueueCapacity int
-	StageReadWorkers    int
-	IAMWorkers          int
-	ProgressInterval    string
+	From                 string
+	To                   string
+	BatchID              string
+	Resume               bool
+	StateDir             string
+	CountMin             int
+	CountMax             int
+	Workers              int
+	SubmissionWorkers    int
+	ReportWorkers        int
+	ReportQueueCapacity  int
+	PendingHighWatermark int
+	StageReadWorkers     int
+	IAMWorkers           int
+	ProgressInterval     string
 }
 
 type HistoricalTargetManifest struct {
@@ -241,17 +242,39 @@ func validateHistoricalManifestVersion(manifest HistoricalManifest) error {
 }
 
 type HistoricalCheckpoint struct {
-	Version          int       `json:"version"`
-	BatchID          string    `json:"batch_id"`
-	From             string    `json:"from"`
-	To               string    `json:"to"`
+	Version          int    `json:"version"`
+	BatchID          string `json:"batch_id"`
+	From             string `json:"from"`
+	To               string `json:"to"`
+	SubmittedThrough string `json:"submitted_through,omitempty"`
+	VerifiedThrough  string `json:"verified_through,omitempty"`
+	// CompletedThrough is retained as a read-compatible alias for legacy tools.
+	// New code advances it together with VerifiedThrough only.
 	CompletedThrough string    `json:"completed_through,omitempty"`
 	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+func normalizeHistoricalCheckpoint(checkpoint HistoricalCheckpoint) HistoricalCheckpoint {
+	if checkpoint.Version < 2 {
+		checkpoint.Version = 2
+	}
+	if checkpoint.SubmittedThrough == "" && checkpoint.CompletedThrough != "" {
+		checkpoint.SubmittedThrough = checkpoint.CompletedThrough
+	}
+	if checkpoint.VerifiedThrough == "" && checkpoint.CompletedThrough != "" {
+		checkpoint.VerifiedThrough = checkpoint.CompletedThrough
+	}
+	if checkpoint.CompletedThrough == "" && checkpoint.VerifiedThrough != "" {
+		checkpoint.CompletedThrough = checkpoint.VerifiedThrough
+	}
+	return checkpoint
 }
 
 type HistoricalVerification struct {
 	BatchID           string   `json:"batch_id"`
 	Complete          bool     `json:"complete"`
+	SubmittedThrough  string   `json:"submitted_through,omitempty"`
+	VerifiedThrough   string   `json:"verified_through,omitempty"`
 	CompletedThrough  string   `json:"completed_through,omitempty"`
 	ExpectedDays      int      `json:"expected_days"`
 	RecordedDays      int      `json:"recorded_days"`
@@ -309,6 +332,9 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 	if opts.ReportQueueCapacity <= 0 {
 		opts.ReportQueueCapacity = historicalSubmissionQueueCapacity
 	}
+	if opts.PendingHighWatermark <= 0 {
+		opts.PendingHighWatermark = historicalDefaultPendingHighWatermark
+	}
 	if opts.StageReadWorkers <= 0 {
 		opts.StageReadWorkers = 1
 	}
@@ -347,7 +373,7 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 	if err := validateHistoricalManifestVersion(manifest); err != nil {
 		return err
 	}
-	if !opts.Resume && (strings.TrimSpace(checkpoint.CompletedThrough) != "" || len(manifest.Scenarios) > 0) {
+	if !opts.Resume && (strings.TrimSpace(checkpoint.SubmittedThrough) != "" || len(manifest.Scenarios) > 0) {
 		return fmt.Errorf("historical checkpoint already exists for batch %s; use --resume", opts.BatchID)
 	}
 	if checkpoint.BatchID != opts.BatchID || checkpoint.From != opts.From || checkpoint.To != opts.To {
@@ -371,12 +397,17 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 	runDeps := *deps
 	runDeps.DailySubmissionLedger = store
 	deps = &runDeps
+	reconciler := newHistoricalDownstreamReconciler(
+		ctx, deps.Logger, store, deps.APIClient, opts.BatchID,
+		opts.ReportWorkers, opts.ReportQueueCapacity, opts.PendingHighWatermark,
+	)
+	defer reconciler.Close()
 
 	start := from
-	if checkpoint.CompletedThrough != "" {
-		completed, err := time.ParseInLocation("2006-01-02", checkpoint.CompletedThrough, location)
+	if checkpoint.SubmittedThrough != "" {
+		completed, err := time.ParseInLocation("2006-01-02", checkpoint.SubmittedThrough, location)
 		if err != nil {
-			return fmt.Errorf("parse checkpoint completed_through: %w", err)
+			return fmt.Errorf("parse checkpoint submitted_through: %w", err)
 		}
 		start = completed.AddDate(0, 0, 1)
 	}
@@ -411,9 +442,10 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 			}
 		}
 		dayCtx = withHistoricalDaySnapshot(dayCtx, daySnapshot)
+		dayCtx = withHistoricalDownstreamReconciler(dayCtx, reconciler)
 		executor := newHistoricalSubmissionExecutor(
 			dayCtx, deps.Logger, dayKey, count,
-			opts.SubmissionWorkers, opts.ReportWorkers, opts.ReportQueueCapacity, progressInterval,
+			opts.SubmissionWorkers, progressInterval,
 		)
 		dayCtx = withHistoricalSubmissionExecutor(dayCtx, executor)
 		cfg.Workers = opts.Workers
@@ -516,15 +548,8 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 			},
 		})
 		executor.Close()
-		var dayVerifyErr error
 		if err == nil {
-			stages, stageErr := loadHistoricalSeedStagesForDayConcurrent(ctx, deps.APIClient, manifest, day, opts.StageReadWorkers)
-			if stageErr != nil {
-				dayVerifyErr = fmt.Errorf("load historical stages for %s: %w", dayKey, stageErr)
-			} else {
-				mergeHistoricalStageResources(&manifest, stages)
-				dayVerifyErr = verifyHistoricalDayWithStore(store, &manifest, day, count, stages)
-			}
+			manifest.DailyCounts[dayKey] = count
 		}
 		manifestMu.Lock()
 		manifest.UpdatedAt = time.Now().UTC()
@@ -536,12 +561,9 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 		if err != nil {
 			return fmt.Errorf("historical backfill stopped on %s: %w", dayKey, err)
 		}
-		if dayVerifyErr != nil {
-			return fmt.Errorf("historical backfill verification stopped on %s: %w", dayKey, dayVerifyErr)
-		}
-		checkpoint.CompletedThrough = dayKey
+		checkpoint.SubmittedThrough = dayKey
 		checkpoint.UpdatedAt = time.Now().UTC()
-		if err := store.putDayState(dayKey, "verified"); err != nil {
+		if err := store.putDayState(dayKey, "submitted"); err != nil {
 			return err
 		}
 		if err := store.putCheckpoint(checkpoint); err != nil {
@@ -551,6 +573,12 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 			return err
 		}
 	}
+	drainCtx, cancelDrain := context.WithTimeout(ctx, seedAssessmentPollTimeout)
+	drainErr := reconciler.Drain(drainCtx)
+	cancelDrain()
+	if drainErr != nil {
+		return drainErr
+	}
 	stages, err := loadHistoricalSeedStages(ctx, deps.APIClient, opts.BatchID)
 	if err != nil {
 		return fmt.Errorf("load terminal historical stage ledger: %w", err)
@@ -558,6 +586,18 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 	mergeHistoricalStageResources(&manifest, stages)
 	if err := verifyHistoricalBatchWithStore(store, &manifest, from, to, stages); err != nil {
 		return fmt.Errorf("terminal historical batch verification failed: %w", err)
+	}
+	checkpoint.SubmittedThrough = opts.To
+	checkpoint.VerifiedThrough = opts.To
+	checkpoint.CompletedThrough = opts.To
+	checkpoint.UpdatedAt = time.Now().UTC()
+	for day := from; !day.After(to); day = day.AddDate(0, 0, 1) {
+		if err := store.putDayState(day.Format("2006-01-02"), "verified"); err != nil {
+			return err
+		}
+	}
+	if err := store.putCheckpoint(checkpoint); err != nil {
+		return err
 	}
 	manifest.UpdatedAt = time.Now().UTC()
 	if err := persistHistoricalManifest(store, manifest); err != nil {
@@ -1698,8 +1738,11 @@ func mergeHistoricalStageResources(manifest *HistoricalManifest, stages []Histor
 			scenario.TesteeID = stage.ResourceID
 		case "plan_enrollment":
 			scenario.EnrollmentID = stage.ResourceID
-		case "task_open", "task_complete":
+		case "task_open":
 			scenario.TaskIDs = appendUniqueString(scenario.TaskIDs, stage.ResourceID)
+		case "task_complete":
+			scenario.TaskIDs = appendUniqueString(scenario.TaskIDs, stage.ResourceID)
+			scenario.CompletedTaskIDs = appendUniqueString(scenario.CompletedTaskIDs, stage.ResourceID)
 		case "answersheet_submit":
 			scenario.AnswerSheetID = stage.ResourceID
 			scenario.AnswerSheetIDs = appendUniqueString(scenario.AnswerSheetIDs, stage.ResourceID)
@@ -1795,15 +1838,11 @@ func expectedLocalStages(manifest HistoricalManifest, scenario HistoricalScenari
 }
 
 func expectedChildLocalStages(manifest HistoricalManifest, targetKey string) []string {
-	return append([]string{"task_open"}, append(expectedAnswerLocalStages(manifest, targetKey), "task_complete")...)
+	return append([]string{"task_open"}, expectedAnswerLocalStages(manifest, targetKey)...)
 }
 
-func expectedAnswerLocalStages(manifest HistoricalManifest, targetKey string) []string {
-	stages := []string{"answersheet_submit"}
-	if target, ok := manifest.Targets[targetKey]; ok && target.RequiresAssessment {
-		stages = append(stages, "assessment_created", "outcome_committed", "report_generated")
-	}
-	return stages
+func expectedAnswerLocalStages(_ HistoricalManifest, _ string) []string {
+	return []string{"answersheet_submit"}
 }
 
 func recordHistoricalLocalStage(
@@ -2425,6 +2464,7 @@ func VerifyHistoricalBackfill(stateDir, batchID string) (HistoricalVerification,
 			return HistoricalVerification{}, fmt.Errorf("historical manifest not found for batch %s", batchID)
 		}
 	}
+	checkpoint = normalizeHistoricalCheckpoint(checkpoint)
 	location, _ := time.LoadLocation(historicalTimezone)
 	from, to, err := parseHistoricalDateRange(manifest.From, manifest.To, location)
 	if err != nil {
@@ -2443,7 +2483,8 @@ func VerifyHistoricalBackfill(stateDir, batchID string) (HistoricalVerification,
 		}
 	}
 	return HistoricalVerification{
-		BatchID: batchID, Complete: checkpoint.CompletedThrough == manifest.To && len(manifest.DailyCounts) == expectedDays && len(manifest.Scenarios) == expectedScenarios && allTerminalsVerified,
+		BatchID: batchID, Complete: checkpoint.VerifiedThrough == manifest.To && len(manifest.DailyCounts) == expectedDays && len(manifest.Scenarios) == expectedScenarios && allTerminalsVerified,
+		SubmittedThrough: checkpoint.SubmittedThrough, VerifiedThrough: checkpoint.VerifiedThrough,
 		CompletedThrough: checkpoint.CompletedThrough, ExpectedDays: expectedDays, RecordedDays: len(manifest.DailyCounts),
 		ExpectedScenarios: expectedScenarios, RecordedScenarios: len(manifest.Scenarios),
 	}, nil

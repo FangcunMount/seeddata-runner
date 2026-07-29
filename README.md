@@ -225,8 +225,10 @@ sudo systemctl restart seeddata-runner
 其中 `dailySimulation` 和 `planSubmit` 是必填段；`api.baseUrl` 也是运行时硬要求。
 
 `historicalBackfill` 只影响有限日期区间的历史命令。默认生产配置使用父场景 12、
-submission 6、report poller 4、待报告队列 24、stage reader 6、IAM 1 路并发。submission worker
-在 Assessment ready 后会把终态等待交给独立 report poller，队列满时阻塞生产者形成背压；普通 daemon 继续使用
+submission 6、downstream reconciler 4、内存调度队列 24、durable pending 高水位 4096、
+stage reader 6、IAM 1 路并发。submission worker 在答卷 accepted 且 AnswerSheetID 写入 Bbolt 后
+立即返回；reconciler 独立扫描 Bbolt 并核验 Assessment、Outcome、Report。调度队列满不会阻塞提交，
+只有 durable pending 达到安全高水位才熔断新的远端提交；普通 daemon 继续使用
 `dailySimulation.workers`、原 IAM limiter 和 JSON submission ledger。完整初始化、恢复和
 ServerA 内网容器步骤见 [docs/historical-backfill.md](./docs/historical-backfill.md)。
 GitHub Actions 的 production 手动部署、审批、status/stop、同 revision 恢复和最终验收见

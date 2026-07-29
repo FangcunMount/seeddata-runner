@@ -1000,6 +1000,9 @@ func finishDailySimulationSubmissionJob(
 	if err := state.recordHistoricalLocalStage(submitCtx, dailySimulationJourneyStageAnswerSheet); err != nil {
 		return historicalSubmissionJobResult{Outcome: state.outcome}, err
 	}
+	if submission.Status == dailySimulationSubmissionAcceptedPending {
+		return historicalSubmissionJobResult{Outcome: state.outcome}, nil
+	}
 	if state.target.RequiresAssessment {
 		for _, stage := range []dailySimulationJourneyStage{"assessment_created", "outcome_committed", "report_generated"} {
 			if _, historical := historicalseed.FromContext(submitCtx); historical {

@@ -34,6 +34,7 @@ const (
 	DefaultHistoricalSubmissionWorkers        = 4
 	DefaultHistoricalReportWorkers            = 4
 	DefaultHistoricalReportQueueCapacity      = 24
+	DefaultHistoricalPendingHighWatermark     = 4096
 	DefaultHistoricalStageReadWorkers         = 16
 	DefaultHistoricalIAMWorkers               = 2
 	DefaultHistoricalProgressInterval         = "15s"
@@ -204,13 +205,14 @@ type PlanSubmitConfig struct {
 // HistoricalBackfillConfig owns settings that apply only to the finite
 // historical-backfill command, leaving ordinary daemon load unchanged.
 type HistoricalBackfillConfig struct {
-	ParentWorkers       int    `yaml:"parentWorkers"`
-	SubmissionWorkers   int    `yaml:"submissionWorkers"`
-	ReportWorkers       int    `yaml:"reportWorkers"`
-	ReportQueueCapacity int    `yaml:"reportQueueCapacity"`
-	StageReadWorkers    int    `yaml:"stageReadWorkers"`
-	IAMWorkers          int    `yaml:"iamWorkers"`
-	ProgressInterval    string `yaml:"progressInterval"`
+	ParentWorkers        int    `yaml:"parentWorkers"`
+	SubmissionWorkers    int    `yaml:"submissionWorkers"`
+	ReportWorkers        int    `yaml:"reportWorkers"`
+	ReportQueueCapacity  int    `yaml:"reportQueueCapacity"`
+	PendingHighWatermark int    `yaml:"pendingHighWatermark"`
+	StageReadWorkers     int    `yaml:"stageReadWorkers"`
+	IAMWorkers           int    `yaml:"iamWorkers"`
+	ProgressInterval     string `yaml:"progressInterval"`
 }
 
 func Load(filepath string) (*Config, error) {
@@ -310,6 +312,7 @@ func (cfg HistoricalBackfillConfig) IsZero() bool {
 		cfg.SubmissionWorkers == 0 &&
 		cfg.ReportWorkers == 0 &&
 		cfg.ReportQueueCapacity == 0 &&
+		cfg.PendingHighWatermark == 0 &&
 		cfg.StageReadWorkers == 0 &&
 		cfg.IAMWorkers == 0 &&
 		strings.TrimSpace(cfg.ProgressInterval) == ""
@@ -330,6 +333,9 @@ func (cfg *HistoricalBackfillConfig) Normalize() {
 	if cfg.ReportQueueCapacity <= 0 {
 		cfg.ReportQueueCapacity = DefaultHistoricalReportQueueCapacity
 	}
+	if cfg.PendingHighWatermark <= 0 {
+		cfg.PendingHighWatermark = DefaultHistoricalPendingHighWatermark
+	}
 }
 
 func (cfg HistoricalBackfillConfig) Validate() error {
@@ -347,6 +353,9 @@ func (cfg HistoricalBackfillConfig) Validate() error {
 	}
 	if cfg.ReportQueueCapacity <= 0 {
 		return fmt.Errorf("historicalBackfill.reportQueueCapacity must be positive")
+	}
+	if cfg.PendingHighWatermark <= 0 {
+		return fmt.Errorf("historicalBackfill.pendingHighWatermark must be positive")
 	}
 	if cfg.StageReadWorkers <= 0 {
 		return fmt.Errorf("historicalBackfill.stageReadWorkers must be positive")
@@ -379,7 +388,8 @@ func (cfg Config) ResolveHistoricalBackfill() HistoricalBackfillConfig {
 		return HistoricalBackfillConfig{
 			ParentWorkers: parentWorkers, SubmissionWorkers: DefaultHistoricalSubmissionWorkers,
 			ReportWorkers: DefaultHistoricalReportWorkers, ReportQueueCapacity: DefaultHistoricalReportQueueCapacity,
-			StageReadWorkers: 1, IAMWorkers: iamWorkers,
+			PendingHighWatermark: DefaultHistoricalPendingHighWatermark,
+			StageReadWorkers:     1, IAMWorkers: iamWorkers,
 			ProgressInterval: DefaultHistoricalProgressInterval,
 		}
 	}

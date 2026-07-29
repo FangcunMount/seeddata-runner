@@ -36,6 +36,7 @@ var (
 	historicalBucketDayStates   = []byte("day_states")
 	historicalBucketLocalStages = []byte("local_stages")
 	historicalBucketSubmissions = []byte("submissions")
+	historicalBucketDownstream  = []byte("downstream")
 )
 
 type historicalStateIdentity struct {
@@ -93,6 +94,10 @@ func openHistoricalStateStore(stateDir, batchID string, readOnly bool) (*histori
 		return nil, fmt.Errorf("open historical state %s: %w", path, err)
 	}
 	if !readOnly {
+		if err := db.Update(createHistoricalBuckets); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("prepare historical state buckets: %w", err)
+		}
 		if err := os.Chmod(path, 0o600); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("protect historical state %s: %w", path, err)
@@ -189,7 +194,7 @@ func createHistoricalBuckets(tx *bolt.Tx) error {
 		historicalBucketMeta, historicalBucketTargets, historicalBucketPlans,
 		historicalBucketScenarios, historicalBucketPlanTasks, historicalBucketDailyCounts,
 		historicalBucketDayStates,
-		historicalBucketLocalStages, historicalBucketSubmissions,
+		historicalBucketLocalStages, historicalBucketSubmissions, historicalBucketDownstream,
 	} {
 		if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 			return err
@@ -343,7 +348,7 @@ func (s *historicalStateStore) loadCheckpoint() (HistoricalCheckpoint, error) {
 		}
 		return nil
 	})
-	return checkpoint, err
+	return normalizeHistoricalCheckpoint(checkpoint), err
 }
 
 func (s *historicalStateStore) putManifestHeader(manifest HistoricalManifest) error {
@@ -394,7 +399,7 @@ func (s *historicalStateStore) putDailyCount(day string, count int) error {
 
 func (s *historicalStateStore) putDayState(day, status string) error {
 	day, status = strings.TrimSpace(day), strings.TrimSpace(status)
-	if day == "" || (status != "running" && status != "verified") {
+	if day == "" || (status != "running" && status != "submitted" && status != "verified") {
 		return fmt.Errorf("invalid historical day state %q=%q", day, status)
 	}
 	return s.update(func(tx *bolt.Tx) error {
@@ -403,6 +408,7 @@ func (s *historicalStateStore) putDayState(day, status string) error {
 }
 
 func (s *historicalStateStore) putCheckpoint(checkpoint HistoricalCheckpoint) error {
+	checkpoint = normalizeHistoricalCheckpoint(checkpoint)
 	return s.update(func(tx *bolt.Tx) error {
 		return putJSON(tx.Bucket(historicalBucketMeta), []byte("checkpoint"), checkpoint)
 	})
@@ -653,6 +659,14 @@ func (s *historicalStateStore) MarkAcceptedPending(logicalID string) (toolanswer
 		if strings.TrimSpace(record.AnswerSheetID) == "" {
 			return fmt.Errorf("cannot mark submission pending without answersheet_id")
 		}
+		// A resumed submit path may rediscover a durable downstream record after
+		// the reconciler has already completed it. Never move terminal submission
+		// state backwards merely because the parent scenario is being restored.
+		if record.Status == toolanswersheet.SubmissionStatusReady ||
+			record.Status == toolanswersheet.SubmissionStatusCompleted ||
+			record.Status == toolanswersheet.SubmissionStatusLegacy {
+			return nil
+		}
 		record.Status = toolanswersheet.SubmissionStatusAcceptedPending
 		return nil
 	})
@@ -858,8 +872,9 @@ func PrepareHistoricalBackfillState(opts HistoricalBackfillOptions, orgID int64,
 		manifest.DailyCounts = make(map[string]int)
 	}
 	if !checkpointExists {
-		checkpoint = HistoricalCheckpoint{Version: 1, BatchID: opts.BatchID, From: opts.From, To: opts.To}
+		checkpoint = HistoricalCheckpoint{Version: 2, BatchID: opts.BatchID, From: opts.From, To: opts.To}
 	}
+	checkpoint = normalizeHistoricalCheckpoint(checkpoint)
 	localStages, err := loadAllHistoricalLocalStages(opts.StateDir, opts.BatchID)
 	if err != nil {
 		return err

@@ -16,21 +16,22 @@ import (
 )
 
 type cliOptions struct {
-	command             string
-	configPath          string
-	verbose             bool
-	from                string
-	to                  string
-	batchID             string
-	resume              bool
-	stateDir            string
-	expectedDB          string
-	parentWorkers       int
-	submissionWorkers   int
-	reportWorkers       int
-	reportQueueCapacity int
-	stageReadWorkers    int
-	iamWorkers          int
+	command              string
+	configPath           string
+	verbose              bool
+	from                 string
+	to                   string
+	batchID              string
+	resume               bool
+	stateDir             string
+	expectedDB           string
+	parentWorkers        int
+	submissionWorkers    int
+	reportWorkers        int
+	reportQueueCapacity  int
+	pendingHighWatermark int
+	stageReadWorkers     int
+	iamWorkers           int
 }
 
 func main() {
@@ -90,6 +91,9 @@ func main() {
 		if opts.reportQueueCapacity > 0 {
 			historicalConfig.ReportQueueCapacity = opts.reportQueueCapacity
 		}
+		if opts.pendingHighWatermark > 0 {
+			historicalConfig.PendingHighWatermark = opts.pendingHighWatermark
+		}
 		if opts.stageReadWorkers > 0 {
 			historicalConfig.StageReadWorkers = opts.stageReadWorkers
 		}
@@ -101,7 +105,8 @@ func main() {
 			CountMin: cfg.DailySimulation.CountMin, CountMax: cfg.DailySimulation.CountMax,
 			Workers: historicalConfig.ParentWorkers, SubmissionWorkers: historicalConfig.SubmissionWorkers,
 			ReportWorkers: historicalConfig.ReportWorkers, ReportQueueCapacity: historicalConfig.ReportQueueCapacity,
-			StageReadWorkers: historicalConfig.StageReadWorkers, IAMWorkers: historicalConfig.IAMWorkers,
+			PendingHighWatermark: historicalConfig.PendingHighWatermark,
+			StageReadWorkers:     historicalConfig.StageReadWorkers, IAMWorkers: historicalConfig.IAMWorkers,
 			ProgressInterval: historicalConfig.ProgressInterval,
 		}
 		legacySubmissionPath := resolveHistoricalLegacySubmissionPath(cfg)
@@ -169,8 +174,9 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 		fs.BoolVar(&opts.resume, "resume", false, "resume from the first incomplete day")
 		fs.IntVar(&opts.parentWorkers, "parent-workers", 0, "override historical parent worker count")
 		fs.IntVar(&opts.submissionWorkers, "submission-workers", 0, "override historical submission worker count")
-		fs.IntVar(&opts.reportWorkers, "report-workers", 0, "override historical report polling worker count")
-		fs.IntVar(&opts.reportQueueCapacity, "report-queue-capacity", 0, "override historical pending report queue capacity")
+		fs.IntVar(&opts.reportWorkers, "report-workers", 0, "override historical downstream reconciliation worker count")
+		fs.IntVar(&opts.reportQueueCapacity, "report-queue-capacity", 0, "override historical in-memory reconciliation scheduler capacity")
+		fs.IntVar(&opts.pendingHighWatermark, "pending-high-watermark", 0, "stop new historical submissions when durable downstream pending reaches this limit")
 		fs.IntVar(&opts.stageReadWorkers, "stage-read-workers", 0, "override historical stage reader count")
 		fs.IntVar(&opts.iamWorkers, "iam-workers", 0, "override historical IAM worker count")
 	case "historical-verify", "historical-manifest", "historical-testee-time-repair-sql":
@@ -188,7 +194,8 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 	for name, value := range map[string]int{
 		"parent-workers": opts.parentWorkers, "submission-workers": opts.submissionWorkers,
 		"report-workers": opts.reportWorkers, "report-queue-capacity": opts.reportQueueCapacity,
-		"stage-read-workers": opts.stageReadWorkers, "iam-workers": opts.iamWorkers,
+		"pending-high-watermark": opts.pendingHighWatermark,
+		"stage-read-workers":     opts.stageReadWorkers, "iam-workers": opts.iamWorkers,
 	} {
 		if value < 0 {
 			return cliOptions{}, fmt.Errorf("--%s must be positive when set", name)

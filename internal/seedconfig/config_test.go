@@ -259,7 +259,7 @@ planSubmit:
 func TestResolveHistoricalBackfillUsesSafeDefaultsWhenBlockMissing(t *testing.T) {
 	cfg := Config{DailySimulation: DailySimulationConfig{Workers: 7}, IAM: IAMConfig{MockConsumer: IAMMockConsumerConfig{MaxConcurrent: 1}}}
 	resolved := cfg.ResolveHistoricalBackfill()
-	if resolved.ParentWorkers != 7 || resolved.SubmissionWorkers != 4 || resolved.ReportWorkers != 4 || resolved.ReportQueueCapacity != 24 || resolved.StageReadWorkers != 1 || resolved.IAMWorkers != 1 || resolved.ProgressInterval != "15s" {
+	if resolved.ParentWorkers != 7 || resolved.SubmissionWorkers != 4 || resolved.ReportWorkers != 4 || resolved.ReportQueueCapacity != 24 || resolved.PendingHighWatermark != 4096 || resolved.StageReadWorkers != 1 || resolved.IAMWorkers != 1 || resolved.ProgressInterval != "15s" {
 		t.Fatalf("unexpected legacy fallback: %+v", resolved)
 	}
 }
@@ -282,6 +282,7 @@ historicalBackfill:
   submissionWorkers: 24
   reportWorkers: 8
   reportQueueCapacity: 32
+  pendingHighWatermark: 2048
   stageReadWorkers: 16
   iamWorkers: 2
   progressInterval: "15s"
@@ -296,7 +297,7 @@ planSubmit:
 		t.Fatal(err)
 	}
 	resolved := cfg.ResolveHistoricalBackfill()
-	if resolved.ParentWorkers != 16 || resolved.SubmissionWorkers != 24 || resolved.ReportWorkers != 8 || resolved.ReportQueueCapacity != 32 || resolved.StageReadWorkers != 16 || resolved.IAMWorkers != 2 || resolved.ProgressInterval != "15s" {
+	if resolved.ParentWorkers != 16 || resolved.SubmissionWorkers != 24 || resolved.ReportWorkers != 8 || resolved.ReportQueueCapacity != 32 || resolved.PendingHighWatermark != 2048 || resolved.StageReadWorkers != 16 || resolved.IAMWorkers != 2 || resolved.ProgressInterval != "15s" {
 		t.Fatalf("unexpected historical config: %+v", resolved)
 	}
 }
@@ -331,7 +332,7 @@ planSubmit:
 		t.Fatal(err)
 	}
 	resolved := cfg.ResolveHistoricalBackfill()
-	if resolved.ReportWorkers != DefaultHistoricalReportWorkers || resolved.ReportQueueCapacity != DefaultHistoricalReportQueueCapacity {
+	if resolved.ReportWorkers != DefaultHistoricalReportWorkers || resolved.ReportQueueCapacity != DefaultHistoricalReportQueueCapacity || resolved.PendingHighWatermark != DefaultHistoricalPendingHighWatermark {
 		t.Fatalf("legacy historical block did not receive report defaults: %+v", resolved)
 	}
 }

@@ -179,6 +179,77 @@ func TestPrepareHistoricalDailySimulationAnswerSheetDefersReportPolling(t *testi
 	}
 }
 
+func TestHistoricalStateSubmissionReturnsAfterDurableAcceptance(t *testing.T) {
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/answersheets" {
+			t.Fatalf("historical submit hot path must not poll downstream: %s %s", r.Method, r.URL.String())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"code":0,"data":{"status":"accepted","answersheet_id":"answer-5"}}`))
+	}))
+	defer server.Close()
+
+	stateDir := t.TempDir()
+	opts := historicalStateTestOptions(stateDir, false)
+	if err := PrepareHistoricalBackfillState(opts, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openHistoricalStateStore(stateDir, opts.BatchID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	logger := log.New(log.NewOptions())
+	client := NewAPIClient(server.URL, "guardian-token", logger)
+	state := &dailySimulationJourneyState{
+		deps: &dependencies{
+			APIClient: NewAPIClient(server.URL, "admin-token", logger), CollectionClient: client, DailySubmissionLedger: store,
+		},
+		collectionClient: client,
+		profile:          dailySimulationProfile{RunDate: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Index: 5},
+		target: &dailySimulationResolvedTarget{
+			TargetType: "scale", TargetCode: "MODEL", TargetVersion: "1",
+			QuestionnaireCode: "Q", QuestionnaireVersion: "1", RequiresAssessment: true,
+		},
+	}
+	req := SubmitAnswerSheetRequest{
+		QuestionnaireCode: "Q", QuestionnaireVersion: "1", TesteeID: 42,
+		Answers: []Answer{{QuestionCode: "q1", QuestionType: "Radio", Value: "A"}},
+	}
+	historical := historicalseed.Context{
+		BatchID: opts.BatchID, ScenarioID: "2025-01-01/5/submit_answer/MODEL", OrgID: 1, Version: historicalseed.Version1,
+	}
+	ctx := historicalseed.WithContext(context.Background(), historical)
+	fullWake := make(chan struct{}, 1)
+	fullWake <- struct{}{}
+	ctx = withHistoricalDownstreamReconciler(ctx, &historicalDownstreamReconciler{
+		store: store, highWatermark: 10, wake: fullWake,
+	})
+
+	result, pending, err := prepareDailySimulationAnswerSheet(ctx, state, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending != nil || result.Status != dailySimulationSubmissionAcceptedPending || result.AnswerSheetID != "answer-5" {
+		t.Fatalf("hot-path result=%+v pending=%v", result, pending != nil)
+	}
+	if requestCount.Load() != 1 {
+		t.Fatalf("request count=%d, want only the acceptance POST", requestCount.Load())
+	}
+	logicalID := dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID)
+	downstream, ok, err := store.loadDownstream(logicalID)
+	if err != nil || !ok || downstream.Status != historicalDownstreamSubmitted || downstream.AnswerSheetID != "answer-5" {
+		t.Fatalf("durable downstream record=%+v ok=%v err=%v", downstream, ok, err)
+	}
+	submission, ok, err := store.Get(logicalID)
+	if err != nil || !ok || submission.Status != toolanswersheet.SubmissionStatusAcceptedPending || submission.AnswerSheetID != "answer-5" {
+		t.Fatalf("durable submission record=%+v ok=%v err=%v", submission, ok, err)
+	}
+}
+
 func TestDailySimulationReadinessDelayClampsServerHint(t *testing.T) {
 	if got := dailySimulationReadinessDelay(0); got != 2*time.Second {
 		t.Fatalf("default delay=%s", got)

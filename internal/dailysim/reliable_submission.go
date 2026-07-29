@@ -88,8 +88,8 @@ func prepareDailySimulationAnswerSheet(
 	if err != nil {
 		return dailySimulationSubmissionResult{}, nil, err
 	}
-	_, historical := historicalseed.FromContext(ctx)
-	if !exists && !historical && strings.TrimSpace(state.guardianUserID) != "" {
+	_, isHistorical := historicalseed.FromContext(ctx)
+	if !exists && !isHistorical && strings.TrimSpace(state.guardianUserID) != "" {
 		legacy, err := findDailySimulationLegacyAnswerSheet(
 			ctx, state.deps.APIClient, req.QuestionnaireCode, state.guardianUserID,
 		)
@@ -110,6 +110,14 @@ func prepareDailySimulationAnswerSheet(
 	if err != nil {
 		return dailySimulationSubmissionResult{}, nil, err
 	}
+	historicalContext, historicalRun := historicalseed.FromContext(ctx)
+	if prepared.ShouldSubmit && historicalRun {
+		if reconciler := historicalDownstreamReconcilerFromContext(ctx); reconciler != nil {
+			if err := reconciler.AllowSubmission(); err != nil {
+				return dailySimulationSubmissionResult{}, nil, err
+			}
+		}
+	}
 	req.IdempotencyKey = prepared.Record.IdempotencyKey
 	answerSheetID := strings.TrimSpace(prepared.Record.AnswerSheetID)
 	if prepared.ShouldSubmit {
@@ -125,6 +133,29 @@ func prepareDailySimulationAnswerSheet(
 	} else {
 		state.outcome.SkippedSubmission = true
 	}
+	if historicalRun {
+		if store, ok := ledger.(*historicalStateStore); ok {
+			record, err := ledger.MarkAcceptedPending(logicalID)
+			if err != nil {
+				return dailySimulationSubmissionResult{AnswerSheetID: answerSheetID}, nil, err
+			}
+			targetKey := strings.Join([]string{state.target.TargetType, state.target.TargetCode}, "/")
+			if err := store.putDownstreamSubmitted(historicalDownstreamRecord{
+				LogicalID: logicalID, ScenarioID: historicalContext.ScenarioID,
+				BusinessDate: scenarioDateFromID(historicalContext.ScenarioID), TaskID: req.TaskID,
+				TargetKey: targetKey, AnswerSheetID: record.AnswerSheetID,
+				TesteeID: req.TesteeID, RequiresAssessment: state.target.RequiresAssessment,
+			}); err != nil {
+				return dailySimulationSubmissionResult{AnswerSheetID: answerSheetID}, nil, err
+			}
+			if reconciler := historicalDownstreamReconcilerFromContext(ctx); reconciler != nil {
+				reconciler.Notify()
+			}
+			return dailySimulationSubmissionResult{
+				Status: dailySimulationSubmissionAcceptedPending, AnswerSheetID: record.AnswerSheetID,
+			}, nil, nil
+		}
+	}
 	result, pending, err := finishDailySimulationReadiness(ctx, state, ledger, logicalID, req.TesteeID, req.TaskID, answerSheetID)
 	if err != nil {
 		return result, nil, err
@@ -132,8 +163,8 @@ func prepareDailySimulationAnswerSheet(
 	if pending != nil {
 		return result, pending, nil
 	}
-	if historical, ok := historicalseed.FromContext(ctx); ok {
-		result, err = verifyHistoricalSubmissionStages(ctx, state.deps.APIClient, historical, req.TaskID, state.target.RequiresAssessment, result)
+	if historicalRun {
+		result, err = verifyHistoricalSubmissionStages(ctx, state.deps.APIClient, historicalContext, req.TaskID, state.target.RequiresAssessment, result)
 		return result, nil, err
 	}
 	return result, nil, nil

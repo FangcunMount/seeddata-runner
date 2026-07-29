@@ -44,6 +44,131 @@ func TestHistoricalSubmissionPayloadConflictIsDurable(t *testing.T) {
 	}
 }
 
+func TestHistoricalDownstreamStateLifecycleAndHighWatermark(t *testing.T) {
+	stateDir := t.TempDir()
+	opts := historicalStateTestOptions(stateDir, false)
+	if err := PrepareHistoricalBackfillState(opts, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openHistoricalStateStore(stateDir, opts.BatchID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	record := historicalDownstreamRecord{
+		LogicalID: "daily|20250101|1|42|scale|M|1|Q|1", ScenarioID: "2025-01-01/1/submit_answer/M",
+		BusinessDate: "2025-01-01", TargetKey: "scale/M", AnswerSheetID: "answer-1", TesteeID: 42,
+		RequiresAssessment: true,
+	}
+	if err := store.putDownstreamSubmitted(record); err != nil {
+		t.Fatal(err)
+	}
+	stored, ok, err := store.loadDownstream(record.LogicalID)
+	if err != nil || !ok || stored.Status != historicalDownstreamSubmitted || stored.AnswerSheetID != "answer-1" {
+		t.Fatalf("submitted downstream record=%+v ok=%v err=%v", stored, ok, err)
+	}
+	if pending, err := store.countOutstandingDownstream(""); err != nil || pending != 1 {
+		t.Fatalf("outstanding=%d err=%v, want 1", pending, err)
+	}
+	if err := (&historicalDownstreamReconciler{store: store, highWatermark: 1}).AllowSubmission(); err == nil || !strings.Contains(err.Error(), "high watermark") {
+		t.Fatalf("expected explicit high-watermark circuit breaker, got %v", err)
+	}
+
+	nextAttempt := time.Now().UTC().Add(time.Minute)
+	if err := store.markDownstreamPending(record.LogicalID, "report pending", nextAttempt); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := store.listDueDownstream(time.Now().UTC(), 10); err != nil || len(due) != 0 {
+		t.Fatalf("premature due records=%+v err=%v", due, err)
+	}
+	if due, err := store.listDueDownstream(nextAttempt.Add(time.Second), 10); err != nil || len(due) != 1 || due[0].Status != historicalDownstreamPending {
+		t.Fatalf("due pending records=%+v err=%v", due, err)
+	}
+	if err := store.markDownstreamVerified(record.LogicalID, "assessment-1", "outcome-1", "report-1"); err != nil {
+		t.Fatal(err)
+	}
+	stored, ok, err = store.loadDownstream(record.LogicalID)
+	if err != nil || !ok || stored.Status != historicalDownstreamVerified || stored.ReportID != "report-1" || stored.VerifiedAt == nil {
+		t.Fatalf("verified downstream record=%+v ok=%v err=%v", stored, ok, err)
+	}
+	if pending, err := store.countOutstandingDownstream(""); err != nil || pending != 0 {
+		t.Fatalf("outstanding=%d err=%v, want 0", pending, err)
+	}
+}
+
+func TestHistoricalCheckpointSplitsSubmissionAndVerificationProgress(t *testing.T) {
+	checkpoint := normalizeHistoricalCheckpoint(HistoricalCheckpoint{
+		Version: 2, BatchID: "batch", SubmittedThrough: "2025-01-03", VerifiedThrough: "2025-01-01",
+	})
+	if checkpoint.SubmittedThrough != "2025-01-03" || checkpoint.VerifiedThrough != "2025-01-01" || checkpoint.CompletedThrough != "2025-01-01" {
+		t.Fatalf("split checkpoint was not preserved: %+v", checkpoint)
+	}
+	legacy := normalizeHistoricalCheckpoint(HistoricalCheckpoint{Version: 1, CompletedThrough: "2025-01-02"})
+	if legacy.Version != 2 || legacy.SubmittedThrough != "2025-01-02" || legacy.VerifiedThrough != "2025-01-02" {
+		t.Fatalf("legacy checkpoint was not upgraded safely: %+v", legacy)
+	}
+}
+
+func TestHistoricalAcceptedPendingDoesNotDowngradeVerifiedSubmission(t *testing.T) {
+	stateDir := t.TempDir()
+	opts := historicalStateTestOptions(stateDir, false)
+	if err := PrepareHistoricalBackfillState(opts, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openHistoricalStateStore(stateDir, opts.BatchID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	logicalID := "daily|20250101|1|42|scale|M|1|Q|1"
+	if _, err := store.Prepare(logicalID, struct{ Value string }{Value: "stable"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkAccepted(logicalID, "answer-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkReady(logicalID, "assessment-1"); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.MarkAcceptedPending(logicalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != toolanswersheet.SubmissionStatusReady || record.AssessmentID != "assessment-1" {
+		t.Fatalf("verified submission was downgraded: %+v", record)
+	}
+}
+
+func TestOpenHistoricalStateStoreAddsDownstreamBucketToExistingV2State(t *testing.T) {
+	stateDir := t.TempDir()
+	opts := historicalStateTestOptions(stateDir, false)
+	if err := PrepareHistoricalBackfillState(opts, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openHistoricalStateStore(stateDir, opts.BatchID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.update(func(tx *bolt.Tx) error {
+		return tx.DeleteBucket(historicalBucketDownstream)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = openHistoricalStateStore(stateDir, opts.BatchID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if pending, err := store.countOutstandingDownstream(""); err != nil || pending != 0 {
+		t.Fatalf("upgraded downstream bucket pending=%d err=%v", pending, err)
+	}
+}
+
 func TestPrepareHistoricalBackfillStateCreatesProtectedV2Database(t *testing.T) {
 	stateDir := t.TempDir()
 	opts := historicalStateTestOptions(stateDir, false)
