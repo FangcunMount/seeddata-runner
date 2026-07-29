@@ -45,8 +45,12 @@ func (g *Generator) Generate(runDate time.Time, idx int) Profile {
 		childGender = 2
 	}
 
-	guardianName := generateChineseName(rng, guardianGender, true)
-	childName := generateChineseName(rng, childGender, false)
+	guardianName := generateChineseName(runDate, idx, guardianGender, true)
+	fatherName := ""
+	if guardianGender == 1 {
+		fatherName = guardianName
+	}
+	childName := generateChineseChildName(runDate, idx, childGender, fatherName)
 
 	phoneSuffix := fmt.Sprintf("%02d%02d%04d", int(runDate.Month()), runDate.Day(), idx+1)
 	phone := strings.TrimSpace(g.phonePrefix) + phoneSuffix
@@ -61,6 +65,9 @@ func (g *Generator) Generate(runDate time.Time, idx int) Profile {
 	}
 	email := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%s_%s_%04d@%s", emailLocal, runDate.Format("20060102"), idx+1, emailDomain)))
 
+	// Keep the non-name profile stream stable across the name-generator migration.
+	// The legacy implementation consumed four draws before generating the DOB.
+	advanceLegacyNameRandomness(rng)
 	childDOB := generateChildDOB(rng, runDate)
 
 	return Profile{
@@ -75,61 +82,13 @@ func (g *Generator) Generate(runDate time.Time, idx int) Profile {
 	}
 }
 
-var (
-	chineseSurnames = []string{
-		"王", "李", "张", "刘", "陈", "杨", "黄", "赵", "吴", "周",
-		"徐", "孙", "马", "朱", "胡", "郭", "何", "高", "林", "罗",
-		"郑", "梁", "谢", "宋", "唐", "许", "韩", "冯", "邓", "曹",
-	}
-	adultMaleGivenNames = []string{
-		"伟", "磊", "洋", "勇", "军", "杰", "涛", "超", "斌", "强",
-		"鹏", "辉", "峰", "健", "俊", "浩", "博", "诚", "凯", "辰",
-	}
-	adultFemaleGivenNames = []string{
-		"敏", "静", "丽", "艳", "娟", "颖", "丹", "洁", "婷", "雪",
-		"琳", "倩", "萍", "娜", "佳", "欣", "瑶", "悦", "宁", "雯",
-	}
-	childMaleGivenNames = []string{
-		"子轩", "浩然", "宇辰", "梓豪", "博文", "俊宇", "嘉乐", "昊天", "奕辰", "晨阳",
-		"梓轩", "铭泽", "思远", "景辰", "一鸣", "承泽", "皓宇", "嘉树", "子墨", "逸凡",
-	}
-	childFemaleGivenNames = []string{
-		"欣怡", "若涵", "诗涵", "雨桐", "梦瑶", "语彤", "梓萱", "依诺", "可欣", "雨薇",
-		"芷晴", "欣妍", "沐瑶", "佳宁", "心妍", "思妍", "可馨", "子晴", "书瑶", "雅婷",
-	}
-)
-
-func generateChineseName(rng *rand.Rand, gender uint8, adult bool) string {
-	surname := pickChineseNamePart(rng, chineseSurnames)
-	var givenName string
-	switch {
-	case adult && gender == 2:
-		givenName = pickChineseNamePart(rng, adultFemaleGivenNames)
-	case adult:
-		givenName = pickChineseNamePart(rng, adultMaleGivenNames)
-	case gender == 2:
-		givenName = pickChineseNamePart(rng, childFemaleGivenNames)
-	default:
-		givenName = pickChineseNamePart(rng, childMaleGivenNames)
-	}
-	name := strings.TrimSpace(surname + givenName)
-	if name == "" {
-		if adult {
-			return "模拟家长"
-		}
-		return "模拟儿童"
-	}
-	return name
-}
-
-func pickChineseNamePart(rng *rand.Rand, values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
+func advanceLegacyNameRandomness(rng *rand.Rand) {
 	if rng == nil {
-		return values[0]
+		return
 	}
-	return values[rng.Intn(len(values))]
+	for _, candidateCount := range []int{30, 20, 30, 20} {
+		_ = rng.Intn(candidateCount)
+	}
 }
 
 func generateChildDOB(rng *rand.Rand, runDate time.Time) string {

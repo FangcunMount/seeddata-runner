@@ -1,0 +1,60 @@
+{
+  "version": 2,
+  "description": "Project-maintained synthetic Chinese name corpus. Values are curated characters, not real-person records.",
+  "surnames": [
+    {"value": "王", "weight": 10}, {"value": "李", "weight": 10}, {"value": "张", "weight": 10}, {"value": "刘", "weight": 10}, {"value": "陈", "weight": 10},
+    {"value": "杨", "weight": 10}, {"value": "黄", "weight": 10}, {"value": "赵", "weight": 10}, {"value": "吴", "weight": 10}, {"value": "周", "weight": 10},
+    {"value": "徐", "weight": 8}, {"value": "孙", "weight": 8}, {"value": "马", "weight": 8}, {"value": "朱", "weight": 8}, {"value": "胡", "weight": 8},
+    {"value": "郭", "weight": 8}, {"value": "何", "weight": 8}, {"value": "高", "weight": 8}, {"value": "林", "weight": 8}, {"value": "罗", "weight": 8},
+    {"value": "郑", "weight": 6}, {"value": "梁", "weight": 6}, {"value": "谢", "weight": 6}, {"value": "宋", "weight": 6}, {"value": "唐", "weight": 6},
+    {"value": "许", "weight": 6}, {"value": "韩", "weight": 6}, {"value": "冯", "weight": 6}, {"value": "邓", "weight": 6}, {"value": "曹", "weight": 6},
+    {"value": "彭", "weight": 5}, {"value": "曾", "weight": 5}, {"value": "肖", "weight": 5}, {"value": "田", "weight": 5}, {"value": "董", "weight": 5},
+    {"value": "潘", "weight": 5}, {"value": "袁", "weight": 5}, {"value": "蔡", "weight": 5}, {"value": "蒋", "weight": 5}, {"value": "余", "weight": 5},
+    {"value": "于", "weight": 4}, {"value": "杜", "weight": 4}, {"value": "叶", "weight": 4}, {"value": "程", "weight": 4}, {"value": "魏", "weight": 4},
+    {"value": "苏", "weight": 4}, {"value": "吕", "weight": 4}, {"value": "丁", "weight": 4}, {"value": "任", "weight": 4}, {"value": "沈", "weight": 4},
+    {"value": "姚", "weight": 3}, {"value": "卢", "weight": 3}, {"value": "姜", "weight": 3}, {"value": "崔", "weight": 3}, {"value": "钟", "weight": 3},
+    {"value": "谭", "weight": 3}, {"value": "陆", "weight": 3}, {"value": "汪", "weight": 3}, {"value": "范", "weight": 3}, {"value": "金", "weight": 3},
+    {"value": "石", "weight": 2}, {"value": "廖", "weight": 2}, {"value": "贾", "weight": 2}, {"value": "夏", "weight": 2}, {"value": "韦", "weight": 2},
+    {"value": "傅", "weight": 2}, {"value": "方", "weight": 2}, {"value": "白", "weight": 2}, {"value": "邹", "weight": 2}, {"value": "孟", "weight": 2},
+    {"value": "熊", "weight": 2}, {"value": "秦", "weight": 2}, {"value": "邱", "weight": 2}, {"value": "江", "weight": 2}, {"value": "尹", "weight": 2},
+    {"value": "薛", "weight": 2}, {"value": "闫", "weight": 2}, {"value": "段", "weight": 2}, {"value": "雷", "weight": 2}, {"value": "侯", "weight": 2},
+    {"value": "龙", "weight": 1}, {"value": "史", "weight": 1}, {"value": "陶", "weight": 1}, {"value": "黎", "weight": 1}, {"value": "贺", "weight": 1},
+    {"value": "顾", "weight": 1}, {"value": "毛", "weight": 1}, {"value": "郝", "weight": 1}, {"value": "龚", "weight": 1}, {"value": "邵", "weight": 1},
+    {"value": "万", "weight": 1}, {"value": "钱", "weight": 1}, {"value": "严", "weight": 1}, {"value": "覃", "weight": 1}, {"value": "武", "weight": 1},
+    {"value": "戴", "weight": 1}, {"value": "莫", "weight": 1}, {"value": "孔", "weight": 1}, {"value": "向", "weight": 1}, {"value": "汤", "weight": 1},
+    {"value": "祝", "weight": 1}, {"value": "赖", "weight": 1}, {"value": "季", "weight": 1}, {"value": "樊", "weight": 1}, {"value": "兰", "weight": 1},
+    {"value": "殷", "weight": 1}, {"value": "施", "weight": 1}, {"value": "冷", "weight": 1}, {"value": "纪", "weight": 1}, {"value": "焦", "weight": 1},
+    {"value": "温", "weight": 1}, {"value": "柴", "weight": 1}, {"value": "欧", "weight": 1}, {"value": "车", "weight": 1}, {"value": "虞", "weight": 1},
+    {"value": "戚", "weight": 1}, {"value": "屈", "weight": 1}, {"value": "单", "weight": 1}, {"value": "包", "weight": 1}, {"value": "司", "weight": 1},
+    {"value": "柏", "weight": 1}, {"value": "宁", "weight": 1}, {"value": "柯", "weight": 1}, {"value": "阮", "weight": 1}, {"value": "桂", "weight": 1},
+    {"value": "闵", "weight": 1}, {"value": "路", "weight": 1}, {"value": "游", "weight": 1}, {"value": "辛", "weight": 1}, {"value": "靳", "weight": 1},
+    {"value": "管", "weight": 1}, {"value": "苗", "weight": 1}, {"value": "詹", "weight": 1}, {"value": "曲", "weight": 1}, {"value": "凌", "weight": 1},
+    {"value": "费", "weight": 1}, {"value": "翁", "weight": 1}, {"value": "毕", "weight": 1}, {"value": "左", "weight": 1}, {"value": "章", "weight": 1},
+    {"value": "童", "weight": 1}, {"value": "颜", "weight": 1}, {"value": "倪", "weight": 1}, {"value": "阎", "weight": 1}, {"value": "牛", "weight": 1},
+    {"value": "易", "weight": 1}, {"value": "聂", "weight": 1}, {"value": "祁", "weight": 1}, {"value": "伍", "weight": 1}, {"value": "庞", "weight": 1}
+  ],
+  "adult": {
+    "male": {
+      "single": "伟强磊军勇杰涛斌鹏辉峰健刚毅超诚凯龙波松康达胜豪威武勤良旭晨国明文德海成振宏义正光广进安福家庆远维宗",
+      "first": "志建国文德永世海明成振宏绍忠义正光广进安福克隆家庆远昌维宗荣兴敬勇新立伟健军祥传学业邦仁礼智信友胜达康良旭",
+      "second": "强军伟勇杰涛斌峰健刚毅超诚凯龙波松华民平达胜豪威武康良旭昌荣林山川泉东南春秋生全友仁礼智信贵宝才有和顺茂"
+    },
+    "female": {
+      "single": "敏静丽艳娟颖丹洁婷雪琳倩萍娜慧芬芳兰英梅蓉燕玲琴霞晶媛虹雯仪秀玉桂淑惠春美晓贞巧红彩爱月菊秋冬翠素香",
+      "first": "秀丽玉桂淑惠春美晓贞慧巧红彩爱月菊秋冬翠瑞素香碧金珠娴雪静凤兰英梅芳玲珍霞琴容莲芝燕婷娟妮蓉蓓媛仪芬倩",
+      "second": "芳兰英梅玲珍霞琴云莲芝凤华萍燕婷娟妮蓉蓓慧敏静洁雪晶媛仪芬倩颖丹琳娜艳丽虹雯薇瑶悦宁欣佳蕊馨妍晴彤涵"
+    }
+  },
+  "child": {
+    "male": {
+      "single": "睿泽轩辰宇航昊宸硕骏朗熙瑞勋岳铠琛翊晟灏尧琦帆峻凌澄源湛翰钧子浩梓博俊嘉奕景承皓铭致逸启昱柏彦修星川",
+      "first": "子浩宇曜博俊嘉奕晨景承皓铭致逸泽启昱柏彦睿辰修珩星川云乐骁卓宸昊航硕骏朗熙勋岳铠琛翊晟灏尧琦帆峻凌澄源湛尚慕言亦予一弘毅南开和泰哲峥嵘煦熠烨璟瑜瑾珏麒",
+      "second": "轩然辰豪文宇乐天阳泽远皓凡墨鸣树凯川恺霖峰峻航睿翔毅卓清源朗宸昊硕骏熙瑞勋岳铠琛翊晟灏尧琦帆凌澄湛钧柏彦安明哲成宏博礼仁义信维新志南旭晨星海洋宁和泰俊嘉杰"
+    },
+    "female": {
+      "single": "悦宁妍馨彤涵瑶萱桐薇晴诺冉蕊恬璇玥珂茵萌露羽悠昕潼乔歆曼朵欣若诗雨梦语依可芷沐佳心思书雅知清舒婉柔",
+      "first": "欣若诗雨梦语梓依可芷沐佳心思书雅知清舒萌露羽悠昕潼乔歆曼朵悦宁妍馨彤涵瑶萱桐薇晴诺冉蕊恬璇玥珂茵婉柔希宜念初禾音溪茉棠夏暖甜葵芙荷柳桃樱霏霓芊芮荟菡薏蓁",
+      "second": "怡涵桐瑶彤萱诺欣薇晴妍馨宁悦婉柔希冉蕊萌露羽悠昕潼乔歆曼朵姝婷娜菲珊璐嫣玮琪茜岚依影安乐嘉宜语念初禾音诗雨梦书雅知清舒心思可芷沐佳若晓月星云溪茉棠夏秋冬春"
+    }
+  }
+}
