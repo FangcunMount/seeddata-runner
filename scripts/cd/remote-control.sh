@@ -36,15 +36,11 @@ as_root() {
     "$@"
     return
   fi
-  if sudo -n true 2>/dev/null; then
-    sudo "$@"
+  if [ -n "${SEEDDATA_SUDO_PASSWORD:-}" ]; then
+    printf '%s\n' "$SEEDDATA_SUDO_PASSWORD" | sudo -S -p '' -- "$@"
     return
   fi
-  if [ -z "${SEEDDATA_SUDO_PASSWORD:-}" ]; then
-    echo "sudo requires SEEDDATA_SUDO_PASSWORD or NOPASSWD" >&2
-    return 1
-  fi
-  printf '%s\n' "$SEEDDATA_SUDO_PASSWORD" | sudo -S -p '' "$@"
+  sudo -n -- "$@"
 }
 
 show_status() {
