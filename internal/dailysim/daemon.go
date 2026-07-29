@@ -48,6 +48,7 @@ type dailySimulationBatchOptions struct {
 	ExistingTesteesByIndex    map[int]*ApiserverTesteeResponse
 	JobIndexes                []int
 	HistoricalBatchID         string
+	IAMWorkers                int
 	ValidateScenario          func(dailySimulationScenario) error
 	ShouldSkipScenario        func(dailySimulationProfile, dailySimulationScenario) bool
 	RestoreExistingTestee     func(dailySimulationProfile, dailySimulationScenario) (*ApiserverTesteeResponse, error)
@@ -290,7 +291,11 @@ func runDailySimulationBatchWithOptions(
 			return err
 		}
 	} else {
-		mockIAMLimiter = newDailySimulationMockIAMLimiter(deps.Config.IAM)
+		iamConfig := deps.Config.IAM
+		if options.IAMWorkers > 0 {
+			iamConfig.MockConsumer.MaxConcurrent = options.IAMWorkers
+		}
+		mockIAMLimiter = newDailySimulationMockIAMLimiter(iamConfig)
 	}
 	defer func() {
 		if iamBundle != nil && iamBundle.client != nil {

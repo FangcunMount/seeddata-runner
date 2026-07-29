@@ -1,0 +1,227 @@
+package dailysim
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	toolanswersheet "github.com/FangcunMount/seeddata-runner/internal/answersheet"
+	bolt "go.etcd.io/bbolt"
+)
+
+func historicalStateTestOptions(stateDir string, resume bool) HistoricalBackfillOptions {
+	return HistoricalBackfillOptions{
+		From: "2025-01-01", To: "2025-01-03", BatchID: "batch-v2", StateDir: stateDir, Resume: resume,
+	}
+}
+
+func TestHistoricalSubmissionPayloadConflictIsDurable(t *testing.T) {
+	stateDir := t.TempDir()
+	opts := historicalStateTestOptions(stateDir, false)
+	if err := PrepareHistoricalBackfillState(opts, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openHistoricalStateStore(stateDir, opts.BatchID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	logicalID := "daily|20250101|1|42|scale|M|1|Q|1"
+	if _, err := store.Prepare(logicalID, struct{ Value string }{Value: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Prepare(logicalID, struct{ Value string }{Value: "drift"}); !errors.Is(err, toolanswersheet.ErrSubmissionConflict) {
+		t.Fatalf("expected payload conflict, got %v", err)
+	}
+	record, ok, err := store.Get(logicalID)
+	if err != nil || !ok || record.Status != toolanswersheet.SubmissionStatusConflict {
+		t.Fatalf("conflict was not persisted: record=%+v ok=%v err=%v", record, ok, err)
+	}
+}
+
+func TestPrepareHistoricalBackfillStateCreatesProtectedV2Database(t *testing.T) {
+	stateDir := t.TempDir()
+	opts := historicalStateTestOptions(stateDir, false)
+	if err := PrepareHistoricalBackfillState(opts, 1, filepath.Join(stateDir, "missing-submissions.json")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(historicalStateDBPath(stateDir, opts.BatchID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("historical database mode=%o want=600", info.Mode().Perm())
+	}
+	store, err := openHistoricalStateStore(stateDir, opts.BatchID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := struct{ Value string }{Value: "stable"}
+	prepared, err := store.Prepare("daily|20250101|1|42|scale|M|1|Q|1", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prepared.ShouldSubmit || prepared.Record.IdempotencyKey == "" || prepared.Record.RequestID == "" {
+		t.Fatalf("unexpected prepared submission: %+v", prepared)
+	}
+	replayed, err := store.Prepare(prepared.Record.LogicalID, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Record.RequestID != prepared.Record.RequestID || replayed.Record.IdempotencyKey != prepared.Record.IdempotencyKey {
+		t.Fatalf("prepared replay changed identity: first=%+v replay=%+v", prepared.Record, replayed.Record)
+	}
+	if _, err := store.MarkAccepted(prepared.Record.LogicalID, "answer-1"); err != nil {
+		t.Fatal(err)
+	}
+	parent := HistoricalScenarioManifest{ScenarioID: "2025-01-01/1/submit_answer/M", BusinessDate: "2025-01-01", TargetKey: "scale/M"}
+	if err := store.putScenario(parent); err != nil {
+		t.Fatal(err)
+	}
+	recovery := HistoricalPlanTaskRecovery{ScenarioID: "2025-01-02/1/submit_answer/task-1", TaskID: "task-1", PlannedAt: "2025-01-02T09:00:00+08:00", TargetKey: "scale/M"}
+	if err := store.putPlanTask(parent.ScenarioID, recovery); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	readStore, err := openHistoricalStateStore(stateDir, opts.BatchID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = readStore.Close() }()
+	record, ok, err := readStore.Get(prepared.Record.LogicalID)
+	if err != nil || !ok || record.AnswerSheetID != "answer-1" || record.IdempotencyKey != prepared.Record.IdempotencyKey {
+		t.Fatalf("persisted record=%+v ok=%v err=%v", record, ok, err)
+	}
+	manifest, err := readStore.loadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredParent := manifest.Scenarios[parent.ScenarioID]
+	if len(restoredParent.PlanTaskRecoveries) != 1 || restoredParent.PlanTaskRecoveries[0] != recovery {
+		t.Fatalf("independent plan task recovery was not restored: %+v", restoredParent)
+	}
+}
+
+func TestPrepareHistoricalBackfillStateMigratesLegacyIdentityWithoutRewritingFiles(t *testing.T) {
+	stateDir := t.TempDir()
+	opts := historicalStateTestOptions(stateDir, true)
+	checkpointPath, manifestPath := historicalPaths(stateDir, opts.BatchID)
+	manifest := HistoricalManifest{
+		Version: 1, BatchID: opts.BatchID, OrgID: 1, From: opts.From, To: opts.To, Timezone: historicalTimezone,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		Targets: map[string]HistoricalTargetManifest{}, Plans: map[string]HistoricalPlanManifest{}, DailyCounts: map[string]int{},
+		Scenarios: map[string]HistoricalScenarioManifest{
+			"2025-01-01/1/submit_answer/M": {ScenarioID: "2025-01-01/1/submit_answer/M", BusinessDate: "2025-01-01", TargetKey: "scale/M", TesteeID: "42"},
+		},
+	}
+	checkpoint := HistoricalCheckpoint{Version: 1, BatchID: opts.BatchID, From: opts.From, To: opts.To}
+	if err := saveSecureJSON(manifestPath, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveSecureJSON(checkpointPath, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	legacySubmissionPath := filepath.Join(stateDir, "submissions.json")
+	ledger, err := toolanswersheet.NewSubmissionLedger(legacySubmissionPath, "daily")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logicalID := "daily|20250101|1|42|scale|M|1|Q|1"
+	prepared, err := ledger.Prepare(logicalID, struct{ Value string }{Value: "legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.MarkAccepted(logicalID, "answer-legacy"); err != nil {
+		t.Fatal(err)
+	}
+	manifestBefore, _, err := hashExistingFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareHistoricalBackfillState(opts, 1, legacySubmissionPath); err != nil {
+		t.Fatal(err)
+	}
+	manifestAfter, _, err := hashExistingFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifestBefore != manifestAfter {
+		t.Fatal("legacy manifest was rewritten during migration")
+	}
+	store, err := openHistoricalStateStore(stateDir, opts.BatchID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	record, ok, err := store.Get(logicalID)
+	if err != nil || !ok {
+		t.Fatalf("migrated submission missing: ok=%v err=%v", ok, err)
+	}
+	if record.IdempotencyKey != prepared.Record.IdempotencyKey || record.RequestID != prepared.Record.RequestID || record.AnswerSheetID != "answer-legacy" {
+		t.Fatalf("migrated identity changed: got=%+v want=%+v", record, prepared.Record)
+	}
+}
+
+func TestHistoricalStateRejectsSecondWriter(t *testing.T) {
+	stateDir := t.TempDir()
+	opts := historicalStateTestOptions(stateDir, false)
+	if err := PrepareHistoricalBackfillState(opts, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openHistoricalStateStore(stateDir, opts.BatchID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	started := time.Now()
+	if _, err := openHistoricalStateStore(stateDir, opts.BatchID, false); err == nil {
+		t.Fatal("expected second writer lock failure")
+	}
+	if time.Since(started) < 900*time.Millisecond {
+		t.Fatal("writer lock did not honor the configured timeout")
+	}
+}
+
+func BenchmarkHistoricalStateUpdateWith100KRecords(b *testing.B) {
+	stateDir := b.TempDir()
+	opts := historicalStateTestOptions(stateDir, false)
+	if err := PrepareHistoricalBackfillState(opts, 1, ""); err != nil {
+		b.Fatal(err)
+	}
+	store, err := openHistoricalStateStore(stateDir, opts.BatchID, false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(historicalBucketSubmissions)
+		for index := 0; index < 100_000; index++ {
+			record := toolanswersheet.SubmissionRecord{LogicalID: fmt.Sprintf("seed-%d", index), Status: toolanswersheet.SubmissionStatusCompleted}
+			if err := putJSON(bucket, []byte(record.LogicalID), record); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	var sequence atomic.Int64
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			index := sequence.Add(1)
+			record := HistoricalLocalStageRecord{ScenarioID: fmt.Sprintf("scenario-%d", index), Stage: "answersheet_submit", PayloadHash: "stable", Status: "completed"}
+			if err := store.putLocalStage(record); err != nil {
+				b.Error(err)
+				return
+			}
+		}
+	})
+}

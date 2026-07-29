@@ -115,7 +115,7 @@ func submitDailySimulationAnswerSheet(ctx context.Context, state *dailySimulatio
 func finishDailySimulationReadiness(
 	ctx context.Context,
 	state *dailySimulationJourneyState,
-	ledger *toolanswersheet.SubmissionLedger,
+	ledger toolanswersheet.SubmissionStore,
 	logicalID string,
 	testeeID uint64,
 	answerSheetID string,

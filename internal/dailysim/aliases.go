@@ -31,6 +31,7 @@ type TaskResponse = seedapi.TaskResponse
 type PlanTaskWindowResponse = seedapi.PlanTaskWindowResponse
 type ListPlanTaskWindowRequest = seedapi.ListPlanTaskWindowRequest
 type HistoricalStageRecord = seedapi.HistoricalStageRecord
+type HistoricalStageBatchResponse = seedapi.HistoricalStageBatchResponse
 type ApiserverTesteeResponse = seedapi.ApiserverTesteeResponse
 type ApiserverTesteeListResponse = seedapi.ApiserverTesteeListResponse
 type GuardianResponse = seedapi.GuardianResponse

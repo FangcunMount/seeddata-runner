@@ -1,0 +1,6 @@
+.git
+.seeddata-cache
+bin
+logs
+tmp
+*.log

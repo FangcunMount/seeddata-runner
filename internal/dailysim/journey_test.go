@@ -223,8 +223,19 @@ func TestHistoricalPlanCompletesEveryDeterministicallySelectedTaskBeforeCutoff(t
 	if _, err := dailySimulationStageEnrollPlan(ctx, state); err != nil {
 		t.Fatal(err)
 	}
-	if len(opened) != len(wantSelected) || len(state.selectedTasks) != len(wantSelected) {
-		t.Fatalf("opened=%d selected=%d want=%d", len(opened), len(state.selectedTasks), len(wantSelected))
+	if len(opened) != 0 || len(state.selectedTasks) != len(wantSelected) {
+		t.Fatalf("task opening must be deferred to submission workers: opened=%d selected=%d want=%d", len(opened), len(state.selectedTasks), len(wantSelected))
+	}
+	ctx = withHistoricalLocalStageRecorder(ctx, func(_ historicalseed.Context, _ dailySimulationJourneyStage, _ dailySimulationOutcome, _ *dailySimulationResolvedTarget) error {
+		return nil
+	})
+	for _, task := range state.selectedTasks {
+		if err := ensureHistoricalPlanTaskOpen(historicalseed.WithContext(ctx, task.Context), state, task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(opened) != len(wantSelected) {
+		t.Fatalf("submission workers opened=%d want=%d", len(opened), len(wantSelected))
 	}
 	for id := range wantSelected {
 		if _, ok := opened[id]; !ok {

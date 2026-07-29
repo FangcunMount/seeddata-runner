@@ -1,0 +1,15 @@
+FROM golang:1.25.9-alpine AS builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/seeddata ./cmd/seeddata
+
+FROM alpine:3.22
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -S -g 10001 seeddata \
+    && adduser -S -D -H -u 10001 -G seeddata seeddata
+COPY --from=builder /out/seeddata /usr/local/bin/seeddata
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/seeddata"]

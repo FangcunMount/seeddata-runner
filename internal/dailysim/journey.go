@@ -291,12 +291,79 @@ func simulateDailyUserWithAdditionalTargets(
 	if state.journeyTarget != dailySimulationJourneySubmitAnswer {
 		return state.outcome, nil
 	}
+	if executor := historicalSubmissionExecutorFromContext(ctx); executor != nil && len(additionalTargets) > 0 {
+		if err := simulateHistoricalAdditionalTargets(ctx, executor, deps, profile, state, additionalTargets); err != nil {
+			return state.outcome, err
+		}
+		return state.outcome, nil
+	}
 	for _, additionalTarget := range additionalTargets {
 		if err := simulateDailyUserAdditionalTarget(ctx, deps, profile, state, additionalTarget); err != nil {
 			return state.outcome, err
 		}
 	}
 	return state.outcome, nil
+}
+
+func simulateHistoricalAdditionalTargets(
+	ctx context.Context,
+	executor *historicalSubmissionExecutor,
+	deps *dependencies,
+	profile dailySimulationProfile,
+	state *dailySimulationJourneyState,
+	targets []*dailySimulationResolvedTarget,
+) error {
+	testeeID := parseID(dailySimulationTesteeID(state.testee))
+	if testeeID == 0 {
+		return fmt.Errorf("invalid testee id for historical additional targets")
+	}
+	futures := make([]historicalSubmissionFuture, 0, len(targets))
+	for _, target := range targets {
+		if target == nil || target.QuestionnaireDetail == nil {
+			return fmt.Errorf("historical additional target is not initialized")
+		}
+		historical, ok := historicalseed.FromContext(ctx)
+		if !ok {
+			return fmt.Errorf("historical context is required for concurrent additional target")
+		}
+		historical.ScenarioID = fmt.Sprintf("%s/%d/%s/%s", profile.RunDate.Format("2006-01-02"), profile.Index, dailySimulationJourneySubmitAnswer, target.TargetCode)
+		targetCtx := historicalseed.WithContext(ctx, historical)
+		additional := HistoricalAdditionalScenarioManifest{
+			ScenarioID: historical.ScenarioID,
+			TargetKey:  strings.Join([]string{target.TargetType, target.TargetCode}, "/"),
+		}
+		state.outcome.AdditionalScenarios = appendHistoricalAdditionalScenario(state.outcome.AdditionalScenarios, additional)
+		jobState := cloneDailySimulationJourneyStateForSubmission(state)
+		jobState.target = target
+		future, err := executor.Submit(HistoricalSubmissionJob{
+			ScenarioID: historical.ScenarioID,
+			TargetKey:  additional.TargetKey,
+		}, func(jobCtx context.Context) (historicalSubmissionJobResult, error) {
+			jobCtx = mergeHistoricalSubmissionContext(jobCtx, targetCtx)
+			if err := runDailySimulationSubmissionJob(jobCtx, jobState, "", target.QuestionnaireDetail, testeeID); err != nil {
+				return historicalSubmissionJobResult{Outcome: jobState.outcome}, err
+			}
+			if err := logDailySimulationOutcome(
+				deps, profile, jobState.clinicianID, jobState.entry, target,
+				dailySimulationTesteeID(jobState.testee), jobState.guardianUserID, jobState.outcome,
+			); err != nil {
+				return historicalSubmissionJobResult{Outcome: jobState.outcome}, err
+			}
+			return historicalSubmissionJobResult{Outcome: jobState.outcome, ReportGenerated: target.RequiresAssessment}, nil
+		})
+		if err != nil {
+			return err
+		}
+		futures = append(futures, future)
+	}
+	for _, future := range futures {
+		result, err := future.Wait()
+		if err != nil {
+			return err
+		}
+		mergeDailySimulationSubmissionOutcome(&state.outcome, result.Outcome)
+	}
+	return nil
 }
 
 func simulateDailyUserAdditionalTarget(
@@ -544,7 +611,6 @@ func dailySimulationStageEnrollPlan(ctx context.Context, state *dailySimulationJ
 				ScenarioID: fmt.Sprintf("%s/%d/%s/%s", businessDay.Format("2006-01-02"), state.profile.Index, dailySimulationJourneySubmitAnswer, taskID),
 				Timeline:   timeline,
 			}
-			taskCtx := historicalseed.WithContext(ctx, child)
 			recovery := HistoricalPlanTaskRecovery{
 				ScenarioID: child.ScenarioID,
 				TaskID:     taskID,
@@ -554,20 +620,8 @@ func dailySimulationStageEnrollPlan(ctx context.Context, state *dailySimulationJ
 			if err := recordHistoricalPlanTaskDiscovery(ctx, historical, recovery); err != nil {
 				return toolchain.Decision{}, fmt.Errorf("persist historical plan task %s discovery: %w", taskID, err)
 			}
-			if record, completed, err := completedHistoricalServerStage(taskCtx, child.ScenarioID, "task_open"); err != nil {
-				return toolchain.Decision{}, err
-			} else if completed {
-				if record.ResourceID != taskID {
-					return toolchain.Decision{}, fmt.Errorf("historical task_open resource %s conflicts with task %s", record.ResourceID, taskID)
-				}
-			} else if _, err := state.deps.APIClient.OpenPlanTask(taskCtx, taskID); err != nil {
-				return toolchain.Decision{}, fmt.Errorf("open historical plan task %s: %w", taskID, err)
-			}
 			state.selectedTasks = append(state.selectedTasks, historicalSelectedTask{ID: taskID, Context: child, PlannedAt: plannedAt})
 			state.outcome.ChildScenarioIDs = append(state.outcome.ChildScenarioIDs, child.ScenarioID)
-			if err := state.recordHistoricalLocalStage(taskCtx, dailySimulationJourneyStage("task_open")); err != nil {
-				return toolchain.Decision{}, err
-			}
 		}
 	}
 	if err := state.recordHistoricalLocalStage(ctx, dailySimulationJourneyStagePlanEnrollment); err != nil {
@@ -799,79 +853,200 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 		return toolchain.Decision{}, fmt.Errorf("questionnaire detail for %s is not preloaded", state.target.QuestionnaireCode)
 	}
 
-	submit := func(submitCtx context.Context, taskID string) error {
-		submission, restored, err := restoreDailySimulationHistoricalSubmission(submitCtx, state, taskID)
+	type submissionSpec struct {
+		ctx       context.Context
+		taskID    string
+		plannedAt time.Time
+	}
+	specs := make([]submissionSpec, 0, max(1, len(state.selectedTasks)))
+	if len(state.selectedTasks) == 0 {
+		specs = append(specs, submissionSpec{ctx: ctx})
+	} else {
+		for _, task := range state.selectedTasks {
+			specs = append(specs, submissionSpec{
+				ctx: historicalseed.WithContext(ctx, task.Context), taskID: task.ID, plannedAt: task.PlannedAt,
+			})
+		}
+	}
+	executor := historicalSubmissionExecutorFromContext(ctx)
+	if executor == nil {
+		for _, spec := range specs {
+			if err := runDailySimulationSubmissionJob(spec.ctx, state, spec.taskID, questionnaireDetail, testeeID); err != nil {
+				return toolchain.Decision{}, fmt.Errorf("submit historical plan task %s: %w", spec.taskID, err)
+			}
+		}
+		return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
+	}
+	futures := make([]historicalSubmissionFuture, 0, len(specs))
+	for _, spec := range specs {
+		spec := spec
+		jobState := cloneDailySimulationJourneyStateForSubmission(state)
+		historical, ok := historicalseed.FromContext(spec.ctx)
+		if !ok {
+			return toolchain.Decision{}, fmt.Errorf("historical context is required for concurrent submission")
+		}
+		future, err := executor.Submit(HistoricalSubmissionJob{
+			ScenarioID: historical.ScenarioID,
+			TaskID:     spec.taskID,
+			TargetKey:  strings.Join([]string{state.target.TargetType, state.target.TargetCode}, "/"),
+			PlannedAt:  spec.plannedAt,
+		}, func(jobCtx context.Context) (historicalSubmissionJobResult, error) {
+			jobCtx = mergeHistoricalSubmissionContext(jobCtx, spec.ctx)
+			if err := runDailySimulationSubmissionJob(jobCtx, jobState, spec.taskID, questionnaireDetail, testeeID); err != nil {
+				return historicalSubmissionJobResult{Outcome: jobState.outcome}, err
+			}
+			return historicalSubmissionJobResult{Outcome: jobState.outcome, ReportGenerated: jobState.target.RequiresAssessment}, nil
+		})
+		if err != nil {
+			return toolchain.Decision{}, err
+		}
+		futures = append(futures, future)
+	}
+	for index, future := range futures {
+		result, err := future.Wait()
+		if err != nil {
+			return toolchain.Decision{}, fmt.Errorf("submit historical plan task %s: %w", specs[index].taskID, err)
+		}
+		mergeDailySimulationSubmissionOutcome(&state.outcome, result.Outcome)
+	}
+	return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
+}
+
+func runDailySimulationSubmissionJob(
+	submitCtx context.Context,
+	state *dailySimulationJourneyState,
+	taskID string,
+	questionnaireDetail *QuestionnaireDetailResponse,
+	testeeID uint64,
+) error {
+	if taskID != "" {
+		if err := ensureHistoricalPlanTaskOpen(submitCtx, state, taskID); err != nil {
+			return err
+		}
+	}
+	submission, restored, err := restoreDailySimulationHistoricalSubmission(submitCtx, state, taskID)
+	if err != nil {
+		return err
+	}
+	if !restored {
+		rng := newDailySimulationRand(
+			"answers:" + state.profile.RunDate.Format("20060102") + ":" + strconv.Itoa(state.profile.Index) + ":" + state.target.QuestionnaireCode + ":" + taskID,
+		)
+		answers := buildAnswers(questionnaireDetail, rng)
+		if invalidAnswers := validateAnswers(questionnaireDetail, answers); len(invalidAnswers) > 0 {
+			return fmt.Errorf("generated invalid answers for questionnaire %s: %v", state.target.QuestionnaireCode, invalidAnswers)
+		}
+		req := SubmitAnswerSheetRequest{
+			QuestionnaireCode: state.target.QuestionnaireCode, QuestionnaireVersion: state.target.QuestionnaireVersion,
+			Title: state.target.QuestionnaireTitle, TesteeID: testeeID,
+			OriginRef: &OriginRef{Type: "assessment_entry", ID: strings.TrimSpace(state.entry.ID)}, Answers: answers,
+		}
+		if taskID != "" {
+			req.TaskID = taskID
+			req.OriginRef = &OriginRef{Type: "plan_task", ID: taskID}
+		}
+		submission, err = submitDailySimulationAnswerSheet(submitCtx, state, req)
 		if err != nil {
 			return err
 		}
-		if !restored {
-			rng := newDailySimulationRand(
-				"answers:" + state.profile.RunDate.Format("20060102") + ":" + strconv.Itoa(state.profile.Index) + ":" + state.target.QuestionnaireCode + ":" + taskID,
-			)
-			answers := buildAnswers(questionnaireDetail, rng)
-			if invalidAnswers := validateAnswers(questionnaireDetail, answers); len(invalidAnswers) > 0 {
-				return fmt.Errorf("generated invalid answers for questionnaire %s: %v", state.target.QuestionnaireCode, invalidAnswers)
+	}
+	state.outcome.AnswerSheetID = submission.AnswerSheetID
+	state.outcome.AssessmentID = submission.AssessmentID
+	state.outcome.AnswerSheetIDs = appendUniqueString(state.outcome.AnswerSheetIDs, state.outcome.AnswerSheetID)
+	if state.outcome.AssessmentID != "" {
+		state.outcome.AssessmentIDs = appendUniqueString(state.outcome.AssessmentIDs, state.outcome.AssessmentID)
+	}
+	if err := state.recordHistoricalLocalStage(submitCtx, dailySimulationJourneyStageAnswerSheet); err != nil {
+		return err
+	}
+	if state.target.RequiresAssessment {
+		for _, stage := range []dailySimulationJourneyStage{"assessment_created", "outcome_committed", "report_generated"} {
+			if _, historical := historicalseed.FromContext(submitCtx); historical {
+				if _, verified := submission.ServerStages[string(stage)]; !verified {
+					return fmt.Errorf("historical server stage %s was not verified", stage)
+				}
 			}
-			req := SubmitAnswerSheetRequest{
-				QuestionnaireCode: state.target.QuestionnaireCode, QuestionnaireVersion: state.target.QuestionnaireVersion,
-				Title: state.target.QuestionnaireTitle, TesteeID: testeeID,
-				OriginRef: &OriginRef{Type: "assessment_entry", ID: strings.TrimSpace(state.entry.ID)}, Answers: answers,
-			}
-			if taskID != "" {
-				req.TaskID = taskID
-				req.OriginRef = &OriginRef{Type: "plan_task", ID: taskID}
-			}
-			submission, err = submitDailySimulationAnswerSheet(submitCtx, state, req)
-			if err != nil {
+			if err := state.recordHistoricalLocalStage(submitCtx, stage); err != nil {
 				return err
 			}
 		}
-		state.outcome.AnswerSheetID = submission.AnswerSheetID
-		state.outcome.AssessmentID = submission.AssessmentID
-		state.outcome.AnswerSheetIDs = append(state.outcome.AnswerSheetIDs, state.outcome.AnswerSheetID)
-		if state.outcome.AssessmentID != "" {
-			state.outcome.AssessmentIDs = append(state.outcome.AssessmentIDs, state.outcome.AssessmentID)
+	}
+	if taskID != "" {
+		if _, historical := historicalseed.FromContext(submitCtx); historical {
+			if _, verified := submission.ServerStages["task_complete"]; !verified {
+				return fmt.Errorf("historical server stage task_complete was not verified")
+			}
 		}
-		if err := state.recordHistoricalLocalStage(submitCtx, dailySimulationJourneyStageAnswerSheet); err != nil {
+		if err := state.recordHistoricalLocalStage(submitCtx, dailySimulationJourneyStage("task_complete")); err != nil {
 			return err
 		}
-		if state.target.RequiresAssessment {
-			for _, stage := range []dailySimulationJourneyStage{"assessment_created", "outcome_committed", "report_generated"} {
-				if _, historical := historicalseed.FromContext(submitCtx); historical {
-					if _, verified := submission.ServerStages[string(stage)]; !verified {
-						return fmt.Errorf("historical server stage %s was not verified", stage)
-					}
-				}
-				if err := state.recordHistoricalLocalStage(submitCtx, stage); err != nil {
-					return err
-				}
-			}
-		}
-		if taskID != "" {
-			if _, historical := historicalseed.FromContext(submitCtx); historical {
-				if _, verified := submission.ServerStages["task_complete"]; !verified {
-					return fmt.Errorf("historical server stage task_complete was not verified")
-				}
-			}
-			if err := state.recordHistoricalLocalStage(submitCtx, dailySimulationJourneyStage("task_complete")); err != nil {
-				return err
-			}
-			state.outcome.CompletedTaskIDs = appendUniqueString(state.outcome.CompletedTaskIDs, taskID)
-		}
+		state.outcome.CompletedTaskIDs = appendUniqueString(state.outcome.CompletedTaskIDs, taskID)
+	}
+	return nil
+}
+
+func ensureHistoricalPlanTaskOpen(ctx context.Context, state *dailySimulationJourneyState, taskID string) error {
+	historical, ok := historicalseed.FromContext(ctx)
+	if !ok {
 		return nil
 	}
-	if len(state.selectedTasks) == 0 {
-		if err := submit(ctx, ""); err != nil {
-			return toolchain.Decision{}, err
+	if record, completed, err := completedHistoricalServerStage(ctx, historical.ScenarioID, "task_open"); err != nil {
+		return err
+	} else if completed {
+		if record.ResourceID != taskID {
+			return fmt.Errorf("historical task_open resource %s conflicts with task %s", record.ResourceID, taskID)
 		}
-	} else {
-		for _, task := range state.selectedTasks {
-			if err := submit(historicalseed.WithContext(ctx, task.Context), task.ID); err != nil {
-				return toolchain.Decision{}, fmt.Errorf("submit historical plan task %s: %w", task.ID, err)
-			}
-		}
+	} else if _, err := state.deps.APIClient.OpenPlanTask(ctx, taskID); err != nil {
+		return fmt.Errorf("open historical plan task %s: %w", taskID, err)
 	}
-	return state.nextDecision(dailySimulationJourneyStageAnswerSheet), nil
+	return state.recordHistoricalLocalStage(ctx, dailySimulationJourneyStage("task_open"))
+}
+
+func cloneDailySimulationJourneyStateForSubmission(state *dailySimulationJourneyState) *dailySimulationJourneyState {
+	clone := *state
+	clone.selectedTasks = nil
+	clone.outcome.TaskIDs = append([]string(nil), state.outcome.TaskIDs...)
+	clone.outcome.CompletedTaskIDs = nil
+	clone.outcome.ChildScenarioIDs = append([]string(nil), state.outcome.ChildScenarioIDs...)
+	clone.outcome.AdditionalScenarios = append([]HistoricalAdditionalScenarioManifest(nil), state.outcome.AdditionalScenarios...)
+	clone.outcome.AnswerSheetIDs = nil
+	clone.outcome.AssessmentIDs = nil
+	clone.outcome.AnswerSheetID = ""
+	clone.outcome.AssessmentID = ""
+	clone.outcome.SkippedSubmission = false
+	return &clone
+}
+
+func mergeDailySimulationSubmissionOutcome(target *dailySimulationOutcome, result dailySimulationOutcome) {
+	if target == nil {
+		return
+	}
+	if strings.TrimSpace(result.AnswerSheetID) != "" {
+		target.AnswerSheetID = result.AnswerSheetID
+	}
+	if strings.TrimSpace(result.AssessmentID) != "" {
+		target.AssessmentID = result.AssessmentID
+	}
+	target.AnswerSheetIDs = appendUniqueStrings(target.AnswerSheetIDs, result.AnswerSheetIDs)
+	target.AssessmentIDs = appendUniqueStrings(target.AssessmentIDs, result.AssessmentIDs)
+	target.CompletedTaskIDs = appendUniqueStrings(target.CompletedTaskIDs, result.CompletedTaskIDs)
+	target.SkippedSubmission = target.SkippedSubmission || result.SkippedSubmission
+}
+
+func mergeHistoricalSubmissionContext(workerCtx, sourceCtx context.Context) context.Context {
+	if sourceCtx == nil {
+		return workerCtx
+	}
+	return historicalSubmissionJobContext{Context: workerCtx, values: sourceCtx}
+}
+
+type historicalSubmissionJobContext struct {
+	context.Context
+	values context.Context
+}
+
+func (ctx historicalSubmissionJobContext) Value(key any) any {
+	return ctx.values.Value(key)
 }
 
 func restoreDailySimulationHistoricalSubmission(

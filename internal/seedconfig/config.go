@@ -30,15 +30,21 @@ const (
 	DefaultPlanSubmitActiveInterval           = "5s"
 	DefaultPlanSubmitCompletionPercent        = 100
 	DefaultPlanSubmitSubmissionStateFile      = ".seeddata-cache/plan-submit-submissions.json"
+	DefaultHistoricalParentWorkers            = 16
+	DefaultHistoricalSubmissionWorkers        = 24
+	DefaultHistoricalStageReadWorkers         = 16
+	DefaultHistoricalIAMWorkers               = 2
+	DefaultHistoricalProgressInterval         = "15s"
 )
 
 // Config 定义整个种子数据配置结构
 type Config struct {
-	Global          GlobalConfig          `yaml:"global"`
-	API             APIConfig             `yaml:"api"`
-	IAM             IAMConfig             `yaml:"iam"`
-	DailySimulation DailySimulationConfig `yaml:"dailySimulation"`
-	PlanSubmit      PlanSubmitConfig      `yaml:"planSubmit"`
+	Global             GlobalConfig             `yaml:"global"`
+	API                APIConfig                `yaml:"api"`
+	IAM                IAMConfig                `yaml:"iam"`
+	DailySimulation    DailySimulationConfig    `yaml:"dailySimulation"`
+	HistoricalBackfill HistoricalBackfillConfig `yaml:"historicalBackfill"`
+	PlanSubmit         PlanSubmitConfig         `yaml:"planSubmit"`
 }
 
 // GlobalConfig 全局配置
@@ -193,6 +199,16 @@ type PlanSubmitConfig struct {
 	SubmissionStateFile string       `yaml:"submissionStateFile"`
 }
 
+// HistoricalBackfillConfig owns settings that apply only to the finite
+// historical-backfill command, leaving ordinary daemon load unchanged.
+type HistoricalBackfillConfig struct {
+	ParentWorkers     int    `yaml:"parentWorkers"`
+	SubmissionWorkers int    `yaml:"submissionWorkers"`
+	StageReadWorkers  int    `yaml:"stageReadWorkers"`
+	IAMWorkers        int    `yaml:"iamWorkers"`
+	ProgressInterval  string `yaml:"progressInterval"`
+}
+
 func Load(filepath string) (*Config, error) {
 	data, err := os.ReadFile(filepath)
 	if err != nil {
@@ -232,6 +248,21 @@ func applyEnvOverrides(cfg *Config) {
 	if sharedSecret := strings.TrimSpace(os.Getenv("IAM_MOCK_CONSUMER_SHARED_SECRET")); sharedSecret != "" {
 		cfg.IAM.MockConsumer.SharedSecret = sharedSecret
 	}
+	if baseURL := strings.TrimSpace(os.Getenv("SEEDDATA_API_BASE_URL")); baseURL != "" {
+		cfg.API.BaseURL = baseURL
+	}
+	if baseURL := strings.TrimSpace(os.Getenv("SEEDDATA_COLLECTION_BASE_URL")); baseURL != "" {
+		cfg.API.CollectionBaseURL = baseURL
+	}
+	if baseURL := strings.TrimSpace(os.Getenv("SEEDDATA_IAM_BASE_URL")); baseURL != "" {
+		cfg.IAM.BaseURL = baseURL
+	}
+	if loginURL := strings.TrimSpace(os.Getenv("SEEDDATA_IAM_LOGIN_URL")); loginURL != "" {
+		cfg.IAM.LoginURL = loginURL
+	}
+	if path := strings.TrimSpace(os.Getenv("SEEDDATA_DAILY_SUBMISSION_STATE_FILE")); path != "" {
+		cfg.DailySimulation.SubmissionStateFile = path
+	}
 }
 
 func (cfg *Config) Normalize() {
@@ -244,6 +275,7 @@ func (cfg *Config) Normalize() {
 	cfg.API.Token = strings.TrimSpace(cfg.API.Token)
 	cfg.IAM.Normalize()
 	cfg.DailySimulation.Normalize()
+	cfg.HistoricalBackfill.Normalize()
 	cfg.PlanSubmit.Normalize()
 }
 
@@ -260,10 +292,75 @@ func (cfg *Config) Validate() error {
 	if err := cfg.DailySimulation.Validate(); err != nil {
 		return err
 	}
+	if err := cfg.HistoricalBackfill.Validate(); err != nil {
+		return err
+	}
 	if err := cfg.PlanSubmit.Validate(); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (cfg HistoricalBackfillConfig) IsZero() bool {
+	return cfg.ParentWorkers == 0 &&
+		cfg.SubmissionWorkers == 0 &&
+		cfg.StageReadWorkers == 0 &&
+		cfg.IAMWorkers == 0 &&
+		strings.TrimSpace(cfg.ProgressInterval) == ""
+}
+
+func (cfg *HistoricalBackfillConfig) Normalize() {
+	if cfg == nil {
+		return
+	}
+	cfg.ProgressInterval = strings.TrimSpace(cfg.ProgressInterval)
+}
+
+func (cfg HistoricalBackfillConfig) Validate() error {
+	if cfg.IsZero() {
+		return nil
+	}
+	if cfg.ParentWorkers <= 0 {
+		return fmt.Errorf("historicalBackfill.parentWorkers must be positive")
+	}
+	if cfg.SubmissionWorkers <= 0 {
+		return fmt.Errorf("historicalBackfill.submissionWorkers must be positive")
+	}
+	if cfg.StageReadWorkers <= 0 {
+		return fmt.Errorf("historicalBackfill.stageReadWorkers must be positive")
+	}
+	if cfg.IAMWorkers <= 0 {
+		return fmt.Errorf("historicalBackfill.iamWorkers must be positive")
+	}
+	interval, err := scheduler.ParseRelativeDuration(cfg.ProgressInterval)
+	if err != nil {
+		return fmt.Errorf("historicalBackfill.progressInterval is invalid: %w", err)
+	}
+	if interval <= 0 {
+		return fmt.Errorf("historicalBackfill.progressInterval must be positive")
+	}
+	return nil
+}
+
+// ResolveHistoricalBackfill preserves the old command behavior when the new
+// block is absent. An explicit block is used verbatim after validation.
+func (cfg Config) ResolveHistoricalBackfill() HistoricalBackfillConfig {
+	if cfg.HistoricalBackfill.IsZero() {
+		parentWorkers := cfg.DailySimulation.Workers
+		if parentWorkers <= 0 {
+			parentWorkers = DefaultDailySimulationWorkers
+		}
+		iamWorkers := cfg.IAM.MockConsumer.MaxConcurrent
+		if iamWorkers <= 0 {
+			iamWorkers = 1
+		}
+		return HistoricalBackfillConfig{
+			ParentWorkers: parentWorkers, SubmissionWorkers: parentWorkers,
+			StageReadWorkers: 1, IAMWorkers: iamWorkers,
+			ProgressInterval: DefaultHistoricalProgressInterval,
+		}
+	}
+	return cfg.HistoricalBackfill
 }
 
 func (cfg *IAMConfig) Normalize() {

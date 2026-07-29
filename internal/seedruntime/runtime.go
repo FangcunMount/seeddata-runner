@@ -23,7 +23,7 @@ type Dependencies struct {
 	Config                *seedconfig.Config
 	APIClient             *seedapi.APIClient
 	CollectionClient      *seedapi.APIClient
-	DailySubmissionLedger *toolanswersheet.SubmissionLedger
+	DailySubmissionLedger toolanswersheet.SubmissionStore
 	PlanSubmissionLedger  *toolanswersheet.SubmissionLedger
 }
 

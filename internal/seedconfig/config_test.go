@@ -214,6 +214,91 @@ planSubmit:
 	}
 }
 
+func TestLoadOverridesInternalServiceURLsFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "seeddata.yaml")
+	content := `
+global:
+  orgId: 1
+api:
+  baseUrl: "https://qs.example.com"
+  collectionBaseUrl: "https://collect.example.com"
+iam:
+  baseUrl: "https://iam.example.com"
+  loginUrl: "https://iam.example.com/api/v2/authn/login"
+dailySimulation:
+  clinicianIds: ["1001"]
+  targetType: "scale"
+  targetCode: "SAS"
+  planIds: ["614333603412718126"]
+planSubmit:
+  planIds: ["614333603412718126"]
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SEEDDATA_API_BASE_URL", "http://qs-apiserver:8080")
+	t.Setenv("SEEDDATA_COLLECTION_BASE_URL", "http://qs-collection-server:8080")
+	t.Setenv("SEEDDATA_IAM_BASE_URL", "http://iam-apiserver:9080")
+	t.Setenv("SEEDDATA_IAM_LOGIN_URL", "http://iam-apiserver:9080/api/v2/authn/login")
+	t.Setenv("SEEDDATA_DAILY_SUBMISSION_STATE_FILE", "/state/legacy-submissions.json")
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.API.BaseURL != "http://qs-apiserver:8080" || cfg.API.CollectionBaseURL != "http://qs-collection-server:8080" ||
+		cfg.IAM.BaseURL != "http://iam-apiserver:9080" || cfg.IAM.LoginURL != "http://iam-apiserver:9080/api/v2/authn/login" {
+		t.Fatalf("unexpected internal urls: api=%q collection=%q iam=%q login=%q", cfg.API.BaseURL, cfg.API.CollectionBaseURL, cfg.IAM.BaseURL, cfg.IAM.LoginURL)
+	}
+	if cfg.DailySimulation.SubmissionStateFile != "/state/legacy-submissions.json" {
+		t.Fatalf("unexpected daily submission state file: %s", cfg.DailySimulation.SubmissionStateFile)
+	}
+}
+
+func TestResolveHistoricalBackfillPreservesLegacyDefaultsWhenBlockMissing(t *testing.T) {
+	cfg := Config{DailySimulation: DailySimulationConfig{Workers: 7}, IAM: IAMConfig{MockConsumer: IAMMockConsumerConfig{MaxConcurrent: 1}}}
+	resolved := cfg.ResolveHistoricalBackfill()
+	if resolved.ParentWorkers != 7 || resolved.SubmissionWorkers != 7 || resolved.StageReadWorkers != 1 || resolved.IAMWorkers != 1 || resolved.ProgressInterval != "15s" {
+		t.Fatalf("unexpected legacy fallback: %+v", resolved)
+	}
+}
+
+func TestLoadHistoricalBackfillConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "seeddata.yaml")
+	content := `
+global:
+  orgId: 1
+api:
+  baseUrl: "https://qs.example.com"
+dailySimulation:
+  clinicianIds: ["1001"]
+  targetType: "scale"
+  targetCode: "SAS"
+  planIds: ["614333603412718126"]
+historicalBackfill:
+  parentWorkers: 16
+  submissionWorkers: 24
+  stageReadWorkers: 16
+  iamWorkers: 2
+  progressInterval: "15s"
+planSubmit:
+  planIds: ["614333603412718126"]
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := cfg.ResolveHistoricalBackfill()
+	if resolved.ParentWorkers != 16 || resolved.SubmissionWorkers != 24 || resolved.StageReadWorkers != 16 || resolved.IAMWorkers != 2 || resolved.ProgressInterval != "15s" {
+		t.Fatalf("unexpected historical config: %+v", resolved)
+	}
+}
+
 func TestLoadAcceptsDailySimulationWindowSchedule(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "seeddata.yaml")

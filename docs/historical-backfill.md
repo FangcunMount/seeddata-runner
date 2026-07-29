@@ -5,29 +5,36 @@
 
 ## 前置条件
 
-- IAM `mockConsumer.enabled=true`，`maxConcurrent: 1`；共享密钥只通过
+- IAM `mockConsumer.enabled=true`；历史回填默认将 IAM 并发限制为 2，共享密钥只通过
   `IAM_MOCK_CONSUMER_SHARED_SECRET` 注入。
 - qs-server apiserver 与 collection-server 使用相同的
   `QS_HISTORICAL_CONTEXT_SECRET`，并已启用限定 Org、`2025-01-01..2026-07-27` 的历史开关。
 - apiserver 设置 `historical_seed.pause_plan_scheduler: true`；回填期间停用独立 Plan scheduler。
-- Daily Simulation 配置 `countMin: 40`、`countMax: 200`、`workers: 5`，Journey 权重为
+- Daily Simulation 配置 `countMin: 40`、`countMax: 200`，Journey 权重为
   `10/15/25/50`，Plan 列表、入口和已发布 target 版本均已确认。
 - 已保存 Statistics 回填前基线；worker 正常运行，且没有同时运行普通 seeddata daemon。
 
 ## 构建与预检
 
 ```bash
-go build -o tmp/bin/seeddata ./cmd/seeddata
-go test ./...
+GOTOOLCHAIN=go1.25.9 go test ./...
+CGO_ENABLED=0 GOTOOLCHAIN=go1.25.9 go build -trimpath \
+  -o tmp/bin/seeddata \
+  ./cmd/seeddata
 export IAM_MOCK_CONSUMER_SHARED_SECRET='<secret>'
 export QS_HISTORICAL_CONTEXT_SECRET='<secret>'
 ```
+
+历史模式默认使用父场景 16、submission 24、stage reader 16、IAM 2 路并发。可以在
+`historicalBackfill` 配置块设置，也可以用 `--parent-workers`、`--submission-workers`、
+`--stage-read-workers`、`--iam-workers` 临时覆盖。普通 daemon 不读取这些参数。
 
 先用 3 天范围执行本地或 staging 验证；成功后使用正式批次 ID：
 
 ```bash
 tmp/bin/seeddata historical-backfill \
   --config configs/seeddata.yaml \
+  --state-dir /secure/path/seeddata-historical-state \
   --from 2025-01-01 \
   --to 2026-07-27 \
   --batch-id hist-20250101-20260727-v1
@@ -39,11 +46,67 @@ tmp/bin/seeddata historical-backfill \
 ```bash
 tmp/bin/seeddata historical-backfill \
   --config configs/seeddata.yaml \
+  --state-dir /secure/path/seeddata-historical-state \
   --from 2025-01-01 \
   --to 2026-07-27 \
   --batch-id hist-20250101-20260727-v1 \
   --resume
 ```
+
+`--resume` 首次发现旧 JSON 状态时，会在任何 IAM 登录或业务 HTTP 请求前，将 checkpoint、
+manifest、分片 stage ledger 和可归属本批次的 submission 迁移到权限为 `0600` 的
+`historical-state-v2.db`。迁移通过临时数据库校验后原子替换，旧 JSON 文件只读保留。
+迁移冲突或同一批次已有 writer 时命令直接退出；不要删除数据库或更换 batch ID。
+
+运行中每 15 秒输出当前自然日、父场景进度、已发现/完成 submission、Report 数、吞吐、
+in-flight、失败数和 ETA。自然日仍然串行，只有日终完整校验通过才推进 checkpoint。
+
+## ServerA 内网一次性容器
+
+先构建静态二进制镜像：
+
+```bash
+SEEDDATA_HISTORICAL_IMAGE=seeddata-runner:historical \
+  ./scripts/build_historical_container.sh
+```
+
+准备权限为 `0600` 的环境文件，至少包含 IAM 登录凭据、
+`IAM_MOCK_CONSUMER_SHARED_SECRET` 和 `QS_HISTORICAL_CONTEXT_SECRET`。不要把密钥写入 YAML：
+
+```bash
+install -m 0600 /dev/null /secure/path/seeddata-historical.env
+```
+
+设置宿主机路径并运行：
+
+```bash
+export SEEDDATA_HISTORICAL_CONFIG=/opt/seeddata-runner/configs/seeddata.yaml
+export SEEDDATA_HISTORICAL_STATE_DIR=/secure/path/seeddata-historical-state
+export SEEDDATA_HISTORICAL_ENV_FILE=/secure/path/seeddata-historical.env
+export SEEDDATA_HISTORICAL_BATCH_ID=hist-20250101-20260727-v1
+export SEEDDATA_HISTORICAL_RESUME=1
+# 仅第一次把旧批次迁移为 v2 时必填；迁移成功后可取消。
+export SEEDDATA_HISTORICAL_LEGACY_SUBMISSION_FILE=/opt/seeddata-runner/.seeddata-cache/daily-simulation-submissions.json
+
+./scripts/run_historical_container.sh
+```
+
+镜像内进程使用 UID/GID `10001:10001`；配置文件必须允许该用户读取，状态目录必须允许该
+用户写入。脚本会用同一镜像用户实际创建并删除一个预检文件，不能写时会在回填前退出。
+第一次 `--resume` 若尚无 v2 数据库，脚本还会把旧 submission ledger 只读挂载给迁移器；
+缺少该文件时拒绝启动，避免遗漏已经 accepted/pending 的 AnswerSheet 身份。
+
+脚本会先确认 `infra-network`、状态目录写权限、三个容器 DNS 名称和健康接口；任一失败即
+停止，不回退公网。正式容器固定使用：
+
+- QS：`http://qs-apiserver:8080`
+- Collection：`http://qs-collection-server:8080`
+- IAM：`http://iam-apiserver:9080`
+- IAM login：`http://iam-apiserver:9080/api/v2/authn/login`
+
+容器以非 root 用户、只读根文件系统、`cap-drop=ALL`、`no-new-privileges` 运行；配置只读
+挂载，状态目录读写挂载，环境文件由 Docker 读取后注入。JWT、IAM shared secret 和历史
+HMAC 校验全部保留。
 
 不得更换 batch ID 或幂等键来绕过 payload conflict。出现 target/Plan 版本漂移时，恢复原冻结版本或新建经审批的批次，不能继续原批次。
 
@@ -82,6 +145,7 @@ tmp/bin/seeddata historical-verify \
   --batch-id hist-20250101-20260727-v1
 
 tmp/bin/seeddata historical-manifest \
+  --state-dir /secure/path/seeddata-historical-state \
   --batch-id hist-20250101-20260727-v1
 ```
 

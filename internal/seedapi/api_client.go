@@ -60,6 +60,18 @@ const (
 	seedTokenRefreshSkew = 2 * time.Minute
 )
 
+var sharedAPITransport = &http.Transport{
+	Proxy:                 http.ProxyFromEnvironment,
+	DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	ForceAttemptHTTP2:     true,
+	MaxIdleConns:          128,
+	MaxIdleConnsPerHost:   64,
+	MaxConnsPerHost:       64,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ExpectContinueTimeout: time.Second,
+}
+
 // NewAPIClient 创建 API 客户端
 func NewAPIClient(baseURL, token string, logger log.Logger) *APIClient {
 	// 确保 baseURL 不以斜杠结尾
@@ -71,7 +83,8 @@ func NewAPIClient(baseURL, token string, logger log.Logger) *APIClient {
 		baseURL: baseURL,
 		token:   token,
 		httpClient: &http.Client{
-			Timeout: defaultHTTPTimeout,
+			Timeout:   defaultHTTPTimeout,
+			Transport: sharedAPITransport,
 		},
 		logger:              logger,
 		retryMax:            retryMax,
@@ -1159,9 +1172,12 @@ func (c *APIClient) doRequestWithHeadersRetryTimeoutAndLimit(
 		}
 
 		respBody, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		closeErr := resp.Body.Close()
 		if readErr != nil {
 			return nil, fmt.Errorf("read response: %w", readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close response: %w", closeErr)
 		}
 
 		if isHTTPSuccess(resp.StatusCode) {

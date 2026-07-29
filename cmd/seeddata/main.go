@@ -15,15 +15,19 @@ import (
 )
 
 type cliOptions struct {
-	command    string
-	configPath string
-	verbose    bool
-	from       string
-	to         string
-	batchID    string
-	resume     bool
-	stateDir   string
-	expectedDB string
+	command           string
+	configPath        string
+	verbose           bool
+	from              string
+	to                string
+	batchID           string
+	resume            bool
+	stateDir          string
+	expectedDB        string
+	parentWorkers     int
+	submissionWorkers int
+	stageReadWorkers  int
+	iamWorkers        int
 }
 
 func main() {
@@ -67,6 +71,34 @@ func main() {
 
 	ctx, cancel := seedruntime.NewSignalContext()
 	defer cancel()
+	var historicalOpts dailysim.HistoricalBackfillOptions
+	switch opts.command {
+	case "historical-backfill":
+		historicalConfig := cfg.ResolveHistoricalBackfill()
+		if opts.parentWorkers > 0 {
+			historicalConfig.ParentWorkers = opts.parentWorkers
+		}
+		if opts.submissionWorkers > 0 {
+			historicalConfig.SubmissionWorkers = opts.submissionWorkers
+		}
+		if opts.stageReadWorkers > 0 {
+			historicalConfig.StageReadWorkers = opts.stageReadWorkers
+		}
+		if opts.iamWorkers > 0 {
+			historicalConfig.IAMWorkers = opts.iamWorkers
+		}
+		historicalOpts = dailysim.HistoricalBackfillOptions{
+			From: opts.from, To: opts.to, BatchID: opts.batchID, Resume: opts.resume, StateDir: opts.stateDir,
+			CountMin: cfg.DailySimulation.CountMin, CountMax: cfg.DailySimulation.CountMax,
+			Workers: historicalConfig.ParentWorkers, SubmissionWorkers: historicalConfig.SubmissionWorkers,
+			StageReadWorkers: historicalConfig.StageReadWorkers, IAMWorkers: historicalConfig.IAMWorkers,
+			ProgressInterval: historicalConfig.ProgressInterval,
+		}
+		if err := dailysim.PrepareHistoricalBackfillState(historicalOpts, cfg.Global.OrgID, cfg.DailySimulation.SubmissionStateFile); err != nil {
+			logger.Errorw("Prepare historical state failed", "error", err.Error())
+			os.Exit(1)
+		}
+	}
 
 	deps, err := seedruntime.LoadDependencies(ctx, cfg, logger)
 	if err != nil {
@@ -86,12 +118,10 @@ func main() {
 		return
 	}
 
-	if opts.command == "historical-backfill" {
-		err = dailysim.RunHistoricalBackfill(ctx, deps, dailysim.HistoricalBackfillOptions{
-			From: opts.from, To: opts.to, BatchID: opts.batchID, Resume: opts.resume, StateDir: opts.stateDir,
-			CountMin: cfg.DailySimulation.CountMin, CountMax: cfg.DailySimulation.CountMax, Workers: cfg.DailySimulation.Workers,
-		})
-	} else {
+	switch opts.command {
+	case "historical-backfill":
+		err = dailysim.RunHistoricalBackfill(ctx, deps, historicalOpts)
+	default:
 		err = runSeedSupervisor(ctx, deps, opts.verbose)
 	}
 	if err != nil {
@@ -113,12 +143,17 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 	fs.StringVar(&opts.configPath, "config", "./configs/seeddata.yaml", "path to seeddata config yaml")
 	fs.BoolVar(&opts.verbose, "verbose", false, "enable verbose logging")
 	fs.StringVar(&opts.stateDir, "state-dir", opts.stateDir, "historical checkpoint and manifest directory")
-	if opts.command == "historical-backfill" {
+	switch opts.command {
+	case "historical-backfill":
 		fs.StringVar(&opts.from, "from", "", "first historical business date (YYYY-MM-DD)")
 		fs.StringVar(&opts.to, "to", "", "last historical business date (YYYY-MM-DD)")
 		fs.StringVar(&opts.batchID, "batch-id", "", "stable historical batch identity")
 		fs.BoolVar(&opts.resume, "resume", false, "resume from the first incomplete day")
-	} else if opts.command == "historical-verify" || opts.command == "historical-manifest" || opts.command == "historical-testee-time-repair-sql" {
+		fs.IntVar(&opts.parentWorkers, "parent-workers", 0, "override historical parent worker count")
+		fs.IntVar(&opts.submissionWorkers, "submission-workers", 0, "override historical submission worker count")
+		fs.IntVar(&opts.stageReadWorkers, "stage-read-workers", 0, "override historical stage reader count")
+		fs.IntVar(&opts.iamWorkers, "iam-workers", 0, "override historical IAM worker count")
+	case "historical-verify", "historical-manifest", "historical-testee-time-repair-sql":
 		fs.StringVar(&opts.batchID, "batch-id", "", "historical batch identity")
 		if opts.command == "historical-testee-time-repair-sql" {
 			fs.StringVar(&opts.expectedDB, "expected-database", "", "exact QS MySQL database name")
@@ -129,6 +164,14 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 	}
 	if opts.command == "historical-backfill" && (opts.from == "" || opts.to == "" || opts.batchID == "") {
 		return cliOptions{}, fmt.Errorf("historical-backfill requires --from, --to and --batch-id")
+	}
+	for name, value := range map[string]int{
+		"parent-workers": opts.parentWorkers, "submission-workers": opts.submissionWorkers,
+		"stage-read-workers": opts.stageReadWorkers, "iam-workers": opts.iamWorkers,
+	} {
+		if value < 0 {
+			return cliOptions{}, fmt.Errorf("--%s must be positive when set", name)
+		}
 	}
 	if (opts.command == "historical-verify" || opts.command == "historical-manifest" || opts.command == "historical-testee-time-repair-sql") && opts.batchID == "" {
 		return cliOptions{}, fmt.Errorf("%s requires --batch-id", opts.command)

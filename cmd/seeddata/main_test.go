@@ -36,6 +36,29 @@ func TestParseHistoricalBackfillCLI(t *testing.T) {
 	}
 }
 
+func TestParseHistoricalBackfillConcurrencyOverrides(t *testing.T) {
+	opts, err := parseCLIOptions([]string{
+		"historical-backfill", "--from", "2025-01-01", "--to", "2026-07-27", "--batch-id", "batch",
+		"--parent-workers", "16", "--submission-workers", "24", "--stage-read-workers", "12", "--iam-workers", "2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.parentWorkers != 16 || opts.submissionWorkers != 24 || opts.stageReadWorkers != 12 || opts.iamWorkers != 2 {
+		t.Fatalf("unexpected concurrency options: %+v", opts)
+	}
+}
+
+func TestParseHistoricalBackfillRejectsNegativeConcurrencyOverride(t *testing.T) {
+	_, err := parseCLIOptions([]string{
+		"historical-backfill", "--from", "2025-01-01", "--to", "2026-07-27", "--batch-id", "batch",
+		"--submission-workers", "-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "--submission-workers must be positive") {
+		t.Fatalf("expected negative concurrency error, got %v", err)
+	}
+}
+
 func TestParseHistoricalReadOnlyCommandsRequireBatch(t *testing.T) {
 	for _, command := range []string{"historical-verify", "historical-manifest"} {
 		if _, err := parseCLIOptions([]string{command}); err == nil {

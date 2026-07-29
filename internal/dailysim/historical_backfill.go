@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
+	"golang.org/x/sync/errgroup"
 )
 
 const historicalTimezone = "Asia/Shanghai"
@@ -98,14 +99,18 @@ func recordHistoricalPlanTaskDiscovery(ctx context.Context, historical historica
 }
 
 type HistoricalBackfillOptions struct {
-	From     string
-	To       string
-	BatchID  string
-	Resume   bool
-	StateDir string
-	CountMin int
-	CountMax int
-	Workers  int
+	From              string
+	To                string
+	BatchID           string
+	Resume            bool
+	StateDir          string
+	CountMin          int
+	CountMax          int
+	Workers           int
+	SubmissionWorkers int
+	StageReadWorkers  int
+	IAMWorkers        int
+	ProgressInterval  string
 }
 
 type HistoricalTargetManifest struct {
@@ -258,34 +263,52 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 	if opts.Workers <= 0 {
 		opts.Workers = 5
 	}
+	if opts.SubmissionWorkers <= 0 {
+		opts.SubmissionWorkers = opts.Workers
+	}
+	if opts.StageReadWorkers <= 0 {
+		opts.StageReadWorkers = 1
+	}
+	if opts.IAMWorkers <= 0 {
+		opts.IAMWorkers = 1
+	}
+	progressInterval := 15 * time.Second
+	if strings.TrimSpace(opts.ProgressInterval) != "" {
+		progressInterval, err = time.ParseDuration(opts.ProgressInterval)
+		if err != nil || progressInterval <= 0 {
+			return fmt.Errorf("invalid historical progress interval %q", opts.ProgressInterval)
+		}
+	}
 
-	checkpointPath, manifestPath := historicalPaths(opts.StateDir, opts.BatchID)
-	checkpoint := HistoricalCheckpoint{}
-	checkpointExists, err := loadSecureJSON(checkpointPath, &checkpoint)
+	store, err := openHistoricalStateStore(opts.StateDir, opts.BatchID, false)
 	if err != nil {
 		return err
 	}
-	manifest := HistoricalManifest{}
-	manifestExists, err := loadSecureJSON(manifestPath, &manifest)
+	defer func() { _ = store.Close() }()
+	identity, err := store.loadIdentity()
 	if err != nil {
 		return err
 	}
-	if checkpointExists && !opts.Resume {
+	expectedIdentity := historicalStateIdentity{Version: historicalStateDBVersion, BatchID: opts.BatchID, OrgID: deps.Config.Global.OrgID, From: opts.From, To: opts.To}
+	if identity != expectedIdentity {
+		return fmt.Errorf("historical state identity conflict: stored=%+v requested=%+v", identity, expectedIdentity)
+	}
+	checkpoint, err := store.loadCheckpoint()
+	if err != nil {
+		return err
+	}
+	manifest, err := store.loadManifest()
+	if err != nil {
+		return err
+	}
+	if !opts.Resume && (strings.TrimSpace(checkpoint.CompletedThrough) != "" || len(manifest.Scenarios) > 0) {
 		return fmt.Errorf("historical checkpoint already exists for batch %s; use --resume", opts.BatchID)
 	}
-	if checkpointExists && (checkpoint.BatchID != opts.BatchID || checkpoint.From != opts.From || checkpoint.To != opts.To) {
+	if checkpoint.BatchID != opts.BatchID || checkpoint.From != opts.From || checkpoint.To != opts.To {
 		return fmt.Errorf("historical checkpoint identity conflicts with requested batch/range")
 	}
-	if manifestExists && (manifest.BatchID != opts.BatchID || manifest.From != opts.From || manifest.To != opts.To || manifest.OrgID != deps.Config.Global.OrgID) {
+	if manifest.BatchID != opts.BatchID || manifest.From != opts.From || manifest.To != opts.To || manifest.OrgID != deps.Config.Global.OrgID {
 		return fmt.Errorf("historical manifest identity conflicts with requested batch/range/org")
-	}
-	if !manifestExists {
-		now := time.Now().UTC()
-		manifest = HistoricalManifest{
-			Version: 1, BatchID: opts.BatchID, OrgID: deps.Config.Global.OrgID, From: opts.From, To: opts.To,
-			Timezone: historicalTimezone, CreatedAt: now, UpdatedAt: now,
-			Targets: make(map[string]HistoricalTargetManifest), Plans: make(map[string]HistoricalPlanManifest), Scenarios: make(map[string]HistoricalScenarioManifest), DailyCounts: make(map[string]int),
-		}
 	}
 	if manifest.Targets == nil {
 		manifest.Targets = make(map[string]HistoricalTargetManifest)
@@ -299,9 +322,9 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 	if manifest.DailyCounts == nil {
 		manifest.DailyCounts = make(map[string]int)
 	}
-	if !checkpointExists {
-		checkpoint = HistoricalCheckpoint{Version: 1, BatchID: opts.BatchID, From: opts.From, To: opts.To}
-	}
+	runDeps := *deps
+	runDeps.DailySubmissionLedger = store
+	deps = &runDeps
 
 	start := from
 	if checkpoint.CompletedThrough != "" {
@@ -324,77 +347,111 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 			return fmt.Errorf("historical plan drift on %s: %w", dayKey, err)
 		}
 		manifest.UpdatedAt = time.Now().UTC()
-		if err := saveSecureJSON(manifestPath, &manifest); err != nil {
+		if err := persistHistoricalFrozenConfiguration(store, manifest); err != nil {
 			return err
 		}
 		count := DeterministicHistoricalCount(opts.BatchID, day, opts.CountMin, opts.CountMax)
-		daySnapshot, snapshotErr := buildHistoricalDaySnapshot(dayCtx, deps, cfg, &manifest, day, count, opts.StateDir)
+		recoveringDay := historicalManifestContainsDay(manifest, dayKey)
+		if err := store.putDayState(dayKey, "running"); err != nil {
+			return err
+		}
+		daySnapshot, snapshotErr := buildHistoricalDaySnapshot(dayCtx, deps, cfg, &manifest, day, count, opts.StateDir, store, opts.StageReadWorkers, recoveringDay)
 		if snapshotErr != nil {
 			return fmt.Errorf("historical snapshot stopped on %s: %w", dayKey, snapshotErr)
 		}
-		manifest.UpdatedAt = time.Now().UTC()
-		if err := saveSecureJSON(manifestPath, &manifest); err != nil {
-			return err
+		for _, scenario := range daySnapshot.Expected {
+			if err := store.putScenario(scenario); err != nil {
+				return err
+			}
 		}
 		dayCtx = withHistoricalDaySnapshot(dayCtx, daySnapshot)
+		executor := newHistoricalSubmissionExecutor(dayCtx, deps.Logger, dayKey, count, opts.SubmissionWorkers, progressInterval)
+		dayCtx = withHistoricalSubmissionExecutor(dayCtx, executor)
 		cfg.Workers = opts.Workers
 		err := runDailySimulationBatchWithOptions(dayCtx, deps, cfg, day, count, "historical_backfill_"+dayKey, dailySimulationBatchOptions{
 			HistoricalBatchID: opts.BatchID,
+			IAMWorkers:        opts.IAMWorkers,
 			ShouldSkipScenario: func(profile dailySimulationProfile, scenario dailySimulationScenario) bool {
 				historical := buildHistoricalScenarioContext(opts.BatchID, uint64(deps.Config.Global.OrgID), cfg, profile, scenario)
 				manifestMu.Lock()
-				defer manifestMu.Unlock()
 				recorded, exists := manifest.Scenarios[historical.ScenarioID]
-				return exists && strings.TrimSpace(recorded.Terminal) != ""
+				manifestMu.Unlock()
+				skip := exists && strings.TrimSpace(recorded.Terminal) != ""
+				if skip {
+					executor.MarkParentCompleted()
+				}
+				return skip
 			},
 			RestoreExistingTestee: func(profile dailySimulationProfile, scenario dailySimulationScenario) (*ApiserverTesteeResponse, error) {
 				historical := buildHistoricalScenarioContext(opts.BatchID, uint64(deps.Config.Global.OrgID), cfg, profile, scenario)
-				return restoreHistoricalExistingTestee(opts.StateDir, opts.BatchID, profile, historical.ScenarioID, cfg)
+				return restoreHistoricalExistingTesteeFromStore(store, historical.ScenarioID, profile, cfg)
 			},
 			ValidateScenario: func(scenario dailySimulationScenario) error {
 				manifestMu.Lock()
-				defer manifestMu.Unlock()
 				if err := freezeHistoricalTarget(&manifest, scenario); err != nil {
+					manifestMu.Unlock()
 					return err
 				}
+				key := strings.Join([]string{scenario.Target.TargetType, scenario.Target.TargetCode}, "/")
 				manifest.UpdatedAt = time.Now().UTC()
-				return saveSecureJSON(manifestPath, &manifest)
+				frozen, header := manifest.Targets[key], manifest
+				manifestMu.Unlock()
+				if err := store.putTarget(key, frozen); err != nil {
+					return err
+				}
+				return store.putManifestHeader(header)
 			},
 			OnScenarioComplete: func(profile dailySimulationProfile, scenario dailySimulationScenario, outcome dailySimulationOutcome) error {
-				manifestMu.Lock()
-				defer manifestMu.Unlock()
-				localStages, loadErr := loadHistoricalLocalScenarioStages(opts.StateDir, opts.BatchID, profile.RunDate, buildHistoricalScenarioContext(opts.BatchID, uint64(deps.Config.Global.OrgID), cfg, profile, scenario).ScenarioID)
+				scenarioID := buildHistoricalScenarioContext(opts.BatchID, uint64(deps.Config.Global.OrgID), cfg, profile, scenario).ScenarioID
+				localStages, loadErr := store.loadLocalStages(scenarioID)
 				if loadErr != nil {
 					return loadErr
 				}
+				manifestMu.Lock()
 				recordHistoricalScenario(&manifest, opts.BatchID, profile, scenario, outcome, localStages)
+				recorded := manifest.Scenarios[scenarioID]
+				manifestMu.Unlock()
+				if err := store.putScenario(recorded); err != nil {
+					return err
+				}
+				executor.MarkParentCompleted()
 				return nil
 			},
 			OnHistoricalStageComplete: func(profile dailySimulationProfile, scenario dailySimulationScenario, historical historicalseed.Context, stage dailySimulationJourneyStage, outcome dailySimulationOutcome, target *dailySimulationResolvedTarget) error {
-				manifestMu.Lock()
-				defer manifestMu.Unlock()
 				if target != nil {
+					manifestMu.Lock()
 					if err := freezeHistoricalTarget(&manifest, dailySimulationScenario{Target: target}); err != nil {
+						manifestMu.Unlock()
+						return err
+					}
+					key := strings.Join([]string{target.TargetType, target.TargetCode}, "/")
+					frozen := manifest.Targets[key]
+					manifestMu.Unlock()
+					if err := store.putTarget(key, frozen); err != nil {
 						return err
 					}
 				}
-				if err := recordHistoricalLocalStage(opts.StateDir, &manifest, profile, scenario, historical, stage, outcome, target); err != nil {
-					return err
-				}
-				return nil
+				return recordHistoricalLocalStageInStore(store, &manifest, profile, scenario, historical, stage, outcome, target)
 			},
 			OnHistoricalPlanTaskFound: func(_ dailySimulationProfile, _ dailySimulationScenario, historical historicalseed.Context, recovery HistoricalPlanTaskRecovery) error {
 				manifestMu.Lock()
-				defer manifestMu.Unlock()
 				parent := manifest.Scenarios[historical.ScenarioID]
+				manifestMu.Unlock()
 				if strings.TrimSpace(parent.ScenarioID) == "" {
 					return fmt.Errorf("historical parent scenario %s is not materialized before task discovery", historical.ScenarioID)
 				}
+				if err := store.putPlanTask(historical.ScenarioID, recovery); err != nil {
+					return err
+				}
+				manifestMu.Lock()
+				parent = manifest.Scenarios[historical.ScenarioID]
 				for _, existing := range parent.PlanTaskRecoveries {
 					if existing.TaskID == recovery.TaskID {
 						if existing != recovery {
+							manifestMu.Unlock()
 							return fmt.Errorf("historical plan task recovery conflict for %s", recovery.TaskID)
 						}
+						manifestMu.Unlock()
 						return nil
 					}
 				}
@@ -403,24 +460,24 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 				parent.TaskIDs = appendUniqueString(parent.TaskIDs, recovery.TaskID)
 				manifest.Scenarios[historical.ScenarioID] = parent
 				manifest.UpdatedAt = time.Now().UTC()
-				return saveSecureJSON(manifestPath, &manifest)
+				manifestMu.Unlock()
+				return store.putScenario(parent)
 			},
 		})
+		executor.Close()
 		var dayVerifyErr error
 		if err == nil {
-			stages, stageErr := loadHistoricalSeedStagesForDay(ctx, deps.APIClient, manifest, day)
+			stages, stageErr := loadHistoricalSeedStagesForDayConcurrent(ctx, deps.APIClient, manifest, day, opts.StageReadWorkers)
 			if stageErr != nil {
 				dayVerifyErr = fmt.Errorf("load historical stages for %s: %w", dayKey, stageErr)
 			} else {
-				manifestMu.Lock()
 				mergeHistoricalStageResources(&manifest, stages)
-				dayVerifyErr = verifyHistoricalDay(opts.StateDir, &manifest, day, count, stages)
-				manifestMu.Unlock()
+				dayVerifyErr = verifyHistoricalDayWithStore(store, &manifest, day, count, stages)
 			}
 		}
 		manifestMu.Lock()
 		manifest.UpdatedAt = time.Now().UTC()
-		saveErr := saveSecureJSON(manifestPath, &manifest)
+		saveErr := persistHistoricalDay(store, manifest, dayKey)
 		manifestMu.Unlock()
 		if saveErr != nil {
 			return saveErr
@@ -433,7 +490,13 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 		}
 		checkpoint.CompletedThrough = dayKey
 		checkpoint.UpdatedAt = time.Now().UTC()
-		if err := saveSecureJSON(checkpointPath, &checkpoint); err != nil {
+		if err := store.putDayState(dayKey, "verified"); err != nil {
+			return err
+		}
+		if err := store.putCheckpoint(checkpoint); err != nil {
+			return err
+		}
+		if err := store.exportJSON(opts.StateDir, opts.BatchID); err != nil {
 			return err
 		}
 	}
@@ -442,11 +505,23 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 		return fmt.Errorf("load terminal historical stage ledger: %w", err)
 	}
 	mergeHistoricalStageResources(&manifest, stages)
+	if err := verifyHistoricalBatchWithStore(store, &manifest, from, to, stages); err != nil {
+		return fmt.Errorf("terminal historical batch verification failed: %w", err)
+	}
 	manifest.UpdatedAt = time.Now().UTC()
-	if err := saveSecureJSON(manifestPath, &manifest); err != nil {
+	if err := persistHistoricalManifest(store, manifest); err != nil {
 		return err
 	}
-	return nil
+	return store.exportJSON(opts.StateDir, opts.BatchID)
+}
+
+func historicalManifestContainsDay(manifest HistoricalManifest, day string) bool {
+	for _, scenario := range manifest.Scenarios {
+		if scenario.BusinessDate == day || scenarioDateFromID(scenario.ScenarioID) == day {
+			return true
+		}
+	}
+	return false
 }
 
 func freezeHistoricalConfiguredTargets(ctx context.Context, deps *Dependencies, cfg DailySimulationConfig, manifest *HistoricalManifest) (DailySimulationConfig, map[string]string, string, error) {
@@ -497,6 +572,18 @@ func restoreHistoricalExistingTestee(stateDir, batchID string, profile dailySimu
 	if err != nil {
 		return nil, err
 	}
+	return restoreHistoricalExistingTesteeFromRecords(records, scenarioID, profile, cfg)
+}
+
+func restoreHistoricalExistingTesteeFromStore(store *historicalStateStore, scenarioID string, profile dailySimulationProfile, cfg DailySimulationConfig) (*ApiserverTesteeResponse, error) {
+	records, err := store.loadLocalStages(scenarioID)
+	if err != nil {
+		return nil, err
+	}
+	return restoreHistoricalExistingTesteeFromRecords(records, scenarioID, profile, cfg)
+}
+
+func restoreHistoricalExistingTesteeFromRecords(records map[string]HistoricalLocalStageRecord, scenarioID string, profile dailySimulationProfile, cfg DailySimulationConfig) (*ApiserverTesteeResponse, error) {
 	record, ok := records[string(dailySimulationJourneyStageTesteeProfile)]
 	if !ok {
 		return nil, nil
@@ -702,10 +789,25 @@ func VerifyHistoricalBackfillWithServer(ctx context.Context, deps *Dependencies,
 	if rangeErr != nil {
 		return HistoricalVerification{}, rangeErr
 	}
-	for day := from; !day.After(to); day = day.AddDate(0, 0, 1) {
-		expectedCount := manifest.DailyCounts[day.Format("2006-01-02")]
-		if err := verifyHistoricalDay(stateDir, &manifest, day, expectedCount, allStages); err != nil {
-			missing = append(missing, day.Format("2006-01-02")+":"+err.Error())
+	var stateStore *historicalStateStore
+	if _, statErr := os.Stat(historicalStateDBPath(stateDir, batchID)); statErr == nil {
+		stateStore, err = openHistoricalStateStore(stateDir, batchID, true)
+		if err != nil {
+			return HistoricalVerification{}, err
+		}
+		defer func() { _ = stateStore.Close() }()
+	}
+	if stateStore != nil {
+		if verifyErr := verifyHistoricalBatchWithStore(stateStore, &manifest, from, to, allStages); verifyErr != nil {
+			missing = append(missing, verifyErr.Error())
+		}
+	} else {
+		for day := from; !day.After(to); day = day.AddDate(0, 0, 1) {
+			expectedCount := manifest.DailyCounts[day.Format("2006-01-02")]
+			verifyErr := verifyHistoricalDay(stateDir, &manifest, day, expectedCount, allStages)
+			if verifyErr != nil {
+				missing = append(missing, day.Format("2006-01-02")+":"+verifyErr.Error())
+			}
 		}
 	}
 	verification.ServerStageCount = len(allStages)
@@ -740,6 +842,9 @@ func buildHistoricalDaySnapshot(
 	day time.Time,
 	expectedCount int,
 	stateDir string,
+	store *historicalStateStore,
+	stageReadWorkers int,
+	probeServer bool,
 ) (*HistoricalDaySnapshot, error) {
 	if deps == nil || deps.APIClient == nil || manifest == nil {
 		return nil, fmt.Errorf("historical day snapshot dependencies are required")
@@ -815,8 +920,21 @@ func buildHistoricalDaySnapshot(
 		ordered = append(ordered, scenarioID)
 	}
 	sort.Strings(ordered)
+	serverResponses := make(map[string]HistoricalStageBatchResponse, len(ordered))
+	if probeServer {
+		serverResponses, err = loadHistoricalScenarioStageResponses(ctx, deps.APIClient, manifest.BatchID, ordered, stageReadWorkers)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, scenarioID := range ordered {
-		local, err := loadHistoricalLocalScenarioStages(stateDir, manifest.BatchID, day, scenarioID)
+		var local map[string]HistoricalLocalStageRecord
+		var err error
+		if store != nil {
+			local, err = store.loadLocalStages(scenarioID)
+		} else {
+			local, err = loadHistoricalLocalScenarioStages(stateDir, manifest.BatchID, day, scenarioID)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -825,10 +943,7 @@ func buildHistoricalDaySnapshot(
 				return nil, fmt.Errorf("historical snapshot scenario %s has invalid local stage %s", scenarioID, stage)
 			}
 		}
-		response, err := deps.APIClient.ListHistoricalScenarioStages(ctx, manifest.BatchID, scenarioID)
-		if err != nil {
-			return nil, fmt.Errorf("load historical snapshot scenario %s: %w", scenarioID, err)
-		}
+		response := serverResponses[scenarioID]
 		server := make(map[string]HistoricalStageRecord, len(response.Stages))
 		for _, record := range response.Stages {
 			stage := strings.TrimSpace(record.Stage)
@@ -869,6 +984,46 @@ func buildHistoricalDaySnapshot(
 	}
 	mergeHistoricalStageResources(manifest, allStages)
 	return snapshot, nil
+}
+
+func loadHistoricalScenarioStageResponses(
+	ctx context.Context,
+	client *APIClient,
+	batchID string,
+	scenarioIDs []string,
+	workers int,
+) (map[string]HistoricalStageBatchResponse, error) {
+	if client == nil {
+		return nil, fmt.Errorf("historical stage API client is required")
+	}
+	if workers <= 0 {
+		workers = 1
+	}
+	responses := make([]HistoricalStageBatchResponse, len(scenarioIDs))
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(workers)
+	for index, rawScenarioID := range scenarioIDs {
+		index, scenarioID := index, strings.TrimSpace(rawScenarioID)
+		group.Go(func() error {
+			response, err := client.ListHistoricalScenarioStages(groupCtx, batchID, scenarioID)
+			if err != nil {
+				return fmt.Errorf("load historical snapshot scenario %s: %w", scenarioID, err)
+			}
+			if response == nil {
+				return fmt.Errorf("load historical snapshot scenario %s returned no response", scenarioID)
+			}
+			responses[index] = *response
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	result := make(map[string]HistoricalStageBatchResponse, len(scenarioIDs))
+	for index, scenarioID := range scenarioIDs {
+		result[scenarioID] = responses[index]
+	}
+	return result, nil
 }
 
 func validateHistoricalScenarioStageSet(
@@ -1058,7 +1213,7 @@ func completedHistoricalServerStage(ctx context.Context, scenarioID, stage strin
 	return record, true, nil
 }
 
-func loadHistoricalSeedStagesForDay(ctx context.Context, client *APIClient, manifest HistoricalManifest, day time.Time) ([]HistoricalStageRecord, error) {
+func loadHistoricalSeedStagesForDayConcurrent(ctx context.Context, client *APIClient, manifest HistoricalManifest, day time.Time, workers int) ([]HistoricalStageRecord, error) {
 	if client == nil {
 		return nil, fmt.Errorf("historical stage API client is required")
 	}
@@ -1087,13 +1242,13 @@ func loadHistoricalSeedStagesForDay(ctx context.Context, client *APIClient, mani
 		ordered = append(ordered, scenarioID)
 	}
 	sort.Strings(ordered)
+	responses, err := loadHistoricalScenarioStageResponses(ctx, client, manifest.BatchID, ordered, workers)
+	if err != nil {
+		return nil, err
+	}
 	all := make([]HistoricalStageRecord, 0)
 	for _, scenarioID := range ordered {
-		response, err := client.ListHistoricalScenarioStages(ctx, manifest.BatchID, scenarioID)
-		if err != nil {
-			return nil, fmt.Errorf("scenario %s: %w", scenarioID, err)
-		}
-		all = append(all, response.Stages...)
+		all = append(all, responses[scenarioID].Stages...)
 	}
 	return all, nil
 }
@@ -1253,6 +1408,51 @@ func recordHistoricalLocalStage(
 	if err != nil {
 		return err
 	}
+	record, err := buildHistoricalLocalStageRecord(ledger.Records[string(stage)], manifest, profile, scenario, historical, stage, outcome, target)
+	if err != nil {
+		return err
+	}
+	ledger.Records[string(stage)] = record
+	return saveSecureJSON(historicalLocalScenarioStagePath(stateDir, manifest.BatchID, profile.RunDate, historical.ScenarioID), &ledger)
+}
+
+func recordHistoricalLocalStageInStore(
+	store *historicalStateStore,
+	manifest *HistoricalManifest,
+	profile dailySimulationProfile,
+	scenario dailySimulationScenario,
+	historical historicalseed.Context,
+	stage dailySimulationJourneyStage,
+	outcome dailySimulationOutcome,
+	target *dailySimulationResolvedTarget,
+) error {
+	if store == nil {
+		return fmt.Errorf("historical state store is required")
+	}
+	records, err := store.loadLocalStages(historical.ScenarioID)
+	if err != nil {
+		return err
+	}
+	record, err := buildHistoricalLocalStageRecord(records[string(stage)], manifest, profile, scenario, historical, stage, outcome, target)
+	if err != nil {
+		return err
+	}
+	return store.putLocalStage(record)
+}
+
+func buildHistoricalLocalStageRecord(
+	record HistoricalLocalStageRecord,
+	manifest *HistoricalManifest,
+	profile dailySimulationProfile,
+	scenario dailySimulationScenario,
+	historical historicalseed.Context,
+	stage dailySimulationJourneyStage,
+	outcome dailySimulationOutcome,
+	target *dailySimulationResolvedTarget,
+) (HistoricalLocalStageRecord, error) {
+	if manifest == nil {
+		return HistoricalLocalStageRecord{}, fmt.Errorf("historical manifest is required")
+	}
 	targetKey := ""
 	if target != nil {
 		targetKey = strings.Join([]string{target.TargetType, target.TargetCode, target.TargetVersion, target.QuestionnaireCode, target.QuestionnaireVersion}, "/")
@@ -1271,13 +1471,12 @@ func recordHistoricalLocalStage(
 	}
 	payload, err := json.Marshal(fingerprintPayload)
 	if err != nil {
-		return err
+		return HistoricalLocalStageRecord{}, err
 	}
 	digest := sha256.Sum256(payload)
 	hash := hex.EncodeToString(digest[:])
-	record := ledger.Records[string(stage)]
 	if record.PayloadHash != "" && record.PayloadHash != hash {
-		return fmt.Errorf("historical local stage payload conflict: scenario=%s stage=%s", historical.ScenarioID, stage)
+		return HistoricalLocalStageRecord{}, fmt.Errorf("historical local stage payload conflict: scenario=%s stage=%s", historical.ScenarioID, stage)
 	}
 	record.ScenarioID, record.Stage, record.PayloadHash, record.Status = historical.ScenarioID, string(stage), hash, "completed"
 	record.UserCreated = record.UserCreated || outcome.UserCreated
@@ -1293,8 +1492,7 @@ func recordHistoricalLocalStage(
 	record.AnswerSheetIDs = appendUniqueStrings(record.AnswerSheetIDs, outcome.AnswerSheetIDs)
 	record.AssessmentIDs = appendUniqueStrings(record.AssessmentIDs, outcome.AssessmentIDs)
 	record.UpdatedAt = time.Now().UTC()
-	ledger.Records[string(stage)] = record
-	return saveSecureJSON(historicalLocalScenarioStagePath(stateDir, manifest.BatchID, profile.RunDate, historical.ScenarioID), &ledger)
+	return record, nil
 }
 
 type historicalLocalScenarioLedger struct {
@@ -1442,24 +1640,44 @@ func verifyHistoricalDay(stateDir string, manifest *HistoricalManifest, day time
 	if manifest == nil {
 		return fmt.Errorf("historical manifest is required")
 	}
-	dayKey := day.Format("2006-01-02")
 	localStages, err := loadAllHistoricalLocalStages(stateDir, manifest.BatchID)
 	if err != nil {
 		return err
 	}
-	serverByScenario := make(map[string]map[string]HistoricalStageRecord)
-	for _, record := range stages {
-		if serverByScenario[record.ScenarioID] == nil {
-			serverByScenario[record.ScenarioID] = make(map[string]HistoricalStageRecord)
-		}
-		serverByScenario[record.ScenarioID][record.Stage] = record
+	return verifyHistoricalDayRecords(manifest, day, expectedCount, stages, localStages)
+}
+
+func verifyHistoricalDayWithStore(store *historicalStateStore, manifest *HistoricalManifest, day time.Time, expectedCount int, stages []HistoricalStageRecord) error {
+	if store == nil || manifest == nil {
+		return fmt.Errorf("historical state store and manifest are required")
 	}
+	localStages, err := store.loadAllLocalStages()
+	if err != nil {
+		return err
+	}
+	return verifyHistoricalDayRecords(manifest, day, expectedCount, stages, localStages)
+}
+
+func verifyHistoricalDayRecords(manifest *HistoricalManifest, day time.Time, expectedCount int, stages []HistoricalStageRecord, localStages map[string]HistoricalLocalStageRecord) error {
+	dayKey := day.Format("2006-01-02")
+	serverByScenario := indexHistoricalServerStages(stages)
 	parentIDs := make([]string, 0, expectedCount)
 	for scenarioID, scenario := range manifest.Scenarios {
 		if scenario.BusinessDate == dayKey {
 			parentIDs = append(parentIDs, scenarioID)
 		}
 	}
+	return verifyHistoricalDayIndexed(manifest, dayKey, expectedCount, parentIDs, serverByScenario, localStages)
+}
+
+func verifyHistoricalDayIndexed(
+	manifest *HistoricalManifest,
+	dayKey string,
+	expectedCount int,
+	parentIDs []string,
+	serverByScenario map[string]map[string]HistoricalStageRecord,
+	localStages map[string]HistoricalLocalStageRecord,
+) error {
 	if len(parentIDs) != expectedCount {
 		return fmt.Errorf("recorded parent scenarios=%d want=%d", len(parentIDs), expectedCount)
 	}
@@ -1530,6 +1748,50 @@ func verifyHistoricalDay(stateDir string, manifest *HistoricalManifest, day time
 		manifest.Scenarios[scenarioID] = scenario
 	}
 	manifest.DailyCounts[dayKey] = expectedCount
+	return nil
+}
+
+func indexHistoricalServerStages(stages []HistoricalStageRecord) map[string]map[string]HistoricalStageRecord {
+	result := make(map[string]map[string]HistoricalStageRecord)
+	for _, record := range stages {
+		if result[record.ScenarioID] == nil {
+			result[record.ScenarioID] = make(map[string]HistoricalStageRecord)
+		}
+		result[record.ScenarioID][record.Stage] = record
+	}
+	return result
+}
+
+func verifyHistoricalBatchWithStore(
+	store *historicalStateStore,
+	manifest *HistoricalManifest,
+	from, to time.Time,
+	stages []HistoricalStageRecord,
+) error {
+	if store == nil || manifest == nil {
+		return fmt.Errorf("historical state store and manifest are required")
+	}
+	localStages, err := store.loadAllLocalStages()
+	if err != nil {
+		return err
+	}
+	serverByScenario := indexHistoricalServerStages(stages)
+	parentsByDay := make(map[string][]string)
+	for scenarioID, scenario := range manifest.Scenarios {
+		parentsByDay[scenario.BusinessDate] = append(parentsByDay[scenario.BusinessDate], scenarioID)
+	}
+	for day := from; !day.After(to); day = day.AddDate(0, 0, 1) {
+		dayKey := day.Format("2006-01-02")
+		parentIDs := parentsByDay[dayKey]
+		sort.Strings(parentIDs)
+		expectedCount, exists := manifest.DailyCounts[dayKey]
+		if !exists || expectedCount <= 0 {
+			return fmt.Errorf("%s: daily checkpoint count is missing", dayKey)
+		}
+		if err := verifyHistoricalDayIndexed(manifest, dayKey, expectedCount, parentIDs, serverByScenario, localStages); err != nil {
+			return fmt.Errorf("%s: %w", dayKey, err)
+		}
+	}
 	return nil
 }
 
@@ -1711,20 +1973,37 @@ func requireHistoricalServerStages(records map[string]map[string]HistoricalStage
 }
 
 func VerifyHistoricalBackfill(stateDir, batchID string) (HistoricalVerification, error) {
-	checkpointPath, manifestPath := historicalPaths(stateDir, batchID)
 	var checkpoint HistoricalCheckpoint
-	if exists, err := loadSecureJSON(checkpointPath, &checkpoint); err != nil || !exists {
-		if err != nil {
-			return HistoricalVerification{}, err
-		}
-		return HistoricalVerification{}, fmt.Errorf("historical checkpoint not found for batch %s", batchID)
-	}
 	var manifest HistoricalManifest
-	if exists, err := loadSecureJSON(manifestPath, &manifest); err != nil || !exists {
+	var err error
+	if _, err := os.Stat(historicalStateDBPath(stateDir, batchID)); err == nil {
+		store, openErr := openHistoricalStateStore(stateDir, batchID, true)
+		if openErr != nil {
+			return HistoricalVerification{}, openErr
+		}
+		defer func() { _ = store.Close() }()
+		checkpoint, err = store.loadCheckpoint()
 		if err != nil {
 			return HistoricalVerification{}, err
 		}
-		return HistoricalVerification{}, fmt.Errorf("historical manifest not found for batch %s", batchID)
+		manifest, err = store.loadManifest()
+		if err != nil {
+			return HistoricalVerification{}, err
+		}
+	} else {
+		checkpointPath, manifestPath := historicalPaths(stateDir, batchID)
+		if exists, loadErr := loadSecureJSON(checkpointPath, &checkpoint); loadErr != nil || !exists {
+			if loadErr != nil {
+				return HistoricalVerification{}, loadErr
+			}
+			return HistoricalVerification{}, fmt.Errorf("historical checkpoint not found for batch %s", batchID)
+		}
+		if exists, loadErr := loadSecureJSON(manifestPath, &manifest); loadErr != nil || !exists {
+			if loadErr != nil {
+				return HistoricalVerification{}, loadErr
+			}
+			return HistoricalVerification{}, fmt.Errorf("historical manifest not found for batch %s", batchID)
+		}
 	}
 	location, _ := time.LoadLocation(historicalTimezone)
 	from, to, err := parseHistoricalDateRange(manifest.From, manifest.To, location)
@@ -1751,6 +2030,14 @@ func VerifyHistoricalBackfill(stateDir, batchID string) (HistoricalVerification,
 }
 
 func LoadHistoricalManifest(stateDir, batchID string) (HistoricalManifest, error) {
+	if _, err := os.Stat(historicalStateDBPath(stateDir, batchID)); err == nil {
+		store, openErr := openHistoricalStateStore(stateDir, batchID, true)
+		if openErr != nil {
+			return HistoricalManifest{}, openErr
+		}
+		defer func() { _ = store.Close() }()
+		return store.loadManifest()
+	}
 	_, path := historicalPaths(stateDir, batchID)
 	var manifest HistoricalManifest
 	exists, err := loadSecureJSON(path, &manifest)
@@ -1841,6 +2128,9 @@ func saveSecureJSON(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	defer directory.Close()
-	return directory.Sync()
+	if err := directory.Sync(); err != nil {
+		_ = directory.Close()
+		return err
+	}
+	return directory.Close()
 }

@@ -11,13 +11,17 @@
 
 `cmd/seeddata` 的启动流程固定如下：
 
-1. 解析 CLI 参数，只支持 `--config` 和 `--verbose`
+1. 解析 CLI 参数；无子命令时以 daemon 模式运行并支持 `--config`、`--verbose`
 2. 加载 `seeddata.yaml`
 3. 初始化 API client / collection client
 4. 优先使用 `api.token`；如果为空，则使用 IAM 凭据换取 token
 5. 并发启动 daily simulation 与 plan submit 两条 daemon
 
 两个 daemon 共享同一个进程。任意一条退出报错，supervisor 就会退出；收到 `SIGINT` / `SIGTERM` 时会整体停止。
+
+一次性历史回填使用 `historical-backfill`、`historical-verify` 和
+`historical-manifest` 子命令；其状态、并发、无损迁移和 ServerA 内网容器运行方式见
+[历史回填运行手册](./docs/historical-backfill.md)。
 
 ## 快速开始
 
@@ -205,7 +209,7 @@ sudo systemctl restart seeddata-runner
 
 ## 配置总览
 
-配置结构固定为五段：
+配置结构固定为六段：
 
 
 | 段落                | 作用                                 |
@@ -214,10 +218,16 @@ sudo systemctl restart seeddata-runner
 | `api`             | 业务 API、采集 API、重试策略、静态 token        |
 | `iam`             | IAM 登录、mock-consumer 建号与可选 gRPC 配置 |
 | `dailySimulation` | 每日模拟用户生成策略                         |
+| `historicalBackfill` | 一次性历史回填的并发和进度策略             |
 | `planSubmit`      | opened task 答卷提交策略                 |
 
 
 其中 `dailySimulation` 和 `planSubmit` 是必填段；`api.baseUrl` 也是运行时硬要求。
+
+`historicalBackfill` 只影响有限日期区间的历史命令。默认生产配置使用父场景 16、
+submission 24、stage reader 16、IAM 2 路并发；普通 daemon 继续使用
+`dailySimulation.workers`、原 IAM limiter 和 JSON submission ledger。完整迁移、恢复和
+ServerA 内网容器步骤见 [docs/historical-backfill.md](./docs/historical-backfill.md)。
 
 ## Daily Simulation
 

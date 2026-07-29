@@ -89,6 +89,13 @@ dailySimulation:
     resolveEntryWeight: 25  # ~25% 完成入口接入后停，拉开 entry/testee 与答卷指标
     submitAnswerWeight: 50  # ~50% 走完全流程；planSubmit 另有 completionPercent 控制提交比例
 
+historicalBackfill:
+  parentWorkers: 16
+  submissionWorkers: 24
+  stageReadWorkers: 16
+  iamWorkers: 2
+  progressInterval: "15s"
+
 planSubmit:
   submissionStateFile: ".seeddata-cache/plan-submit-submissions.json"
   planIds:
