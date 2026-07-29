@@ -2,6 +2,7 @@ package dailysim
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,6 +44,45 @@ func TestHistoricalSubmissionExecutorBoundsGlobalConcurrency(t *testing.T) {
 		t.Fatalf("maximum concurrency=%d workers=%d", got, workers)
 	}
 	if executor.completed.Load() != 20 || executor.reports.Load() != 20 || executor.failed.Load() != 0 {
+		t.Fatalf("unexpected executor counters: completed=%d reports=%d failed=%d", executor.completed.Load(), executor.reports.Load(), executor.failed.Load())
+	}
+}
+
+func TestHistoricalSubmissionExecutorDoesNotCancelQueuedJobsAfterFailure(t *testing.T) {
+	executor := newHistoricalSubmissionExecutor(context.Background(), log.New(log.NewOptions()), "2025-01-01", 2, 1, time.Hour)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	failure := errors.New("invalid submission")
+
+	failedFuture, err := executor.Submit(HistoricalSubmissionJob{ScenarioID: "scenario-failed", TargetKey: "scale/A"}, func(context.Context) (historicalSubmissionJobResult, error) {
+		close(started)
+		<-release
+		return historicalSubmissionJobResult{}, failure
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	succeededFuture, err := executor.Submit(HistoricalSubmissionJob{ScenarioID: "scenario-succeeded", TargetKey: "scale/B"}, func(ctx context.Context) (historicalSubmissionJobResult, error) {
+		if err := ctx.Err(); err != nil {
+			return historicalSubmissionJobResult{}, err
+		}
+		return historicalSubmissionJobResult{ReportGenerated: true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+
+	if _, err := failedFuture.Wait(); !errors.Is(err, failure) {
+		t.Fatalf("failed job error=%v, want %v", err, failure)
+	}
+	if _, err := succeededFuture.Wait(); err != nil {
+		t.Fatalf("queued job was canceled after unrelated failure: %v", err)
+	}
+	executor.Close()
+
+	if executor.failed.Load() != 1 || executor.completed.Load() != 1 || executor.reports.Load() != 1 {
 		t.Fatalf("unexpected executor counters: completed=%d reports=%d failed=%d", executor.completed.Load(), executor.reports.Load(), executor.failed.Load())
 	}
 }

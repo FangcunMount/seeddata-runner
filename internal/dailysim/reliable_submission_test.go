@@ -148,6 +148,25 @@ func TestDailySimulationSubmissionLogicalIDPreservesLegacyWithoutTask(t *testing
 	if got := dailySimulationSubmissionLogicalID(state, 42, "task-1"); got != legacy+"|task-1" {
 		t.Fatalf("task logical id=%q", got)
 	}
+	state.submissionOriginRef = &OriginRef{Type: "self_service"}
+	if got := dailySimulationSubmissionLogicalID(state, 42, ""); got != legacy+"|origin:self_service:v1" {
+		t.Fatalf("self-service logical id=%q", got)
+	}
+}
+
+func TestDailySimulationSubmissionOriginRef(t *testing.T) {
+	state := &dailySimulationJourneyState{entry: &AssessmentEntryResponse{ID: " entry-1 "}}
+
+	if got := dailySimulationSubmissionOriginRef(state, ""); got.Type != "assessment_entry" || got.ID != "entry-1" {
+		t.Fatalf("primary origin=%+v", got)
+	}
+	state.submissionOriginRef = &OriginRef{Type: " self_service "}
+	if got := dailySimulationSubmissionOriginRef(state, ""); got.Type != "self_service" || got.ID != "" {
+		t.Fatalf("additional origin=%+v", got)
+	}
+	if got := dailySimulationSubmissionOriginRef(state, " task-1 "); got.Type != "plan_task" || got.ID != "task-1" {
+		t.Fatalf("plan-task origin=%+v", got)
+	}
 }
 
 func TestDailySimulationReadinessTimeoutPersistsAcceptedPending(t *testing.T) {

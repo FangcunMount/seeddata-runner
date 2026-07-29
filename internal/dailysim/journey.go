@@ -128,15 +128,16 @@ const (
 )
 
 type dailySimulationJourneyState struct {
-	deps          *dependencies
-	iamBundle     *dailySimulationIAMBundle
-	cfg           DailySimulationConfig
-	profile       dailySimulationProfile
-	clinicianID   string
-	entry         *AssessmentEntryResponse
-	target        *dailySimulationResolvedTarget
-	planID        string
-	selectedTasks []historicalSelectedTask
+	deps                *dependencies
+	iamBundle           *dailySimulationIAMBundle
+	cfg                 DailySimulationConfig
+	profile             dailySimulationProfile
+	clinicianID         string
+	entry               *AssessmentEntryResponse
+	target              *dailySimulationResolvedTarget
+	planID              string
+	selectedTasks       []historicalSelectedTask
+	submissionOriginRef *OriginRef
 
 	journeyTarget    dailySimulationJourneyTarget
 	guardianUserID   string
@@ -332,6 +333,7 @@ func simulateHistoricalAdditionalTargets(
 		state.outcome.AdditionalScenarios = appendHistoricalAdditionalScenario(state.outcome.AdditionalScenarios, additional)
 		jobState := cloneDailySimulationJourneyStateForSubmission(state)
 		jobState.target = target
+		jobState.submissionOriginRef = &OriginRef{Type: "self_service"}
 		future, err := executor.Submit(HistoricalSubmissionJob{
 			ScenarioID: historical.ScenarioID,
 			TargetKey:  additional.TargetKey,
@@ -378,8 +380,13 @@ func simulateDailyUserAdditionalTarget(
 	state.outcome.AssessmentID = ""
 	state.outcome.SkippedSubmission = false
 	selectedTasks := state.selectedTasks
+	submissionOriginRef := state.submissionOriginRef
 	state.selectedTasks = nil
-	defer func() { state.selectedTasks = selectedTasks }()
+	state.submissionOriginRef = &OriginRef{Type: "self_service"}
+	defer func() {
+		state.selectedTasks = selectedTasks
+		state.submissionOriginRef = submissionOriginRef
+	}()
 	if historical, ok := historicalseed.FromContext(ctx); ok {
 		historical.ScenarioID = fmt.Sprintf("%s/%d/%s/%s", profile.RunDate.Format("2006-01-02"), profile.Index, dailySimulationJourneySubmitAnswer, target.TargetCode)
 		ctx = historicalseed.WithContext(ctx, historical)
@@ -936,11 +943,10 @@ func runDailySimulationSubmissionJob(
 		req := SubmitAnswerSheetRequest{
 			QuestionnaireCode: state.target.QuestionnaireCode, QuestionnaireVersion: state.target.QuestionnaireVersion,
 			Title: state.target.QuestionnaireTitle, TesteeID: testeeID,
-			OriginRef: &OriginRef{Type: "assessment_entry", ID: strings.TrimSpace(state.entry.ID)}, Answers: answers,
+			OriginRef: dailySimulationSubmissionOriginRef(state, taskID), Answers: answers,
 		}
 		if taskID != "" {
 			req.TaskID = taskID
-			req.OriginRef = &OriginRef{Type: "plan_task", ID: taskID}
 		}
 		submission, err = submitDailySimulationAnswerSheet(submitCtx, state, req)
 		if err != nil {
@@ -980,6 +986,23 @@ func runDailySimulationSubmissionJob(
 		state.outcome.CompletedTaskIDs = appendUniqueString(state.outcome.CompletedTaskIDs, taskID)
 	}
 	return nil
+}
+
+func dailySimulationSubmissionOriginRef(state *dailySimulationJourneyState, taskID string) *OriginRef {
+	if taskID = strings.TrimSpace(taskID); taskID != "" {
+		return &OriginRef{Type: "plan_task", ID: taskID}
+	}
+	if state != nil && state.submissionOriginRef != nil {
+		return &OriginRef{
+			Type: strings.TrimSpace(state.submissionOriginRef.Type),
+			ID:   strings.TrimSpace(state.submissionOriginRef.ID),
+		}
+	}
+	entryID := ""
+	if state != nil && state.entry != nil {
+		entryID = strings.TrimSpace(state.entry.ID)
+	}
+	return &OriginRef{Type: "assessment_entry", ID: entryID}
 }
 
 func ensureHistoricalPlanTaskOpen(ctx context.Context, state *dailySimulationJourneyState, taskID string) error {

@@ -156,7 +156,6 @@ func (e *historicalSubmissionExecutor) runWorker() {
 		e.inFlight.Add(-1)
 		if err != nil {
 			e.failed.Add(1)
-			e.cancel()
 		} else {
 			e.completed.Add(1)
 			if result.ReportGenerated {

@@ -325,6 +325,13 @@ func dailySimulationSubmissionLogicalID(state *dailySimulationJourneyState, test
 		strings.TrimSpace(state.target.QuestionnaireCode),
 		strings.TrimSpace(state.target.QuestionnaireVersion),
 	}
+	// Additional targets used to be submitted with the primary assessment-entry
+	// origin and could leave rejected prepared records behind. Keep the legacy
+	// identity for primary/plan submissions, but namespace the corrected
+	// self-service payload so an interrupted backfill can resume safely.
+	if origin := dailySimulationSubmissionOriginRef(state, taskID); origin.Type == "self_service" {
+		parts = append(parts, "origin:self_service:v1")
+	}
 	// Preserve the legacy daemon identity when no Plan task participates. A task
 	// suffix is required only for historical scenarios that may submit several
 	// AnswerSheets for the same target on different tasks.
