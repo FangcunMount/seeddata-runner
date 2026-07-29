@@ -8,7 +8,7 @@ state_dir=${SEEDDATA_HISTORICAL_STATE_DIR:?SEEDDATA_HISTORICAL_STATE_DIR is requ
 env_file=${SEEDDATA_HISTORICAL_ENV_FILE:?SEEDDATA_HISTORICAL_ENV_FILE is required}
 from=${SEEDDATA_HISTORICAL_FROM:-2025-01-01}
 to=${SEEDDATA_HISTORICAL_TO:-2026-07-27}
-batch_id=${SEEDDATA_HISTORICAL_BATCH_ID:-hist-20250101-20260727-v1}
+batch_id=${SEEDDATA_HISTORICAL_BATCH_ID:-hist-20250101-20260727-v2}
 resume=${SEEDDATA_HISTORICAL_RESUME:-1}
 
 docker network inspect "$network" >/dev/null
@@ -22,8 +22,10 @@ state_dir=$(cd "$state_dir" && pwd)
 env_file=$(cd "$(dirname "$env_file")" && pwd)/$(basename "$env_file")
 legacy_submission_file=
 batch_hash=$(printf '%s' "$batch_id" | sha256sum | awk '{print substr($1, 1, 16)}')
-if [ "$resume" = "1" ] && [ ! -f "$state_dir/$batch_hash/historical-state-v2.db" ]; then
-  legacy_submission_file=${SEEDDATA_HISTORICAL_LEGACY_SUBMISSION_FILE:?legacy submission file is required for the first v2 resume}
+if [ "$resume" = "1" ] && \
+  [ ! -f "$state_dir/$batch_hash/historical-state-v2.db" ] && \
+  [ -n "${SEEDDATA_HISTORICAL_LEGACY_SUBMISSION_FILE:-}" ]; then
+  legacy_submission_file=$SEEDDATA_HISTORICAL_LEGACY_SUBMISSION_FILE
   test -r "$legacy_submission_file"
   legacy_submission_file=$(cd "$(dirname "$legacy_submission_file")" && pwd)/$(basename "$legacy_submission_file")
 fi

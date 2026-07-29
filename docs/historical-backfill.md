@@ -25,7 +25,7 @@ export IAM_MOCK_CONSUMER_SHARED_SECRET='<secret>'
 export QS_HISTORICAL_CONTEXT_SECRET='<secret>'
 ```
 
-历史模式默认使用父场景 16、submission 24、stage reader 16、IAM 2 路并发。可以在
+历史模式默认使用父场景 16、submission 4、stage reader 16、IAM 2 路并发。可以在
 `historicalBackfill` 配置块设置，也可以用 `--parent-workers`、`--submission-workers`、
 `--stage-read-workers`、`--iam-workers` 临时覆盖。普通 daemon 不读取这些参数。
 
@@ -37,7 +37,7 @@ tmp/bin/seeddata historical-backfill \
   --state-dir /secure/path/seeddata-historical-state \
   --from 2025-01-01 \
   --to 2026-07-27 \
-  --batch-id hist-20250101-20260727-v1
+  --batch-id hist-20250101-20260727-v2
 ```
 
 命令仅在当天所有场景达到终态后写 checkpoint。任何终态失败会停止在当天，修复原因后使用
@@ -49,16 +49,21 @@ tmp/bin/seeddata historical-backfill \
   --state-dir /secure/path/seeddata-historical-state \
   --from 2025-01-01 \
   --to 2026-07-27 \
-  --batch-id hist-20250101-20260727-v1 \
+  --batch-id hist-20250101-20260727-v2 \
   --resume
 ```
 
-`--resume` 首次发现旧 JSON 状态时，会在任何 IAM 登录或业务 HTTP 请求前，将 checkpoint、
-manifest、分片 stage ledger 和可归属本批次的 submission 迁移到权限为 `0600` 的
-`historical-state-v2.db`。迁移通过临时数据库校验后原子替换，旧 JSON 文件只读保留。
-迁移冲突或同一批次已有 writer 时命令直接退出；不要删除数据库或更换 batch ID。
+Manifest v2 会冻结每个父场景的 guardian/child Profile，恢复时不再重新生成姓名、手机号、
+登录标识、生日或性别。IAM 登录标识只依赖 batch、业务日期和 index，不依赖显示姓名。
+Manifest v1 缺少这项不变量，因此会在任何 IAM 登录或业务 HTTP 请求前被拒绝；不得把 v1
+状态直接用于 v2 恢复。完成旧批次远端数据清理后，应使用新的 batch ID 创建全新 v2 状态。
 
-历史 `scenario_id` 同时是本地、服务端 stage 和提交请求使用的持久幂等身份。恢复旧批次时，
+命令会创建权限为 `0600` 的 `historical-state-v2.db`。CLI 首次创建可以不传 `--resume`；正式
+GitHub Actions 始终传 `resume=true`，空批次仍会安全创建初始状态，且不会导入 v1 ledger。后续
+恢复必须复用同一个 v2 batch。同一批次已有 writer 或状态身份冲突时命令直接退出；不要删除
+有效 v2 数据库或更换 batch ID 绕过冲突。
+
+历史 `scenario_id` 同时是本地、服务端 stage 和提交请求使用的持久幂等身份。恢复同一 v2 批次时，
 如果 manifest 的冗余 `journey` 字段与合法 `scenario_id` 中的 journey 段不一致，runner 会保留
 原 `scenario_id`、按其中的 journey 恢复，并记录校正数量和样例 ID；日期、index、target、
 entry、Plan 或非法 journey identity 等其他冻结身份冲突仍会立即停止。
@@ -90,18 +95,16 @@ install -m 0600 /dev/null /secure/path/seeddata-historical.env
 export SEEDDATA_HISTORICAL_CONFIG=/opt/seeddata-runner/configs/seeddata.yaml
 export SEEDDATA_HISTORICAL_STATE_DIR=/secure/path/seeddata-historical-state
 export SEEDDATA_HISTORICAL_ENV_FILE=/secure/path/seeddata-historical.env
-export SEEDDATA_HISTORICAL_BATCH_ID=hist-20250101-20260727-v1
+export SEEDDATA_HISTORICAL_BATCH_ID=hist-20250101-20260727-v2
 export SEEDDATA_HISTORICAL_RESUME=1
-# 仅第一次把旧批次迁移为 v2 时必填；迁移成功后可取消。
-export SEEDDATA_HISTORICAL_LEGACY_SUBMISSION_FILE=/opt/seeddata-runner/.seeddata-cache/daily-simulation-submissions.json
 
 ./scripts/run_historical_container.sh
 ```
 
 镜像内进程使用 UID/GID `10001:10001`；配置文件必须允许该用户读取，状态目录必须允许该
 用户写入。脚本会用同一镜像用户实际创建并删除一个预检文件，不能写时会在回填前退出。
-第一次 `--resume` 若尚无 v2 数据库，脚本还会把旧 submission ledger 只读挂载给迁移器；
-缺少该文件时拒绝启动，避免遗漏已经 accepted/pending 的 AnswerSheet 身份。
+第一次 `--resume` 若尚无 v2 数据库，脚本会安全创建全新状态；正式 v2 批次不导入
+v1 manifest 或旧 submission ledger。
 
 脚本会先确认 `infra-network`、状态目录写权限、三个容器 DNS 名称和健康接口；任一失败即
 停止，不回退公网。正式容器固定使用：
@@ -151,7 +154,6 @@ secrets: SVRA_SSH_KEY or SVR_MINI_SSH_KEY, SVRA_SUDO_PASSWORD(optional)
 ```text
 SEEDDATA_HISTORICAL_STATE_DIR
 SEEDDATA_HISTORICAL_ENV_FILE
-SEEDDATA_HISTORICAL_LEGACY_SUBMISSION_FILE
 SEEDDATA_HISTORICAL_BASELINE_FILE
 SEEDDATA_HISTORICAL_DEPLOY_ROOT
 SEEDDATA_HISTORICAL_LOG_DIR
@@ -177,9 +179,9 @@ manifest 生成精确 ID 范围的修复 SQL。该命令只读取本地状态并
 umask 077
 tmp/bin/seeddata historical-testee-time-repair-sql \
   --state-dir /secure/path/seeddata-historical-state \
-  --batch-id hist-20250101-20260727-v1 \
+  --batch-id hist-20250101-20260727-v2 \
   --expected-database "$QS_DB_NAME" \
-  > /secure/path/hist-20250101-20260727-v1.testee-time-repair.sql
+  > /secure/path/hist-20250101-20260727-v2.testee-time-repair.sql
 ```
 
 检查 SQL 中的数据库、Org、Testee 数量和时间范围，然后显式确认并执行：
@@ -188,7 +190,7 @@ tmp/bin/seeddata historical-testee-time-repair-sql \
 mysql --defaults-extra-file="$QS_MYSQL_CNF" \
   --init-command="SET @qs_testee_time_repair_confirm='REPAIR_HISTORICAL_TESTEE_CREATED_AT'" \
   "$QS_DB_NAME" \
-  < /secure/path/hist-20250101-20260727-v1.testee-time-repair.sql
+  < /secure/path/hist-20250101-20260727-v2.testee-time-repair.sql
 ```
 
 SQL 只更新 manifest 明确归属本批次的 Testee ID，数据库、Org 或行数不匹配时会在事务前拒绝。
@@ -201,11 +203,11 @@ SQL 只更新 manifest 明确归属本批次的 Testee ID，数据库、Org 或�
 tmp/bin/seeddata historical-verify \
   --config configs/seeddata.yaml \
   --state-dir /secure/path/seeddata-historical-state \
-  --batch-id hist-20250101-20260727-v1
+  --batch-id hist-20250101-20260727-v2
 
 tmp/bin/seeddata historical-manifest \
   --state-dir /secure/path/seeddata-historical-state \
-  --batch-id hist-20250101-20260727-v1
+  --batch-id hist-20250101-20260727-v2
 ```
 
 `historical-verify` 同时检查本地 checkpoint/manifest 和 qs-server stage ledger；需要

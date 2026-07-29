@@ -795,6 +795,13 @@ func PrepareHistoricalBackfillState(opts HistoricalBackfillOptions, orgID int64,
 		if identity != expected {
 			return fmt.Errorf("historical state identity conflict: stored=%+v requested=%+v", identity, expected)
 		}
+		manifest, loadErr := store.loadManifest()
+		if loadErr != nil {
+			return loadErr
+		}
+		if err := validateHistoricalManifestVersion(manifest); err != nil {
+			return err
+		}
 		return nil
 	} else if !os.IsNotExist(err) {
 		return err
@@ -823,6 +830,11 @@ func PrepareHistoricalBackfillState(opts HistoricalBackfillOptions, orgID int64,
 	if manifestExists && (manifest.BatchID != opts.BatchID || manifest.OrgID != orgID || manifest.From != opts.From || manifest.To != opts.To) {
 		return fmt.Errorf("historical manifest identity conflicts with requested batch/range/org")
 	}
+	if manifestExists {
+		if err := validateHistoricalManifestVersion(manifest); err != nil {
+			return err
+		}
+	}
 	if checkpointExists && (checkpoint.BatchID != opts.BatchID || checkpoint.From != opts.From || checkpoint.To != opts.To) {
 		return fmt.Errorf("historical checkpoint identity conflicts with requested batch/range")
 	}
@@ -831,7 +843,7 @@ func PrepareHistoricalBackfillState(opts HistoricalBackfillOptions, orgID int64,
 	}
 	now := time.Now().UTC()
 	if !manifestExists {
-		manifest = HistoricalManifest{Version: 1, BatchID: opts.BatchID, OrgID: orgID, From: opts.From, To: opts.To, Timezone: historicalTimezone, CreatedAt: now, UpdatedAt: now}
+		manifest = HistoricalManifest{Version: historicalManifestVersion, BatchID: opts.BatchID, OrgID: orgID, From: opts.From, To: opts.To, Timezone: historicalTimezone, CreatedAt: now, UpdatedAt: now}
 	}
 	if manifest.Targets == nil {
 		manifest.Targets = make(map[string]HistoricalTargetManifest)

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 )
 
 func TestParseCLIOptionsDefaults(t *testing.T) {
@@ -33,6 +35,20 @@ func TestParseHistoricalBackfillCLI(t *testing.T) {
 	}
 	if opts.command != "historical-backfill" || opts.from != "2025-01-01" || opts.to != "2026-07-27" || !opts.resume {
 		t.Fatalf("unexpected historical options: %+v", opts)
+	}
+}
+
+func TestResolveHistoricalLegacySubmissionPathRequiresExplicitOverride(t *testing.T) {
+	cfg := &seedconfig.Config{DailySimulation: seedconfig.DailySimulationConfig{SubmissionStateFile: ".seeddata-cache/daily-simulation-submissions.json"}}
+	t.Setenv("SEEDDATA_DAILY_SUBMISSION_STATE_FILE", "")
+	if got := resolveHistoricalLegacySubmissionPath(cfg); got != "" {
+		t.Fatalf("implicit config path was treated as a historical legacy ledger: %q", got)
+	}
+
+	t.Setenv("SEEDDATA_DAILY_SUBMISSION_STATE_FILE", "/run/seeddata/legacy.json")
+	cfg.DailySimulation.SubmissionStateFile = "/run/seeddata/legacy.json"
+	if got := resolveHistoricalLegacySubmissionPath(cfg); got != "/run/seeddata/legacy.json" {
+		t.Fatalf("explicit historical legacy ledger was not selected: %q", got)
 	}
 }
 

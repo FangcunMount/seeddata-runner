@@ -14,7 +14,7 @@ on:
         description: '目标批次 ID'
         required: true
         type: string
-        default: hist-20250101-20260727-v1
+        default: hist-20250101-20260727-v2
       confirmation:
         description: 'stop 时必须输入 STOP_HISTORICAL_BACKFILL；status 留空'
         required: false

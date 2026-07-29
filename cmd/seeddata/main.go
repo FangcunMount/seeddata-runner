@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"golang.org/x/sync/errgroup"
 
@@ -94,7 +95,8 @@ func main() {
 			StageReadWorkers: historicalConfig.StageReadWorkers, IAMWorkers: historicalConfig.IAMWorkers,
 			ProgressInterval: historicalConfig.ProgressInterval,
 		}
-		if err := dailysim.PrepareHistoricalBackfillState(historicalOpts, cfg.Global.OrgID, cfg.DailySimulation.SubmissionStateFile); err != nil {
+		legacySubmissionPath := resolveHistoricalLegacySubmissionPath(cfg)
+		if err := dailysim.PrepareHistoricalBackfillState(historicalOpts, cfg.Global.OrgID, legacySubmissionPath); err != nil {
 			logger.Errorw("Prepare historical state failed", "error", err.Error())
 			os.Exit(1)
 		}
@@ -128,6 +130,13 @@ func main() {
 		logger.Errorw("Seeddata supervisor exited with error", "error", err.Error())
 		os.Exit(1)
 	}
+}
+
+func resolveHistoricalLegacySubmissionPath(cfg *seedconfig.Config) string {
+	if strings.TrimSpace(os.Getenv("SEEDDATA_DAILY_SUBMISSION_STATE_FILE")) == "" {
+		return ""
+	}
+	return strings.TrimSpace(cfg.DailySimulation.SubmissionStateFile)
 }
 
 func parseCLIOptions(args []string) (cliOptions, error) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -78,7 +79,14 @@ func TestPrepareHistoricalBackfillStateCreatesProtectedV2Database(t *testing.T) 
 	if _, err := store.MarkAccepted(prepared.Record.LogicalID, "answer-1"); err != nil {
 		t.Fatal(err)
 	}
-	parent := HistoricalScenarioManifest{ScenarioID: "2025-01-01/1/submit_answer/M", BusinessDate: "2025-01-01", TargetKey: "scale/M"}
+	parent := HistoricalScenarioManifest{
+		ScenarioID: "2025-01-01/1/submit_answer/M", BusinessDate: "2025-01-01", TargetKey: "scale/M",
+		Profile: HistoricalProfileManifest{
+			Index: 1, RunDate: "2025-01-01", GuardianName: "吴军", GuardianPhone: "+8619905088001",
+			GuardianEmail: "hist.0123456789abcdef.20250101.0001@fangcunmount.com",
+			ChildName:     "吴小军", ChildDOB: "2017-05-06", ChildGender: 1,
+		},
+	}
 	if err := store.putScenario(parent); err != nil {
 		t.Fatal(err)
 	}
@@ -103,13 +111,19 @@ func TestPrepareHistoricalBackfillStateCreatesProtectedV2Database(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	if manifest.Version != historicalManifestVersion {
+		t.Fatalf("historical manifest version=%d want=%d", manifest.Version, historicalManifestVersion)
+	}
 	restoredParent := manifest.Scenarios[parent.ScenarioID]
+	if restoredParent.Profile != parent.Profile {
+		t.Fatalf("frozen historical profile was not restored: got=%+v want=%+v", restoredParent.Profile, parent.Profile)
+	}
 	if len(restoredParent.PlanTaskRecoveries) != 1 || restoredParent.PlanTaskRecoveries[0] != recovery {
 		t.Fatalf("independent plan task recovery was not restored: %+v", restoredParent)
 	}
 }
 
-func TestPrepareHistoricalBackfillStateMigratesLegacyIdentityWithoutRewritingFiles(t *testing.T) {
+func TestPrepareHistoricalBackfillStateRejectsLegacyManifestWithoutRewritingFiles(t *testing.T) {
 	stateDir := t.TempDir()
 	opts := historicalStateTestOptions(stateDir, true)
 	checkpointPath, manifestPath := historicalPaths(stateDir, opts.BatchID)
@@ -128,44 +142,52 @@ func TestPrepareHistoricalBackfillStateMigratesLegacyIdentityWithoutRewritingFil
 	if err := saveSecureJSON(checkpointPath, checkpoint); err != nil {
 		t.Fatal(err)
 	}
-	legacySubmissionPath := filepath.Join(stateDir, "submissions.json")
-	ledger, err := toolanswersheet.NewSubmissionLedger(legacySubmissionPath, "daily")
-	if err != nil {
-		t.Fatal(err)
-	}
-	logicalID := "daily|20250101|1|42|scale|M|1|Q|1"
-	prepared, err := ledger.Prepare(logicalID, struct{ Value string }{Value: "legacy"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ledger.MarkAccepted(logicalID, "answer-legacy"); err != nil {
-		t.Fatal(err)
-	}
 	manifestBefore, _, err := hashExistingFile(manifestPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := PrepareHistoricalBackfillState(opts, 1, legacySubmissionPath); err != nil {
-		t.Fatal(err)
+	err = PrepareHistoricalBackfillState(opts, 1, "")
+	if err == nil || !strings.Contains(err.Error(), "version 1 is not resumable") {
+		t.Fatalf("expected legacy manifest version rejection, got %v", err)
 	}
 	manifestAfter, _, err := hashExistingFile(manifestPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if manifestBefore != manifestAfter {
-		t.Fatal("legacy manifest was rewritten during migration")
+		t.Fatal("legacy manifest was rewritten during rejection")
 	}
-	store, err := openHistoricalStateStore(stateDir, opts.BatchID, true)
+	if _, err := os.Stat(historicalStateDBPath(stateDir, opts.BatchID)); !os.IsNotExist(err) {
+		t.Fatalf("legacy manifest rejection created v2 state: %v", err)
+	}
+}
+
+func TestPrepareHistoricalBackfillStateRejectsExistingDatabaseWithLegacyManifest(t *testing.T) {
+	stateDir := t.TempDir()
+	opts := historicalStateTestOptions(stateDir, false)
+	if err := PrepareHistoricalBackfillState(opts, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openHistoricalStateStore(stateDir, opts.BatchID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = store.Close() }()
-	record, ok, err := store.Get(logicalID)
-	if err != nil || !ok {
-		t.Fatalf("migrated submission missing: ok=%v err=%v", ok, err)
+	manifest, err := store.loadManifest()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if record.IdempotencyKey != prepared.Record.IdempotencyKey || record.RequestID != prepared.Record.RequestID || record.AnswerSheetID != "answer-legacy" {
-		t.Fatalf("migrated identity changed: got=%+v want=%+v", record, prepared.Record)
+	manifest.Version = 1
+	if err := store.putManifestHeader(manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	opts.Resume = true
+	err = PrepareHistoricalBackfillState(opts, 1, "")
+	if err == nil || !strings.Contains(err.Error(), "version 1 is not resumable") {
+		t.Fatalf("expected existing database manifest version rejection, got %v", err)
 	}
 }
 

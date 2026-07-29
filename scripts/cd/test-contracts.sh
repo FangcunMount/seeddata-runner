@@ -10,7 +10,6 @@ package_dir="$tmp_dir/package"
 env_file="$tmp_dir/historical.env"
 baseline="$tmp_dir/baseline.json"
 image_archive="$tmp_dir/image.tar.gz"
-legacy_file="$tmp_dir/legacy.json"
 mock_bin="$tmp_dir/mock-bin"
 sudo_log="$tmp_dir/sudo.log"
 
@@ -20,7 +19,6 @@ install -m 0755 "$repo_root/scripts/run_historical_container.sh" "$package_dir/s
 printf '%s\n' 0123456789abcdef > "$package_dir/REVISION"
 printf '%s\n' '{}' > "$baseline"
 sha256sum "$baseline" > "$baseline.sha256"
-printf '%s\n' '{}' > "$legacy_file"
 printf '%s\n' 'image-placeholder' | gzip > "$image_archive"
 cat > "$env_file" <<'EOF'
 IAM_USERNAME=system@example.com
@@ -109,13 +107,13 @@ common_env=(
   SEEDDATA_IMAGE_ARCHIVE="$image_archive"
   SEEDDATA_DEPLOY_SHA=0123456789abcdef
   SEEDDATA_IMAGE_REF=ghcr.io/fangcunmount/seeddata-runner-historical:0123456789abcdef
-  SEEDDATA_BATCH_ID=hist-20250101-20260727-v1
+  SEEDDATA_BATCH_ID=hist-20250101-20260727-v2
   SEEDDATA_FROM=2025-01-01
   SEEDDATA_TO=2026-07-27
   SEEDDATA_RESUME=1
   SEEDDATA_STATE_DIR="$state_dir"
   SEEDDATA_SECRET_ENV_FILE="$env_file"
-  SEEDDATA_LEGACY_SUBMISSION_FILE="$legacy_file"
+  SEEDDATA_LEGACY_SUBMISSION_FILE=
   SEEDDATA_BASELINE_FILE="$baseline"
   SEEDDATA_DEPLOY_ROOT="$tmp_dir/deploy"
   SEEDDATA_LOG_DIR="$tmp_dir/logs"
@@ -152,14 +150,14 @@ chmod 600 "$env_file"
 env \
   SEEDDATA_CD_VALIDATE_ONLY=1 \
   SEEDDATA_CONTROL_OPERATION=status \
-  SEEDDATA_BATCH_ID=hist-20250101-20260727-v1 \
+  SEEDDATA_BATCH_ID=hist-20250101-20260727-v2 \
   bash "$repo_root/scripts/cd/remote-control.sh" |
   grep -Fq 'historical status contract valid'
 
 if env \
   SEEDDATA_CD_VALIDATE_ONLY=1 \
   SEEDDATA_CONTROL_OPERATION=stop \
-  SEEDDATA_BATCH_ID=hist-20250101-20260727-v1 \
+  SEEDDATA_BATCH_ID=hist-20250101-20260727-v2 \
   bash "$repo_root/scripts/cd/remote-control.sh" >/dev/null 2>&1; then
   echo "remote control accepted stop without confirmation" >&2
   exit 1
@@ -169,7 +167,7 @@ env \
   SEEDDATA_CD_VALIDATE_ONLY=1 \
   SEEDDATA_CONTROL_OPERATION=stop \
   SEEDDATA_CONTROL_CONFIRMATION=STOP_HISTORICAL_BACKFILL \
-  SEEDDATA_BATCH_ID=hist-20250101-20260727-v1 \
+  SEEDDATA_BATCH_ID=hist-20250101-20260727-v2 \
   bash "$repo_root/scripts/cd/remote-control.sh" |
   grep -Fq 'historical stop contract valid'
 

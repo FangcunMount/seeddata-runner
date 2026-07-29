@@ -88,7 +88,7 @@ if [ -n "${SEEDDATA_LEGACY_SUBMISSION_FILE:-}" ]; then
   validate_absolute_path SEEDDATA_LEGACY_SUBMISSION_FILE "$SEEDDATA_LEGACY_SUBMISSION_FILE"
 fi
 
-if [ "$SEEDDATA_BATCH_ID" = hist-20250101-20260727-v1 ]; then
+if [ "$SEEDDATA_BATCH_ID" = hist-20250101-20260727-v2 ]; then
   test "$SEEDDATA_FROM" = 2025-01-01
   test "$SEEDDATA_TO" = 2026-07-27
   test "$resume" = 1
@@ -164,11 +164,9 @@ as_root sha256sum -c "${SEEDDATA_BASELINE_FILE}.sha256"
 batch_hash="$(printf '%s' "$SEEDDATA_BATCH_ID" | sha256sum | awk '{print substr($1, 1, 16)}')"
 v2_db="$SEEDDATA_STATE_DIR/$batch_hash/historical-state-v2.db"
 if [ "$resume" = 1 ] && ! as_root test -f "$v2_db"; then
-  test -n "${SEEDDATA_LEGACY_SUBMISSION_FILE:-}" || {
-    echo "legacy submission file is required for first v2 resume" >&2
-    exit 1
-  }
-  as_root test -s "$SEEDDATA_LEGACY_SUBMISSION_FILE"
+  if [ -n "${SEEDDATA_LEGACY_SUBMISSION_FILE:-}" ]; then
+    as_root test -s "$SEEDDATA_LEGACY_SUBMISSION_FILE"
+  fi
 fi
 
 if [ "${SEEDDATA_CD_VALIDATE_ONLY:-0}" = 1 ]; then

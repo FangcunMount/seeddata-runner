@@ -76,15 +76,61 @@ func TestHistoricalTaskTimelineStartsAtPlannedAtAndStaysOnBusinessDay(t *testing
 
 func TestHistoricalIdentityNamespaceIsStableAndBatchSpecific(t *testing.T) {
 	location, _ := time.LoadLocation(historicalTimezone)
-	profile := dailySimulationProfile{Index: 7, RunDate: time.Date(2025, 1, 1, 0, 0, 0, 0, location), GuardianPhone: "+8619901010007", GuardianEmail: "guardian@example.com"}
+	profile := dailySimulationProfile{Index: 7, RunDate: time.Date(2025, 1, 1, 0, 0, 0, 0, location), GuardianName: "吴军", GuardianPhone: "+8619901010007", GuardianEmail: "wujun@example.com"}
 	first := namespaceHistoricalProfile("batch-a", profile)
 	second := namespaceHistoricalProfile("batch-a", profile)
 	other := namespaceHistoricalProfile("batch-b", profile)
+	renamed := profile
+	renamed.GuardianName = "吴永春"
+	renamed.GuardianEmail = "wuyongchun@example.com"
+	renamedIdentity := namespaceHistoricalProfile("batch-a", renamed)
 	if first != second {
 		t.Fatalf("historical identity is not stable: %+v %+v", first, second)
 	}
 	if first.GuardianPhone == other.GuardianPhone || first.GuardianEmail == other.GuardianEmail {
 		t.Fatalf("historical batch namespace did not change identity: first=%+v other=%+v", first, other)
+	}
+	if first.GuardianEmail != renamedIdentity.GuardianEmail {
+		t.Fatalf("historical login identity changed with display name: first=%q renamed=%q", first.GuardianEmail, renamedIdentity.GuardianEmail)
+	}
+	if !strings.HasSuffix(first.GuardianEmail, ".20250101.0007@example.com") {
+		t.Fatalf("historical login identity does not use stable date/index suffix: %q", first.GuardianEmail)
+	}
+}
+
+func TestHistoricalProfileManifestRoundTripPreservesFrozenIdentity(t *testing.T) {
+	location, _ := time.LoadLocation(historicalTimezone)
+	day := time.Date(2025, 1, 1, 0, 0, 0, 0, location)
+	want := dailySimulationProfile{
+		Index: 1, RunDate: day, GuardianName: "吴军", GuardianPhone: "+8619905088001",
+		GuardianEmail: "hist.stable.20250101.0001@example.com", ChildName: "吴海", ChildDOB: "2012-03-04", ChildGender: 1,
+	}
+	frozen := freezeHistoricalProfile(want)
+	got, err := restoreHistoricalProfile(frozen, day, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("historical profile round trip changed identity: got=%+v want=%+v", got, want)
+	}
+
+	selected := buildDailySimulationBatchProfile(
+		DailySimulationConfig{UserPhonePrefix: "+86188", UserEmailDomain: "changed.example.com"},
+		day,
+		0,
+		dailySimulationBatchOptions{HistoricalBatchID: "changed-batch", ProfilesByIndex: map[int]dailySimulationProfile{0: got}},
+	)
+	if selected != want {
+		t.Fatalf("historical worker regenerated frozen profile: got=%+v want=%+v", selected, want)
+	}
+}
+
+func TestRestoreHistoricalProfileRejectsMissingFrozenIdentity(t *testing.T) {
+	location, _ := time.LoadLocation(historicalTimezone)
+	day := time.Date(2025, 1, 1, 0, 0, 0, 0, location)
+	_, err := restoreHistoricalProfile(HistoricalProfileManifest{Index: 1, RunDate: "2025-01-01"}, day, 1)
+	if err == nil || !strings.Contains(err.Error(), "is incomplete") {
+		t.Fatalf("expected incomplete frozen profile error, got %v", err)
 	}
 }
 

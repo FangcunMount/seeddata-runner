@@ -20,7 +20,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const historicalTimezone = "Asia/Shanghai"
+const (
+	historicalTimezone        = "Asia/Shanghai"
+	historicalManifestVersion = 2
+)
 
 type historicalCutoffKey struct{}
 type historicalFrozenTargetVersionsKey struct{}
@@ -72,6 +75,7 @@ type HistoricalDaySnapshot struct {
 	Scenarios    map[string]HistoricalScenarioSnapshot
 
 	scenariosByIndex map[int]dailySimulationScenario
+	profilesByIndex  map[int]dailySimulationProfile
 }
 
 type historicalScenarioRecoveryLoader struct {
@@ -165,11 +169,23 @@ type HistoricalLocalStageRecord struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
+type HistoricalProfileManifest struct {
+	Index         int    `json:"index"`
+	RunDate       string `json:"run_date"`
+	GuardianName  string `json:"guardian_name"`
+	GuardianPhone string `json:"guardian_phone"`
+	GuardianEmail string `json:"guardian_email"`
+	ChildName     string `json:"child_name"`
+	ChildDOB      string `json:"child_dob"`
+	ChildGender   uint8  `json:"child_gender"`
+}
+
 type HistoricalScenarioManifest struct {
 	ScenarioID          string                                 `json:"scenario_id"`
 	BusinessDate        string                                 `json:"business_date"`
 	Journey             string                                 `json:"journey"`
 	TargetKey           string                                 `json:"target_key"`
+	Profile             HistoricalProfileManifest              `json:"profile"`
 	GuardianUserID      string                                 `json:"guardian_user_id,omitempty"`
 	IAMProfileID        string                                 `json:"iam_profile_id,omitempty"`
 	IAMProfileLinkID    string                                 `json:"iam_profile_link_id,omitempty"`
@@ -209,6 +225,17 @@ type HistoricalManifest struct {
 	Plans       map[string]HistoricalPlanManifest     `json:"plans"`
 	Scenarios   map[string]HistoricalScenarioManifest `json:"scenarios"`
 	DailyCounts map[string]int                        `json:"daily_counts"`
+}
+
+func validateHistoricalManifestVersion(manifest HistoricalManifest) error {
+	if manifest.Version == historicalManifestVersion {
+		return nil
+	}
+	return fmt.Errorf(
+		"historical manifest version %d is not resumable; expected version %d with frozen profiles",
+		manifest.Version,
+		historicalManifestVersion,
+	)
 }
 
 type HistoricalCheckpoint struct {
@@ -309,6 +336,9 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 	if err != nil {
 		return err
 	}
+	if err := validateHistoricalManifestVersion(manifest); err != nil {
+		return err
+	}
 	if !opts.Resume && (strings.TrimSpace(checkpoint.CompletedThrough) != "" || len(manifest.Scenarios) > 0) {
 		return fmt.Errorf("historical checkpoint already exists for batch %s; use --resume", opts.BatchID)
 	}
@@ -380,6 +410,7 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 			HistoricalBatchID: opts.BatchID,
 			IAMWorkers:        opts.IAMWorkers,
 			ScenariosByIndex:  daySnapshot.scenariosByIndex,
+			ProfilesByIndex:   daySnapshot.profilesByIndex,
 			ShouldSkipScenario: func(profile dailySimulationProfile, scenario dailySimulationScenario) bool {
 				historical := buildHistoricalScenarioContext(opts.BatchID, uint64(deps.Config.Global.OrgID), cfg, profile, scenario)
 				manifestMu.Lock()
@@ -747,13 +778,76 @@ func namespaceHistoricalProfile(batchID string, profile dailySimulationProfile) 
 	if len(phone) >= 8 {
 		phone = phone[:len(phone)-8] + fmt.Sprintf("%02d%06d", namespace, sequence)
 	}
-	email := strings.TrimSpace(profile.GuardianEmail)
-	if strings.LastIndex(email, "@") > 0 {
-		email = fmt.Sprintf("hist%02d.%s", namespace, email)
-	}
 	profile.GuardianPhone = phone
-	profile.GuardianEmail = strings.ToLower(email)
+	profile.GuardianEmail = historicalLoginIdentifier(batchID, profile)
 	return profile
+}
+
+func historicalLoginIdentifier(batchID string, profile dailySimulationProfile) string {
+	domain := dailySimulationDefaultEmailHost
+	if email := strings.ToLower(strings.TrimSpace(profile.GuardianEmail)); email != "" {
+		if at := strings.LastIndex(email, "@"); at >= 0 && at < len(email)-1 {
+			domain = strings.TrimSpace(email[at+1:])
+		}
+	}
+	digest := sha256.Sum256([]byte(strings.TrimSpace(batchID)))
+	batchNamespace := hex.EncodeToString(digest[:8])
+	return fmt.Sprintf(
+		"hist.%s.%s.%04d@%s",
+		batchNamespace,
+		profile.RunDate.Format("20060102"),
+		profile.Index,
+		domain,
+	)
+}
+
+func freezeHistoricalProfile(profile dailySimulationProfile) HistoricalProfileManifest {
+	return HistoricalProfileManifest{
+		Index:         profile.Index,
+		RunDate:       profile.RunDate.Format("2006-01-02"),
+		GuardianName:  strings.TrimSpace(profile.GuardianName),
+		GuardianPhone: strings.TrimSpace(profile.GuardianPhone),
+		GuardianEmail: strings.ToLower(strings.TrimSpace(profile.GuardianEmail)),
+		ChildName:     strings.TrimSpace(profile.ChildName),
+		ChildDOB:      strings.TrimSpace(profile.ChildDOB),
+		ChildGender:   profile.ChildGender,
+	}
+}
+
+func restoreHistoricalProfile(frozen HistoricalProfileManifest, day time.Time, index int) (dailySimulationProfile, error) {
+	expectedDay := day.Format("2006-01-02")
+	if frozen.Index != index {
+		return dailySimulationProfile{}, fmt.Errorf("historical profile index conflict: stored=%d expected=%d", frozen.Index, index)
+	}
+	if strings.TrimSpace(frozen.RunDate) != expectedDay {
+		return dailySimulationProfile{}, fmt.Errorf("historical profile run_date conflict for index %d: stored=%q expected=%q", index, frozen.RunDate, expectedDay)
+	}
+	if strings.TrimSpace(frozen.GuardianName) == "" ||
+		strings.TrimSpace(frozen.GuardianPhone) == "" ||
+		strings.TrimSpace(frozen.GuardianEmail) == "" ||
+		strings.TrimSpace(frozen.ChildName) == "" ||
+		strings.TrimSpace(frozen.ChildDOB) == "" {
+		return dailySimulationProfile{}, fmt.Errorf("historical profile %s/%d is incomplete", expectedDay, index)
+	}
+	if frozen.ChildGender != 1 && frozen.ChildGender != 2 {
+		return dailySimulationProfile{}, fmt.Errorf("historical profile %s/%d has invalid child gender %d", expectedDay, index, frozen.ChildGender)
+	}
+	if _, err := time.Parse("2006-01-02", strings.TrimSpace(frozen.ChildDOB)); err != nil {
+		return dailySimulationProfile{}, fmt.Errorf("historical profile %s/%d has invalid child DOB %q: %w", expectedDay, index, frozen.ChildDOB, err)
+	}
+	if at := strings.LastIndex(strings.TrimSpace(frozen.GuardianEmail), "@"); at <= 0 || at == len(strings.TrimSpace(frozen.GuardianEmail))-1 {
+		return dailySimulationProfile{}, fmt.Errorf("historical profile %s/%d has invalid guardian email %q", expectedDay, index, frozen.GuardianEmail)
+	}
+	return dailySimulationProfile{
+		Index:         frozen.Index,
+		RunDate:       day,
+		GuardianName:  strings.TrimSpace(frozen.GuardianName),
+		GuardianPhone: strings.TrimSpace(frozen.GuardianPhone),
+		GuardianEmail: strings.ToLower(strings.TrimSpace(frozen.GuardianEmail)),
+		ChildName:     strings.TrimSpace(frozen.ChildName),
+		ChildDOB:      strings.TrimSpace(frozen.ChildDOB),
+		ChildGender:   frozen.ChildGender,
+	}, nil
 }
 
 func freezeHistoricalTarget(manifest *HistoricalManifest, scenario dailySimulationScenario) error {
@@ -1144,6 +1238,7 @@ func buildHistoricalDaySnapshot(
 	snapshot := &HistoricalDaySnapshot{
 		BusinessDate: day.Format("2006-01-02"), Expected: make(map[string]HistoricalScenarioManifest, expectedCount),
 		Scenarios: make(map[string]HistoricalScenarioSnapshot), scenariosByIndex: scenariosByIndex,
+		profilesByIndex: make(map[int]dailySimulationProfile, expectedCount),
 	}
 	normalizedJourneys := make(map[string]struct{}, len(normalizedJourneyIDs))
 	for _, scenarioID := range normalizedJourneyIDs {
@@ -1159,9 +1254,15 @@ func buildHistoricalDaySnapshot(
 		if strings.TrimSpace(record.ScenarioID) == "" {
 			record = HistoricalScenarioManifest{
 				ScenarioID: historical.ScenarioID, BusinessDate: snapshot.BusinessDate, Journey: string(journey), TargetKey: targetKey,
-				EntryID: scenario.Entry.ID, PlanID: planID,
+				Profile: freezeHistoricalProfile(profile), EntryID: scenario.Entry.ID, PlanID: planID,
+			}
+		} else {
+			profile, err = restoreHistoricalProfile(record.Profile, day, index+1)
+			if err != nil {
+				return nil, fmt.Errorf("restore frozen profile for %s: %w", historical.ScenarioID, err)
 			}
 		}
+		snapshot.profilesByIndex[index] = profile
 		if _, normalize := normalizedJourneys[historical.ScenarioID]; normalize {
 			record.Journey = string(journey)
 		}
@@ -1906,8 +2007,13 @@ func recordHistoricalScenario(manifest *HistoricalManifest, batchID string, prof
 		outcome.IAMProfileID = firstHistoricalValue(outcome.IAMProfileID, local.IAMProfileID)
 		outcome.IAMProfileLinkID = firstHistoricalValue(outcome.IAMProfileLinkID, local.IAMProfileLinkID)
 	}
+	frozenProfile := existing.Profile
+	if frozenProfile.Index == 0 {
+		frozenProfile = freezeHistoricalProfile(profile)
+	}
 	manifest.Scenarios[context.ScenarioID] = HistoricalScenarioManifest{
 		ScenarioID: context.ScenarioID, BusinessDate: profile.RunDate.Format("2006-01-02"), Journey: outcome.JourneyTarget, TargetKey: targetKey,
+		Profile:        frozenProfile,
 		GuardianUserID: firstHistoricalValue(outcome.GuardianUserID, existing.GuardianUserID), IAMProfileID: firstHistoricalValue(outcome.IAMProfileID, existing.IAMProfileID), IAMProfileLinkID: firstHistoricalValue(outcome.IAMProfileLinkID, existing.IAMProfileLinkID), TesteeID: firstHistoricalValue(outcome.TesteeID, existing.TesteeID),
 		TesteeCreated: outcome.TesteeCreated || existing.TesteeCreated,
 		EntryID:       firstHistoricalValue(scenario.Entry.ID, existing.EntryID), PlanID: firstHistoricalValue(outcome.PlanID, existing.PlanID), EnrollmentID: firstHistoricalValue(outcome.EnrollmentID, existing.EnrollmentID), TaskIDs: appendUniqueStrings(append([]string(nil), existing.TaskIDs...), outcome.TaskIDs),

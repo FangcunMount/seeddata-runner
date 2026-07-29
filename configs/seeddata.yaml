@@ -91,7 +91,7 @@ dailySimulation:
 
 historicalBackfill:
   parentWorkers: 16
-  submissionWorkers: 24
+  submissionWorkers: 4
   stageReadWorkers: 16
   iamWorkers: 2
   progressInterval: "15s"

@@ -50,6 +50,7 @@ type dailySimulationBatchOptions struct {
 	ExistingTesteesByIndex    map[int]*ApiserverTesteeResponse
 	JobIndexes                []int
 	ScenariosByIndex          map[int]dailySimulationScenario
+	ProfilesByIndex           map[int]dailySimulationProfile
 	HistoricalBatchID         string
 	IAMWorkers                int
 	ValidateScenario          func(dailySimulationScenario) error
@@ -69,6 +70,22 @@ func selectDailySimulationBatchScenario(
 		return scenariosByIndex[index]
 	}
 	return scenarios[index%len(scenarios)]
+}
+
+func buildDailySimulationBatchProfile(
+	cfg DailySimulationConfig,
+	runDate time.Time,
+	index int,
+	options dailySimulationBatchOptions,
+) dailySimulationProfile {
+	if profile, ok := options.ProfilesByIndex[index]; ok {
+		return profile
+	}
+	profile := buildDailySimulationProfile(cfg, runDate, index)
+	if strings.TrimSpace(options.HistoricalBatchID) != "" {
+		profile = namespaceHistoricalProfile(options.HistoricalBatchID, profile)
+	}
+	return profile
 }
 
 /**
@@ -292,6 +309,17 @@ func runDailySimulationBatchWithOptions(
 	if count <= 0 {
 		return fmt.Errorf("%s requires count > 0", progressLabel)
 	}
+	if options.ProfilesByIndex != nil {
+		for index := 0; index < count; index++ {
+			profile, ok := options.ProfilesByIndex[index]
+			if !ok {
+				return fmt.Errorf("%s missing frozen profile for index %d", progressLabel, index)
+			}
+			if profile.Index != index+1 || profile.RunDate.Format("2006-01-02") != runDate.Format("2006-01-02") {
+				return fmt.Errorf("%s has invalid frozen profile for index %d", progressLabel, index)
+			}
+		}
+	}
 
 	var (
 		iamBundle      *dailySimulationIAMBundle
@@ -438,10 +466,7 @@ func runDailySimulationBatchWithOptions(
 				}
 
 				// 构建每日模拟用户配置
-				profile := buildDailySimulationProfile(cfg, runDate, idx)
-				if strings.TrimSpace(options.HistoricalBatchID) != "" {
-					profile = namespaceHistoricalProfile(options.HistoricalBatchID, profile)
-				}
+				profile := buildDailySimulationBatchProfile(cfg, runDate, idx, options)
 				existingTestee := existingTesteesByIndex[profile.Index]
 				scenario := selectDailySimulationBatchScenario(scenarios, options.ScenariosByIndex, idx)
 				if existingTestee == nil && options.RestoreExistingTestee != nil {

@@ -11,7 +11,7 @@ on:
         description: '稳定批次 ID；正式批次不得更换'
         required: true
         type: string
-        default: hist-20250101-20260727-v1
+        default: hist-20250101-20260727-v2
       from:
         description: '首个业务日期（YYYY-MM-DD）'
         required: true
@@ -23,7 +23,7 @@ on:
         type: string
         default: '2026-07-27'
       resume:
-        description: '从原状态恢复；正式批次必须启用'
+        description: '复用同一个 v2 状态；空批次会安全创建初始状态'
         required: true
         type: boolean
         default: true
@@ -70,7 +70,7 @@ jobs:
           esac
           printf '%s\n' "$FROM_DATE" "$TO_DATE" |
             grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
-          if [ "$BATCH_ID" = hist-20250101-20260727-v1 ]; then
+          if [ "$BATCH_ID" = hist-20250101-20260727-v2 ]; then
             test "$FROM_DATE" = 2025-01-01
             test "$TO_DATE" = 2026-07-27
             test "$RESUME" = true
@@ -204,7 +204,6 @@ jobs:
           SEEDDATA_RESUME: ${{ inputs.resume && '1' || '0' }}
           SEEDDATA_STATE_DIR: ${{ vars.SEEDDATA_HISTORICAL_STATE_DIR || '/secure/path/seeddata-historical-state' }}
           SEEDDATA_SECRET_ENV_FILE: ${{ vars.SEEDDATA_HISTORICAL_ENV_FILE || '/secure/path/seeddata-historical.env' }}
-          SEEDDATA_LEGACY_SUBMISSION_FILE: ${{ vars.SEEDDATA_HISTORICAL_LEGACY_SUBMISSION_FILE || '/secure/path/hist-20250101-20260727-v1.legacy-submissions.json' }}
           SEEDDATA_BASELINE_FILE: ${{ vars.SEEDDATA_HISTORICAL_BASELINE_FILE || '/secure/path/hist-20250101-20260727-v1.baseline.json' }}
           SEEDDATA_DEPLOY_ROOT: ${{ vars.SEEDDATA_HISTORICAL_DEPLOY_ROOT || '/opt/seeddata-runner-historical' }}
           SEEDDATA_LOG_DIR: ${{ vars.SEEDDATA_HISTORICAL_LOG_DIR || '/secure/path/seeddata-historical-logs' }}

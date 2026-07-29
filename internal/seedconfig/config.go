@@ -31,7 +31,7 @@ const (
 	DefaultPlanSubmitCompletionPercent        = 100
 	DefaultPlanSubmitSubmissionStateFile      = ".seeddata-cache/plan-submit-submissions.json"
 	DefaultHistoricalParentWorkers            = 16
-	DefaultHistoricalSubmissionWorkers        = 24
+	DefaultHistoricalSubmissionWorkers        = 4
 	DefaultHistoricalStageReadWorkers         = 16
 	DefaultHistoricalIAMWorkers               = 2
 	DefaultHistoricalProgressInterval         = "15s"
@@ -342,8 +342,8 @@ func (cfg HistoricalBackfillConfig) Validate() error {
 	return nil
 }
 
-// ResolveHistoricalBackfill preserves the old command behavior when the new
-// block is absent. An explicit block is used verbatim after validation.
+// ResolveHistoricalBackfill derives safe historical defaults when the block is
+// absent. An explicit block is used verbatim after validation.
 func (cfg Config) ResolveHistoricalBackfill() HistoricalBackfillConfig {
 	if cfg.HistoricalBackfill.IsZero() {
 		parentWorkers := cfg.DailySimulation.Workers
@@ -355,7 +355,7 @@ func (cfg Config) ResolveHistoricalBackfill() HistoricalBackfillConfig {
 			iamWorkers = 1
 		}
 		return HistoricalBackfillConfig{
-			ParentWorkers: parentWorkers, SubmissionWorkers: parentWorkers,
+			ParentWorkers: parentWorkers, SubmissionWorkers: DefaultHistoricalSubmissionWorkers,
 			StageReadWorkers: 1, IAMWorkers: iamWorkers,
 			ProgressInterval: DefaultHistoricalProgressInterval,
 		}

@@ -6,7 +6,7 @@
 ## 先看结论
 
 - `CI` 成功后**不会自动进入 CD**。历史回填会长期写入生产业务事实，因此部署只能手动触发。
-- 正式批次固定为 `hist-20250101-20260727-v1`，日期固定为
+- 正式批次固定为 `hist-20250101-20260727-v2`，日期固定为
   `2025-01-01..2026-07-27`，并且必须启用 `resume=true`。
 - 部署 Action 只负责构建不可变镜像、上传到 ServerA 并启动 systemd unit；Action 成功不代表
   573 天回填已经完成。
@@ -93,13 +93,13 @@ gh secret list --repo FangcunMount/seeddata-runner --env production
 | --- | --- |
 | `SEEDDATA_HISTORICAL_STATE_DIR` | `/secure/path/seeddata-historical-state` |
 | `SEEDDATA_HISTORICAL_ENV_FILE` | `/secure/path/seeddata-historical.env` |
-| `SEEDDATA_HISTORICAL_LEGACY_SUBMISSION_FILE` | `/secure/path/hist-20250101-20260727-v1.legacy-submissions.json` |
 | `SEEDDATA_HISTORICAL_BASELINE_FILE` | `/secure/path/hist-20250101-20260727-v1.baseline.json` |
 | `SEEDDATA_HISTORICAL_DEPLOY_ROOT` | `/opt/seeddata-runner-historical` |
 | `SEEDDATA_HISTORICAL_LOG_DIR` | `/secure/path/seeddata-historical-logs` |
 
 如果实际文件不在默认路径，应修改对应 Variable；不要为了适配默认值而重新创建一份含义不同的
-状态文件或 baseline。
+状态文件或 baseline。Baseline 文件名保留 `v1`，因为它是首次回填前已封存的原始零基线，
+不是可恢复的 runner manifest 版本。
 
 ## 3. 准备 ServerA
 
@@ -178,24 +178,21 @@ sudo find /secure/path/seeddata-historical-state \
 正式批次的 v2 数据库路径可这样确定：
 
 ```bash
-BATCH_ID=hist-20250101-20260727-v1
+BATCH_ID=hist-20250101-20260727-v2
 BATCH_HASH="$(printf '%s' "$BATCH_ID" | sha256sum | awk '{print substr($1,1,16)}')"
 V2_DB="/secure/path/seeddata-historical-state/${BATCH_HASH}/historical-state-v2.db"
 printf 'v2 db: %s\n' "$V2_DB"
 ```
 
-如果 `resume=true` 且 v2 数据库尚不存在，部署会要求旧 submission ledger 非空。把 production
-Variable 指向这次批次真实使用过的 ledger。不要伪造空文件，也不要删除旧 manifest/checkpoint；
-runner 会在任何业务 HTTP 请求前完成校验和无损迁移。旧 ledger 会只读挂载给 UID `10001`，因此
-还要确保该用户能读取它：
+正式 v2 批次首次启动时，即使 `resume=true` 且数据库尚不存在，runner 也会创建全新状态，不再
+导入 v1 submission ledger。Manifest v1 缺少冻结 Profile，会在任何 IAM 登录或业务 HTTP 请求前
+被拒绝；必须先完成 v1 远端 mock 数据清理，再使用新的 v2 batch。首次启动前确认 v2 数据库确实
+不存在：
 
 ```bash
-LEGACY_LEDGER=/secure/path/hist-20250101-20260727-v1.legacy-submissions.json
-
-if ! sudo test -e "$V2_DB"; then
-  sudo test -s "$LEGACY_LEDGER"
-  sudo chown 10001:10001 "$LEGACY_LEDGER"
-  sudo chmod 0600 "$LEGACY_LEDGER"
+if sudo test -e "$V2_DB"; then
+  echo "ERROR: v2 state already exists; verify whether this is a resume" >&2
+  exit 1
 fi
 ```
 
@@ -274,7 +271,7 @@ FangcunMount/seeddata-runner → Actions → Historical Backfill Deploy → Run 
 | --- | --- |
 | Use workflow from | `main` |
 | `confirmation` | `START_HISTORICAL_BACKFILL` |
-| `batch_id` | `hist-20250101-20260727-v1` |
+| `batch_id` | `hist-20250101-20260727-v2` |
 | `from` | `2025-01-01` |
 | `to` | `2026-07-27` |
 | `resume` | `true` |
@@ -289,7 +286,7 @@ gh workflow run historical-deploy.yml \
   --repo FangcunMount/seeddata-runner \
   --ref main \
   -f confirmation=START_HISTORICAL_BACKFILL \
-  -f batch_id=hist-20250101-20260727-v1 \
+  -f batch_id=hist-20250101-20260727-v2 \
   -f from=2025-01-01 \
   -f to=2026-07-27 \
   -f resume=true
@@ -326,7 +323,7 @@ workflow 完成了以下工作：
 3. 构建 `linux/amd64` 镜像并用 commit SHA 发布到 GHCR。
 4. 生成镜像 tar、部署包和 SHA256 校验文件。
 5. 通过固定 SSH Host Key 连接 ServerA，并确认实际 hostname 为 `serverA`。
-6. 校验 Secret 文件、baseline/checksum、状态目录、旧 ledger 条件和普通 daemon 状态。
+6. 校验 Secret 文件、baseline/checksum、v2 状态目录和普通 daemon 状态。
 7. 校验 `infra-network`、容器 DNS 和三个内部健康接口。
 8. 安装 revision、systemd unit 和部署 receipt，启动历史容器。
 
@@ -346,7 +343,7 @@ Actions → Historical Backfill Control → Run workflow
 
 ```text
 operation=status
-batch_id=hist-20250101-20260727-v1
+batch_id=hist-20250101-20260727-v2
 confirmation=<留空>
 ```
 
@@ -357,7 +354,7 @@ gh workflow run historical-control.yml \
   --repo FangcunMount/seeddata-runner \
   --ref main \
   -f operation=status \
-  -f batch_id=hist-20250101-20260727-v1
+  -f batch_id=hist-20250101-20260727-v2
 ```
 
 输出包含 systemd 状态、容器状态、最近 100 行 journal、最近 100 行 runner 日志和部署 receipt。
@@ -370,10 +367,10 @@ sudo systemctl show seeddata-historical-backfill.service \
   --no-pager
 
 sudo docker ps -a \
-  --filter 'name=seeddata-historical-hist-20250101-20260727-v1'
+  --filter 'name=seeddata-historical-hist-20250101-20260727-v2'
 
 sudo tail -F \
-  /secure/path/seeddata-historical-logs/hist-20250101-20260727-v1.log
+  /secure/path/seeddata-historical-logs/hist-20250101-20260727-v2.log
 ```
 
 正常运行时每 15 秒会出现日期、父场景、submission、Report、吞吐、in-flight、失败数和 ETA。
@@ -391,7 +388,7 @@ sudo sed -n \
   -e '/^resume=/p' \
   -e '/^state_dir=/p' \
   -e '/^deployed_at=/p' \
-  /opt/seeddata-runner-historical/deployment-hist-20250101-20260727-v1.txt
+  /opt/seeddata-runner-historical/deployment-hist-20250101-20260727-v2.txt
 ```
 
 ### 6.3 在 QS MySQL 查看服务端完成事实
@@ -410,7 +407,7 @@ SELECT
   SUM(stage = 'report_generated') AS report_count
 FROM seed_backfill_stage
 WHERE org_id = 1
-  AND batch_id = 'hist-20250101-20260727-v1'
+  AND batch_id = 'hist-20250101-20260727-v2'
 GROUP BY DATE(business_at)
 ORDER BY business_date DESC
 LIMIT 14;
@@ -431,7 +428,7 @@ SELECT
   finished_at
 FROM seed_backfill_stage_attempt
 WHERE org_id = 1
-  AND batch_id = 'hist-20250101-20260727-v1'
+  AND batch_id = 'hist-20250101-20260727-v2'
   AND status = 'failed'
 ORDER BY finished_at DESC
 LIMIT 50;
@@ -448,7 +445,7 @@ LIMIT 50;
 
 ```text
 operation=stop
-batch_id=hist-20250101-20260727-v1
+batch_id=hist-20250101-20260727-v2
 confirmation=STOP_HISTORICAL_BACKFILL
 ```
 
@@ -459,7 +456,7 @@ gh workflow run historical-control.yml \
   --repo FangcunMount/seeddata-runner \
   --ref main \
   -f operation=stop \
-  -f batch_id=hist-20250101-20260727-v1 \
+  -f batch_id=hist-20250101-20260727-v2 \
   -f confirmation=STOP_HISTORICAL_BACKFILL
 ```
 
@@ -512,7 +509,7 @@ gh run watch <original-deploy-run-id> \
 | Secret 文件权限错误 | 改为 `0400` 或 `0600`，并确认四个必需键非空 |
 | `ordinary seeddata-runner.service is active` | 停止普通 daemon，再重新运行原 Deploy run |
 | 状态目录不可写 | 确认目录存在且镜像用户 `10001:10001` 可写 |
-| `legacy submission file is required` | v2 首次迁移必须指向真实旧 ledger；不要伪造空文件或跳过迁移 |
+| `historical manifest version 1 is not resumable` | 停止 v1 恢复；完成旧批次远端数据清理后，以正式 v2 batch 创建全新状态 |
 | `infra-network`、DNS 或 health 失败 | 先恢复三个服务和容器网络；部署不会回退到公网 API |
 | IAM 登录后 QS 返回 403 | 确认 IAM 在 QS 启动前可用、QS Token Verifier 已注入、JWT 含正确 Org |
 | Report/Outcome 长时间缺失 | 检查 Evaluation/Interpretation Worker、Mongo/MySQL Outbox 与队列积压；当天不会写 checkpoint |
@@ -561,7 +558,7 @@ sudo docker run --rm \
   historical-verify \
   --config /run/seeddata/config.yaml \
   --state-dir /state \
-  --batch-id hist-20250101-20260727-v1
+  --batch-id hist-20250101-20260727-v2
 ```
 
 命令必须退出 `0`，且 JSON 中 `complete=true`。再导出最终 manifest 并保存 checksum：
@@ -579,15 +576,15 @@ sudo docker run --rm \
   "$IMAGE_REF" \
   historical-manifest \
   --state-dir /state \
-  --batch-id hist-20250101-20260727-v1 \
+  --batch-id hist-20250101-20260727-v2 \
   > "$MANIFEST_TMP"
 
 sudo install -m 0600 "$MANIFEST_TMP" \
-  /secure/path/hist-20250101-20260727-v1.manifest.json
+  /secure/path/hist-20250101-20260727-v2.manifest.json
 rm -f "$MANIFEST_TMP"
 
-sudo sha256sum /secure/path/hist-20250101-20260727-v1.manifest.json |
-  sudo tee /secure/path/hist-20250101-20260727-v1.manifest.json.sha256 >/dev/null
+sudo sha256sum /secure/path/hist-20250101-20260727-v2.manifest.json |
+  sudo tee /secure/path/hist-20250101-20260727-v2.manifest.json.sha256 >/dev/null
 ```
 
 ## 11. Statistics、K6 与收尾
@@ -606,14 +603,14 @@ runner 完成后切换到 qs-server 仓库，按照其
 - 关闭 apiserver/collection-server 的历史开关。
 - 恢复 Plan scheduler 和普通 seeddata daemon。
 - 轮换并移除一次性 `QS_HISTORICAL_CONTEXT_SECRET`。
-- 保留 baseline、bbolt、旧 JSON、manifest、stage/attempt、部署 receipt、日志和验证输出至少
+- 保留 baseline、v2 bbolt/manifest、stage/attempt、部署 receipt、日志和验证输出至少
   90 天。
 
 ## 12. 禁止事项
 
 - 不把 CI 成功配置成自动生产回填。
 - 不在正式批次中更换日期、batch ID、state dir 或 idempotency key。
-- 不删除 `historical-state-v2.db`、旧 manifest、checkpoint 或 submission ledger。
+- 不删除正在运行或待验收的 v2 `historical-state-v2.db`、manifest 或 checkpoint。
 - 不在恢复时随意切换 seeddata revision 或 `configs/seeddata.yaml`。
 - 不在批次运行中发布或修改冻结的 Plan、Questionnaire、Model。
 - 不在历史任务运行时启动普通 seeddata daemon 或 Plan scheduler。

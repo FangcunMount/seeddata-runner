@@ -256,10 +256,10 @@ planSubmit:
 	}
 }
 
-func TestResolveHistoricalBackfillPreservesLegacyDefaultsWhenBlockMissing(t *testing.T) {
+func TestResolveHistoricalBackfillUsesSafeDefaultsWhenBlockMissing(t *testing.T) {
 	cfg := Config{DailySimulation: DailySimulationConfig{Workers: 7}, IAM: IAMConfig{MockConsumer: IAMMockConsumerConfig{MaxConcurrent: 1}}}
 	resolved := cfg.ResolveHistoricalBackfill()
-	if resolved.ParentWorkers != 7 || resolved.SubmissionWorkers != 7 || resolved.StageReadWorkers != 1 || resolved.IAMWorkers != 1 || resolved.ProgressInterval != "15s" {
+	if resolved.ParentWorkers != 7 || resolved.SubmissionWorkers != 4 || resolved.StageReadWorkers != 1 || resolved.IAMWorkers != 1 || resolved.ProgressInterval != "15s" {
 		t.Fatalf("unexpected legacy fallback: %+v", resolved)
 	}
 }
