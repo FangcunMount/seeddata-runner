@@ -851,22 +851,22 @@ func resolveHistoricalRecoveryScenarios(
 	day time.Time,
 	expectedCount int,
 	primaryTargetCode string,
-) (map[int]dailySimulationScenario, error) {
+) (map[int]dailySimulationScenario, []string, error) {
 	if loader.getEntry == nil || loader.resolveTarget == nil {
-		return nil, fmt.Errorf("historical recovery scenario loader is required")
+		return nil, nil, fmt.Errorf("historical recovery scenario loader is required")
 	}
 	if expectedCount <= 0 {
-		return nil, fmt.Errorf("historical recovery scenario count must be positive")
+		return nil, nil, fmt.Errorf("historical recovery scenario count must be positive")
 	}
 
 	frozenTarget, targetKey, err := historicalPrimaryTarget(manifest.Targets, primaryTargetCode)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	businessDate := day.Format("2006-01-02")
-	frozenParents, err := historicalParentScenariosByIndex(manifest, businessDate, targetKey, frozenTarget.TargetCode, expectedCount)
+	frozenParents, normalizedJourneyIDs, err := historicalParentScenariosByIndex(manifest, businessDate, targetKey, frozenTarget.TargetCode, expectedCount)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	orgID := strconv.FormatInt(manifest.OrgID, 10)
 	scenarios := make(map[int]dailySimulationScenario, expectedCount)
@@ -890,37 +890,37 @@ func resolveHistoricalRecoveryScenarios(
 			storedIdentity.PlanID = planID
 		}
 		if err := validateHistoricalParentScenarioIdentity(storedIdentity, resolvedIdentity); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		entryID := strings.TrimSpace(stored.EntryID)
 		if entryID == "" {
-			return nil, fmt.Errorf("historical recovery scenario %s has empty frozen entry_id", scenarioID)
+			return nil, nil, fmt.Errorf("historical recovery scenario %s has empty frozen entry_id", scenarioID)
 		}
 
 		entry := entries[entryID]
 		if entry == nil {
 			entry, err = loader.getEntry(ctx, entryID)
 			if err != nil {
-				return nil, fmt.Errorf("load frozen historical entry %s for %s: %w", entryID, scenarioID, err)
+				return nil, nil, fmt.Errorf("load frozen historical entry %s for %s: %w", entryID, scenarioID, err)
 			}
 			if entry == nil {
-				return nil, fmt.Errorf("frozen historical entry %s for %s was not found", entryID, scenarioID)
+				return nil, nil, fmt.Errorf("frozen historical entry %s for %s was not found", entryID, scenarioID)
 			}
 			if strings.TrimSpace(entry.ID) != entryID {
-				return nil, fmt.Errorf("frozen historical entry identity conflict for %s: requested=%q loaded=%q", scenarioID, entryID, strings.TrimSpace(entry.ID))
+				return nil, nil, fmt.Errorf("frozen historical entry identity conflict for %s: requested=%q loaded=%q", scenarioID, entryID, strings.TrimSpace(entry.ID))
 			}
 			if !entry.IsActive {
-				return nil, fmt.Errorf("frozen historical entry %s for %s is inactive", entryID, scenarioID)
+				return nil, nil, fmt.Errorf("frozen historical entry %s for %s is inactive", entryID, scenarioID)
 			}
 			if strings.TrimSpace(entry.OrgID) != orgID {
-				return nil, fmt.Errorf("frozen historical entry %s org conflict for %s: stored=%q current=%q", entryID, scenarioID, orgID, strings.TrimSpace(entry.OrgID))
+				return nil, nil, fmt.Errorf("frozen historical entry %s org conflict for %s: stored=%q current=%q", entryID, scenarioID, orgID, strings.TrimSpace(entry.OrgID))
 			}
 			if strings.TrimSpace(entry.ClinicianID) == "" {
-				return nil, fmt.Errorf("frozen historical entry %s for %s has empty clinician_id", entryID, scenarioID)
+				return nil, nil, fmt.Errorf("frozen historical entry %s for %s has empty clinician_id", entryID, scenarioID)
 			}
 			entryTargetKey := strings.Join([]string{strings.ToLower(strings.TrimSpace(entry.TargetType)), strings.TrimSpace(entry.TargetCode)}, "/")
 			if entryTargetKey != targetKey || strings.TrimSpace(entry.TargetVersion) != strings.TrimSpace(frozenTarget.TargetVersion) {
-				return nil, fmt.Errorf(
+				return nil, nil, fmt.Errorf(
 					"frozen historical entry %s target conflict for %s: frozen=%s@%s current=%s@%s",
 					entryID,
 					scenarioID,
@@ -937,10 +937,10 @@ func resolveHistoricalRecoveryScenarios(
 		if target == nil {
 			target, err = loader.resolveTarget(ctx, frozenTarget)
 			if err != nil {
-				return nil, fmt.Errorf("resolve frozen historical target %s for %s: %w", targetKey, scenarioID, err)
+				return nil, nil, fmt.Errorf("resolve frozen historical target %s for %s: %w", targetKey, scenarioID, err)
 			}
 			if err := validateResolvedHistoricalTarget(frozenTarget, target); err != nil {
-				return nil, fmt.Errorf("resolve frozen historical target %s for %s: %w", targetKey, scenarioID, err)
+				return nil, nil, fmt.Errorf("resolve frozen historical target %s for %s: %w", targetKey, scenarioID, err)
 			}
 			targets[targetKey] = target
 		}
@@ -952,14 +952,14 @@ func resolveHistoricalRecoveryScenarios(
 			PlanID:        planID,
 		}
 	}
-	return scenarios, nil
+	return scenarios, normalizedJourneyIDs, nil
 }
 
 func historicalParentScenariosByIndex(
 	manifest HistoricalManifest,
 	businessDate, targetKey, targetCode string,
 	expectedCount int,
-) (map[int]HistoricalScenarioManifest, error) {
+) (map[int]HistoricalScenarioManifest, []string, error) {
 	parents := make(map[int]HistoricalScenarioManifest, expectedCount)
 	for key, scenario := range manifest.Scenarios {
 		if strings.TrimSpace(scenario.BusinessDate) != businessDate {
@@ -967,30 +967,39 @@ func historicalParentScenariosByIndex(
 		}
 		parts := strings.Split(strings.TrimSpace(key), "/")
 		if len(parts) != 4 || parts[0] != businessDate {
-			return nil, fmt.Errorf("historical recovery scenario %s has invalid parent identity", key)
+			return nil, nil, fmt.Errorf("historical recovery scenario %s has invalid parent identity", key)
 		}
 		index, err := strconv.Atoi(parts[1])
 		if err != nil || index < 0 || index >= expectedCount {
-			return nil, fmt.Errorf("historical recovery scenario %s has invalid index", key)
+			return nil, nil, fmt.Errorf("historical recovery scenario %s has invalid index", key)
 		}
 		journey := dailySimulationJourneyTarget(parts[2])
-		if !isDailySimulationJourneyTarget(journey) || scenario.Journey != string(journey) {
-			return nil, fmt.Errorf("historical recovery scenario %s has invalid journey %q", key, scenario.Journey)
+		if !isDailySimulationJourneyTarget(journey) {
+			return nil, nil, fmt.Errorf("historical recovery scenario %s has invalid journey identity %q", key, parts[2])
 		}
 		if scenario.ScenarioID != key || scenario.TargetKey != targetKey || parts[3] != targetCode {
-			return nil, fmt.Errorf("historical recovery scenario %s has frozen identity conflict", key)
+			return nil, nil, fmt.Errorf("historical recovery scenario %s has frozen identity conflict", key)
 		}
 		if existing, exists := parents[index]; exists {
-			return nil, fmt.Errorf("historical recovery index %d maps to multiple parents: %s and %s", index, existing.ScenarioID, scenario.ScenarioID)
+			return nil, nil, fmt.Errorf("historical recovery index %d maps to multiple parents: %s and %s", index, existing.ScenarioID, scenario.ScenarioID)
 		}
+		// ScenarioID is the durable idempotency identity used by both local and
+		// server stage ledgers. Legacy manifests may contain a drifted denormalized
+		// Journey field, so recovery follows the validated ScenarioID segment.
+		scenario.Journey = string(journey)
 		parents[index] = scenario
 	}
+	normalizedJourneyIDs := make([]string, 0)
 	for index := 0; index < expectedCount; index++ {
-		if _, exists := parents[index]; !exists {
-			return nil, fmt.Errorf("historical recovery index %d is missing from frozen manifest for %s", index, businessDate)
+		scenario, exists := parents[index]
+		if !exists {
+			return nil, nil, fmt.Errorf("historical recovery index %d is missing from frozen manifest for %s", index, businessDate)
+		}
+		if manifest.Scenarios[scenario.ScenarioID].Journey != scenario.Journey {
+			normalizedJourneyIDs = append(normalizedJourneyIDs, scenario.ScenarioID)
 		}
 	}
-	return parents, nil
+	return parents, normalizedJourneyIDs, nil
 }
 
 func isDailySimulationJourneyTarget(value dailySimulationJourneyTarget) bool {
@@ -1090,11 +1099,12 @@ func buildHistoricalDaySnapshot(
 		return nil, fmt.Errorf("historical day snapshot dependencies are required")
 	}
 	var (
-		scenariosByIndex map[int]dailySimulationScenario
-		err              error
+		scenariosByIndex     map[int]dailySimulationScenario
+		normalizedJourneyIDs []string
+		err                  error
 	)
 	if probeServer {
-		scenariosByIndex, err = resolveHistoricalRecoveryScenarios(ctx, historicalScenarioRecoveryLoader{
+		scenariosByIndex, normalizedJourneyIDs, err = resolveHistoricalRecoveryScenarios(ctx, historicalScenarioRecoveryLoader{
 			getEntry: deps.APIClient.GetAssessmentEntry,
 			resolveTarget: func(ctx context.Context, frozen HistoricalTargetManifest) (*dailySimulationResolvedTarget, error) {
 				return resolveDailySimulationTarget(
@@ -1133,6 +1143,10 @@ func buildHistoricalDaySnapshot(
 		BusinessDate: day.Format("2006-01-02"), Expected: make(map[string]HistoricalScenarioManifest, expectedCount),
 		Scenarios: make(map[string]HistoricalScenarioSnapshot), scenariosByIndex: scenariosByIndex,
 	}
+	normalizedJourneys := make(map[string]struct{}, len(normalizedJourneyIDs))
+	for _, scenarioID := range normalizedJourneyIDs {
+		normalizedJourneys[scenarioID] = struct{}{}
+	}
 	for index := 0; index < expectedCount; index++ {
 		profile := namespaceHistoricalProfile(manifest.BatchID, buildDailySimulationProfile(cfg, day, index))
 		scenario := scenariosByIndex[index]
@@ -1145,6 +1159,9 @@ func buildHistoricalDaySnapshot(
 				ScenarioID: historical.ScenarioID, BusinessDate: snapshot.BusinessDate, Journey: string(journey), TargetKey: targetKey,
 				EntryID: scenario.Entry.ID, PlanID: planID,
 			}
+		}
+		if _, normalize := normalizedJourneys[historical.ScenarioID]; normalize {
+			record.Journey = string(journey)
 		}
 		if record.PlanID == "" {
 			record.PlanID = planID
@@ -1172,6 +1189,18 @@ func buildHistoricalDaySnapshot(
 		}
 		manifest.Scenarios[historical.ScenarioID] = record
 		snapshot.Expected[historical.ScenarioID] = record
+	}
+	if len(normalizedJourneyIDs) > 0 {
+		sample := normalizedJourneyIDs
+		if len(sample) > 8 {
+			sample = sample[:8]
+		}
+		deps.Logger.Warnw(
+			"Normalized legacy historical journey fields from durable scenario identities",
+			"business_date", snapshot.BusinessDate,
+			"normalized_count", len(normalizedJourneyIDs),
+			"scenario_id_sample", sample,
+		)
 	}
 
 	scenarioIDs := make(map[string]struct{})

@@ -95,7 +95,7 @@ func TestResolveHistoricalRecoveryScenariosUsesFrozenIdentity(t *testing.T) {
 		TargetType: "scale", TargetCode: "3adyDE", TargetVersion: "v1",
 		QuestionnaireCode: "Q", QuestionnaireVersion: "q1", RequiresAssessment: true,
 	}
-	scenarioID := "2025-01-01/0/register_only/3adyDE"
+	scenarioID := "2025-01-01/0/submit_answer/3adyDE"
 	manifest := HistoricalManifest{
 		OrgID: 1,
 		Targets: map[string]HistoricalTargetManifest{
@@ -103,7 +103,9 @@ func TestResolveHistoricalRecoveryScenariosUsesFrozenIdentity(t *testing.T) {
 		},
 		Scenarios: map[string]HistoricalScenarioManifest{
 			scenarioID: {
-				ScenarioID: scenarioID, BusinessDate: "2025-01-01", Journey: "register_only",
+				// Legacy manifests may have a drifted denormalized Journey field. The
+				// durable ScenarioID remains authoritative for recovery.
+				ScenarioID: scenarioID, BusinessDate: "2025-01-01", Journey: "resolve_entry",
 				TargetKey: "scale/3adyDE", EntryID: "entry-frozen", PlanID: "plan-frozen",
 			},
 		},
@@ -133,16 +135,34 @@ func TestResolveHistoricalRecoveryScenariosUsesFrozenIdentity(t *testing.T) {
 		},
 	}
 
-	scenarios, err := resolveHistoricalRecoveryScenarios(context.Background(), loader, cfg, manifest, day, 1, "3adyDE")
+	scenarios, normalizedJourneyIDs, err := resolveHistoricalRecoveryScenarios(context.Background(), loader, cfg, manifest, day, 1, "3adyDE")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(normalizedJourneyIDs) != 1 || normalizedJourneyIDs[0] != scenarioID {
+		t.Fatalf("normalized journey ids=%v, want [%s]", normalizedJourneyIDs, scenarioID)
 	}
 	scenario, ok := scenarios[0]
 	if !ok || scenario.Entry == nil || scenario.Entry.ID != "entry-frozen" || scenario.ClinicianID != "clinician-frozen" {
 		t.Fatalf("recovered scenario did not use frozen entry: %+v", scenario)
 	}
-	if scenario.JourneyTarget != dailySimulationJourneyRegisterOnly || scenario.PlanID != "plan-frozen" {
+	if scenario.JourneyTarget != dailySimulationJourneySubmitAnswer || scenario.PlanID != "plan-frozen" {
 		t.Fatalf("recovered scenario did not preserve frozen journey/plan: %+v", scenario)
+	}
+}
+
+func TestHistoricalParentScenariosByIndexRejectsInvalidJourneyIdentity(t *testing.T) {
+	scenarioID := "2025-01-01/0/not_a_journey/3adyDE"
+	manifest := HistoricalManifest{Scenarios: map[string]HistoricalScenarioManifest{
+		scenarioID: {
+			ScenarioID: scenarioID, BusinessDate: "2025-01-01", Journey: "register_only",
+			TargetKey: "scale/3adyDE", EntryID: "entry-frozen",
+		},
+	}}
+
+	_, _, err := historicalParentScenariosByIndex(manifest, "2025-01-01", "scale/3adyDE", "3adyDE", 1)
+	if err == nil || !strings.Contains(err.Error(), `invalid journey identity "not_a_journey"`) {
+		t.Fatalf("expected invalid durable journey identity, got %v", err)
 	}
 }
 

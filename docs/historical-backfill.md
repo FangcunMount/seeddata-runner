@@ -58,6 +58,11 @@ manifest、分片 stage ledger 和可归属本批次的 submission 迁移到权�
 `historical-state-v2.db`。迁移通过临时数据库校验后原子替换，旧 JSON 文件只读保留。
 迁移冲突或同一批次已有 writer 时命令直接退出；不要删除数据库或更换 batch ID。
 
+历史 `scenario_id` 同时是本地、服务端 stage 和提交请求使用的持久幂等身份。恢复旧批次时，
+如果 manifest 的冗余 `journey` 字段与合法 `scenario_id` 中的 journey 段不一致，runner 会保留
+原 `scenario_id`、按其中的 journey 恢复，并记录校正数量和样例 ID；日期、index、target、
+entry、Plan 或非法 journey identity 等其他冻结身份冲突仍会立即停止。
+
 运行中每 15 秒输出当前自然日、父场景进度、已发现/完成 submission、Report 数、吞吐、
 in-flight、失败数和 ETA。自然日仍然串行，只有日终完整校验通过才推进 checkpoint。
 
