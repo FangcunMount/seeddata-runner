@@ -25,7 +25,7 @@ export IAM_MOCK_CONSUMER_SHARED_SECRET='<secret>'
 export QS_HISTORICAL_CONTEXT_SECRET='<secret>'
 ```
 
-历史模式默认使用父场景 8、submission 2、stage reader 4、IAM 1 路并发。IAM 限制同时覆盖
+历史模式默认使用父场景 12、submission 6、stage reader 6、IAM 1 路并发。IAM 限制同时覆盖
 首次创建和历史 guardian 会话恢复，避免恢复批次绕过限流形成登录洪峰。可以在
 `historicalBackfill` 配置块设置，也可以用 `--parent-workers`、`--submission-workers`、
 `--stage-read-workers`、`--iam-workers` 临时覆盖。普通 daemon 不读取这些参数。

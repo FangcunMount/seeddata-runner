@@ -90,9 +90,9 @@ dailySimulation:
     submitAnswerWeight: 50  # ~50% 走完全流程；planSubmit 另有 completionPercent 控制提交比例
 
 historicalBackfill:
-  parentWorkers: 8
-  submissionWorkers: 2
-  stageReadWorkers: 4
+  parentWorkers: 12
+  submissionWorkers: 6
+  stageReadWorkers: 6
   iamWorkers: 1
   progressInterval: "15s"
 
