@@ -47,6 +47,42 @@ func TestAPIClientSignsHistoricalContextWithoutChangingOrdinaryRequests(t *testi
 
 func timePtr(value time.Time) *time.Time { return &value }
 
+func TestListHistoricalScenarioStagesPreservesLargePayloadID(t *testing.T) {
+	const answerSheetID = "630459979077268014"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("scenario_id"); got != "2025-01-01/107/submit_answer/task-1" {
+			t.Fatalf("scenario_id = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"batch_id":"batch","stages":[{"stage":"answersheet_submit","resource_id":"` + answerSheetID + `","payload_json":{"answersheet_id":` + answerSheetID + `}}]}}`))
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "", nil)
+	response, err := client.ListHistoricalScenarioStages(context.Background(), "batch", "2025-01-01/107/submit_answer/task-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Stages) != 1 {
+		t.Fatalf("stages = %d, want 1", len(response.Stages))
+	}
+	record := response.Stages[0]
+	if record.ResourceID != answerSheetID {
+		t.Fatalf("resource_id = %q, want %q", record.ResourceID, answerSheetID)
+	}
+	var payload struct {
+		AnswerSheetID json.Number `json:"answersheet_id"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(record.PayloadJSON)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if got := payload.AnswerSheetID.String(); got != answerSheetID {
+		t.Fatalf("payload answersheet_id = %q, want %q", got, answerSheetID)
+	}
+}
+
 func TestDecodeResponseDataAssessmentEntryListSupportsFormattedTime(t *testing.T) {
 	resp := &Response{
 		Data: map[string]interface{}{

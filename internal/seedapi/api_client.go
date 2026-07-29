@@ -1182,7 +1182,7 @@ func (c *APIClient) doRequestWithHeadersRetryTimeoutAndLimit(
 
 		if isHTTPSuccess(resp.StatusCode) {
 			var apiResp Response
-			if err := json.Unmarshal(respBody, &apiResp); err != nil {
+			if err := decodeAPIResponse(respBody, &apiResp); err != nil {
 				bodyStr := string(respBody)
 				if len(bodyStr) > 200 {
 					bodyStr = bodyStr[:200] + "..."
@@ -1391,6 +1391,25 @@ func (c *APIClient) ensureFreshToken(ctx context.Context) error {
 			"previous_remaining_seconds", int64(remainingTTL/time.Second),
 			"expires_at", c.provider.ExpiresAt(),
 		)
+	}
+	return nil
+}
+
+// decodeAPIResponse keeps JSON numbers lossless while the generic response
+// envelope is decoded through interface{}. Historical resource IDs exceed the
+// exact integer range of float64 and are marshalled into typed response data in
+// a second step by decodeResponseData.
+func decodeAPIResponse(body []byte, out *Response) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("response contains multiple JSON values")
+		}
+		return err
 	}
 	return nil
 }
