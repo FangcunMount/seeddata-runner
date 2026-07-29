@@ -108,6 +108,53 @@ export SEEDDATA_HISTORICAL_LEGACY_SUBMISSION_FILE=/opt/seeddata-runner/.seeddata
 挂载，状态目录读写挂载，环境文件由 Docker 读取后注入。JWT、IAM shared secret 和历史
 HMAC 校验全部保留。
 
+## GitHub Actions 部署
+
+仓库提供三个 workflow：
+
+- `CI`：main/PR 自动执行全库测试、历史关键包 race、部署契约、Linux 静态构建和历史镜像构建。
+- `Historical Backfill Deploy`：只允许从 main 手动触发，经 `production` Environment 审批后，
+  发布 commit SHA 不可变镜像并在 ServerA 启动 systemd 托管的一次性回填。
+- `Historical Backfill Control`：手动执行只读 `status` 或带确认词的 `stop`；不会删除状态或业务数据。
+
+部署 workflow 不传输 IAM/QS 业务 Secret。ServerA 必须预先存在权限为 `0600` 的
+`/secure/path/seeddata-historical.env`，至少包含：
+
+```text
+IAM_USERNAME
+IAM_PASSWORD
+IAM_MOCK_CONSUMER_SHARED_SECRET
+QS_HISTORICAL_CONTEXT_SECRET
+```
+
+Repository/Organization 需要提供与现有生产部署一致的 ServerA 连接配置：
+
+```text
+vars:    SVRA_HOST, SVRA_PUBLIC_HOST(optional), SVRA_USERNAME,
+         SVRA_SSH_PORT(optional), SVRA_SSH_FINGERPRINT
+secrets: SVRA_SSH_KEY or SVR_MINI_SSH_KEY, SVRA_SUDO_PASSWORD(optional)
+```
+
+可选 production Environment Variables：
+
+```text
+SEEDDATA_HISTORICAL_STATE_DIR
+SEEDDATA_HISTORICAL_ENV_FILE
+SEEDDATA_HISTORICAL_LEGACY_SUBMISSION_FILE
+SEEDDATA_HISTORICAL_BASELINE_FILE
+SEEDDATA_HISTORICAL_DEPLOY_ROOT
+SEEDDATA_HISTORICAL_LOG_DIR
+```
+
+缺省路径与本文 ServerA 示例一致。正式部署必须输入确认词
+`START_HISTORICAL_BACKFILL`；正式批次固定使用原日期范围和 `resume=true`。部署完成后进程由
+`seeddata-historical-backfill.service` 托管，Action 退出不会终止回填。停止操作必须输入
+`STOP_HISTORICAL_BACKFILL`，只停止 unit/容器并保留 bbolt、manifest、日志和服务端事实。
+
+首次使用前在仓库 Settings 中创建 `production` Environment 并配置审批；将 CI 的
+`Run Tests`、`Historical Backfill Race Tests`、`Deployment Contracts` 和 `Linux Build`
+设置为 main 分支 required checks。
+
 不得更换 batch ID 或幂等键来绕过 payload conflict。出现 target/Plan 版本漂移时，恢复原冻结版本或新建经审批的批次，不能继续原批次。
 
 ## 修复旧 runner 已创建的 Testee 报到时间
