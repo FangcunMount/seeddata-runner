@@ -879,7 +879,8 @@ func resolveHistoricalRecoveryScenarios(
 		journey := dailySimulationJourneyTarget(stored.Journey)
 		planID := strings.TrimSpace(stored.PlanID)
 		if planID == "" {
-			planID = selectDailySimulationPlanID(cfg, day, index)
+			// Profile.Index is one-based even though the worker job map is zero-based.
+			planID = selectDailySimulationPlanID(cfg, day, index+1)
 		}
 		resolvedIdentity := HistoricalScenarioManifest{
 			ScenarioID: scenarioID, BusinessDate: businessDate, Journey: string(journey), TargetKey: targetKey,
@@ -969,10 +970,11 @@ func historicalParentScenariosByIndex(
 		if len(parts) != 4 || parts[0] != businessDate {
 			return nil, nil, fmt.Errorf("historical recovery scenario %s has invalid parent identity", key)
 		}
-		index, err := strconv.Atoi(parts[1])
-		if err != nil || index < 0 || index >= expectedCount {
-			return nil, nil, fmt.Errorf("historical recovery scenario %s has invalid index", key)
+		profileIndex, err := strconv.Atoi(parts[1])
+		if err != nil || profileIndex <= 0 || profileIndex > expectedCount {
+			return nil, nil, fmt.Errorf("historical recovery scenario %s has invalid profile index", key)
 		}
+		jobIndex := profileIndex - 1
 		journey := dailySimulationJourneyTarget(parts[2])
 		if !isDailySimulationJourneyTarget(journey) {
 			return nil, nil, fmt.Errorf("historical recovery scenario %s has invalid journey identity %q", key, parts[2])
@@ -980,20 +982,20 @@ func historicalParentScenariosByIndex(
 		if scenario.ScenarioID != key || scenario.TargetKey != targetKey || parts[3] != targetCode {
 			return nil, nil, fmt.Errorf("historical recovery scenario %s has frozen identity conflict", key)
 		}
-		if existing, exists := parents[index]; exists {
-			return nil, nil, fmt.Errorf("historical recovery index %d maps to multiple parents: %s and %s", index, existing.ScenarioID, scenario.ScenarioID)
+		if existing, exists := parents[jobIndex]; exists {
+			return nil, nil, fmt.Errorf("historical recovery job index %d maps to multiple parents: %s and %s", jobIndex, existing.ScenarioID, scenario.ScenarioID)
 		}
 		// ScenarioID is the durable idempotency identity used by both local and
 		// server stage ledgers. Legacy manifests may contain a drifted denormalized
 		// Journey field, so recovery follows the validated ScenarioID segment.
 		scenario.Journey = string(journey)
-		parents[index] = scenario
+		parents[jobIndex] = scenario
 	}
 	normalizedJourneyIDs := make([]string, 0)
-	for index := 0; index < expectedCount; index++ {
-		scenario, exists := parents[index]
+	for jobIndex := 0; jobIndex < expectedCount; jobIndex++ {
+		scenario, exists := parents[jobIndex]
 		if !exists {
-			return nil, nil, fmt.Errorf("historical recovery index %d is missing from frozen manifest for %s", index, businessDate)
+			return nil, nil, fmt.Errorf("historical recovery profile index %d is missing from frozen manifest for %s", jobIndex+1, businessDate)
 		}
 		if manifest.Scenarios[scenario.ScenarioID].Journey != scenario.Journey {
 			normalizedJourneyIDs = append(normalizedJourneyIDs, scenario.ScenarioID)

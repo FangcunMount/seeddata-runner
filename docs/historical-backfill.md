@@ -62,6 +62,8 @@ manifest、分片 stage ledger 和可归属本批次的 submission 迁移到权�
 如果 manifest 的冗余 `journey` 字段与合法 `scenario_id` 中的 journey 段不一致，runner 会保留
 原 `scenario_id`、按其中的 journey 恢复，并记录校正数量和样例 ID；日期、index、target、
 entry、Plan 或非法 journey identity 等其他冻结身份冲突仍会立即停止。
+`scenario_id` 中的用户 index 是 `Profile.Index`，范围为 `1..当日人数`；runner 仅在内存中将其
+映射为 `0..当日人数-1` 的 worker job index，不会改写持久身份。
 
 运行中每 15 秒输出当前自然日、父场景进度、已发现/完成 submission、Report 数、吞吐、
 in-flight、失败数和 ETA。自然日仍然串行，只有日终完整校验通过才推进 checkpoint。

@@ -95,7 +95,7 @@ func TestResolveHistoricalRecoveryScenariosUsesFrozenIdentity(t *testing.T) {
 		TargetType: "scale", TargetCode: "3adyDE", TargetVersion: "v1",
 		QuestionnaireCode: "Q", QuestionnaireVersion: "q1", RequiresAssessment: true,
 	}
-	scenarioID := "2025-01-01/0/submit_answer/3adyDE"
+	scenarioID := "2025-01-01/1/submit_answer/3adyDE"
 	manifest := HistoricalManifest{
 		OrgID: 1,
 		Targets: map[string]HistoricalTargetManifest{
@@ -152,7 +152,7 @@ func TestResolveHistoricalRecoveryScenariosUsesFrozenIdentity(t *testing.T) {
 }
 
 func TestHistoricalParentScenariosByIndexRejectsInvalidJourneyIdentity(t *testing.T) {
-	scenarioID := "2025-01-01/0/not_a_journey/3adyDE"
+	scenarioID := "2025-01-01/1/not_a_journey/3adyDE"
 	manifest := HistoricalManifest{Scenarios: map[string]HistoricalScenarioManifest{
 		scenarioID: {
 			ScenarioID: scenarioID, BusinessDate: "2025-01-01", Journey: "register_only",
@@ -163,6 +163,21 @@ func TestHistoricalParentScenariosByIndexRejectsInvalidJourneyIdentity(t *testin
 	_, _, err := historicalParentScenariosByIndex(manifest, "2025-01-01", "scale/3adyDE", "3adyDE", 1)
 	if err == nil || !strings.Contains(err.Error(), `invalid journey identity "not_a_journey"`) {
 		t.Fatalf("expected invalid durable journey identity, got %v", err)
+	}
+}
+
+func TestHistoricalParentScenariosByIndexRejectsZeroProfileIndex(t *testing.T) {
+	scenarioID := "2025-01-01/0/register_only/3adyDE"
+	manifest := HistoricalManifest{Scenarios: map[string]HistoricalScenarioManifest{
+		scenarioID: {
+			ScenarioID: scenarioID, BusinessDate: "2025-01-01", Journey: "register_only",
+			TargetKey: "scale/3adyDE", EntryID: "entry-frozen",
+		},
+	}}
+
+	_, _, err := historicalParentScenariosByIndex(manifest, "2025-01-01", "scale/3adyDE", "3adyDE", 1)
+	if err == nil || !strings.Contains(err.Error(), "invalid profile index") {
+		t.Fatalf("expected invalid zero profile index, got %v", err)
 	}
 }
 
