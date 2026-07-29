@@ -1,11 +1,16 @@
 package dailysim
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/FangcunMount/component-base/pkg/log"
 	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
 )
 
@@ -77,6 +82,31 @@ func TestHistoricalIdentityNamespaceIsStableAndBatchSpecific(t *testing.T) {
 	}
 	if first.GuardianPhone == other.GuardianPhone || first.GuardianEmail == other.GuardianEmail {
 		t.Fatalf("historical batch namespace did not change identity: first=%+v other=%+v", first, other)
+	}
+}
+
+func TestFreezeHistoricalPlansRejectsIncompatibleTargetWithoutMutatingManifest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/plans/compatible":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": PlanResponse{ID: "compatible", ScaleCode: "3adyDE", Status: "active"}})
+		case "/api/v1/plans/incompatible":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": PlanResponse{ID: "incompatible", ScaleCode: "yGtSs1", Status: "active"}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	manifest := HistoricalManifest{Plans: make(map[string]HistoricalPlanManifest)}
+	client := NewAPIClient(server.URL, "token", log.New(log.NewOptions()))
+	err := freezeHistoricalPlans(context.Background(), client, []FlexibleID{"compatible", "incompatible"}, "3adyDE", &manifest)
+	if err == nil || !strings.Contains(err.Error(), "plan incompatible scale yGtSs1 does not match historical target 3adyDE") {
+		t.Fatalf("expected historical plan target conflict, got %v", err)
+	}
+	if len(manifest.Plans) != 0 {
+		t.Fatalf("failed plan preflight mutated manifest: %+v", manifest.Plans)
 	}
 }
 

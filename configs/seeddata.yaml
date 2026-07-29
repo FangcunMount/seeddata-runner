@@ -83,7 +83,6 @@ dailySimulation:
   isKeyFocus: false
   planIds:
     - "614333603412718126"
-    - "614187067651404334"
   journeyMix:
     registerOnlyWeight: 10  # ~10% 只注册账号；各档位之和不必等于 100，按相对权重分流
     createTesteeWeight: 15  # ~15% 走公开 intake 建档案后停，不写答卷

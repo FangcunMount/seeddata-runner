@@ -236,6 +236,42 @@ func TestHistoricalPlanCompletesEveryDeterministicallySelectedTaskBeforeCutoff(t
 	}
 }
 
+func TestHistoricalPlanRejectsIncompatibleTargetBeforeEnrollment(t *testing.T) {
+	enrollmentCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/plans/77":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": PlanResponse{ID: "77", ScaleCode: "yGtSs1"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/plans/enroll":
+			enrollmentCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": EnrollmentResponse{PlanID: "77", EnrollmentID: "88"}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "token", log.New(log.NewOptions()))
+	state := &dailySimulationJourneyState{
+		deps:   &dependencies{APIClient: client},
+		planID: "77",
+		testee: &TesteeResponse{ID: "42"},
+		target: &dailySimulationResolvedTarget{TargetCode: "3adyDE"},
+	}
+	ctx := historicalseed.WithContext(context.Background(), historicalseed.Context{
+		BatchID: "batch", ScenarioID: "scenario", OrgID: 1, Version: historicalseed.Version1,
+	})
+
+	_, err := dailySimulationStageEnrollPlan(ctx, state)
+	if err == nil || !strings.Contains(err.Error(), "scale yGtSs1 does not match scenario target 3adyDE") {
+		t.Fatalf("expected historical plan target conflict, got %v", err)
+	}
+	if enrollmentCalls != 0 {
+		t.Fatalf("incompatible historical plan called enrollment API %d times", enrollmentCalls)
+	}
+}
+
 func TestHistoricalPlanResumeUsesServerEnrollmentAndTaskFactsWithoutMutation(t *testing.T) {
 	location, _ := time.LoadLocation(historicalTimezone)
 	runDate := time.Date(2025, 1, 1, 0, 0, 0, 0, location)

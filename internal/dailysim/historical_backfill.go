@@ -315,12 +315,12 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 	ctx = withHistoricalCutoff(ctx, to.AddDate(0, 0, 1))
 	for day := start; !day.After(to); day = day.AddDate(0, 0, 1) {
 		dayKey := day.Format("2006-01-02")
-		cfg, frozenVersions, freezeErr := freezeHistoricalConfiguredTargets(ctx, deps, deps.Config.DailySimulation, &manifest)
+		cfg, frozenVersions, primaryTargetCode, freezeErr := freezeHistoricalConfiguredTargets(ctx, deps, deps.Config.DailySimulation, &manifest)
 		if freezeErr != nil {
 			return fmt.Errorf("historical target drift on %s: %w", dayKey, freezeErr)
 		}
 		dayCtx := withHistoricalFrozenTargetVersions(ctx, frozenVersions)
-		if err := freezeHistoricalPlans(dayCtx, deps.APIClient, deps.Config.DailySimulation.PlanIDs, &manifest); err != nil {
+		if err := freezeHistoricalPlans(dayCtx, deps.APIClient, deps.Config.DailySimulation.PlanIDs, primaryTargetCode, &manifest); err != nil {
 			return fmt.Errorf("historical plan drift on %s: %w", dayKey, err)
 		}
 		manifest.UpdatedAt = time.Now().UTC()
@@ -449,9 +449,9 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 	return nil
 }
 
-func freezeHistoricalConfiguredTargets(ctx context.Context, deps *Dependencies, cfg DailySimulationConfig, manifest *HistoricalManifest) (DailySimulationConfig, map[string]string, error) {
+func freezeHistoricalConfiguredTargets(ctx context.Context, deps *Dependencies, cfg DailySimulationConfig, manifest *HistoricalManifest) (DailySimulationConfig, map[string]string, string, error) {
 	if deps == nil || deps.APIClient == nil || deps.CollectionClient == nil || manifest == nil {
-		return cfg, nil, fmt.Errorf("historical target freeze dependencies are required")
+		return cfg, nil, "", fmt.Errorf("historical target freeze dependencies are required")
 	}
 	var (
 		target *dailySimulationResolvedTarget
@@ -460,20 +460,20 @@ func freezeHistoricalConfiguredTargets(ctx context.Context, deps *Dependencies, 
 	if !cfg.EntryID.IsZero() {
 		entry, getErr := deps.APIClient.GetAssessmentEntry(ctx, cfg.EntryID.String())
 		if getErr != nil {
-			return cfg, nil, fmt.Errorf("load configured assessment entry %s: %w", cfg.EntryID.String(), getErr)
+			return cfg, nil, "", fmt.Errorf("load configured assessment entry %s: %w", cfg.EntryID.String(), getErr)
 		}
 		if entry == nil {
-			return cfg, nil, fmt.Errorf("configured assessment entry %s not found", cfg.EntryID.String())
+			return cfg, nil, "", fmt.Errorf("configured assessment entry %s not found", cfg.EntryID.String())
 		}
 		target, err = resolveDailySimulationTarget(ctx, deps.APIClient, deps.CollectionClient, entry.TargetType, entry.TargetCode, entry.TargetVersion)
 	} else {
 		target, err = resolveDailySimulationTarget(ctx, deps.APIClient, deps.CollectionClient, cfg.TargetType, cfg.TargetCode, cfg.TargetVersion)
 	}
 	if err != nil {
-		return cfg, nil, err
+		return cfg, nil, "", err
 	}
 	if err := freezeHistoricalTarget(manifest, dailySimulationScenario{Target: target}); err != nil {
-		return cfg, nil, err
+		return cfg, nil, "", err
 	}
 	versions := map[string]string{target.TargetCode: target.TargetVersion}
 	if cfg.EntryID.IsZero() {
@@ -482,14 +482,14 @@ func freezeHistoricalConfiguredTargets(ctx context.Context, deps *Dependencies, 
 	for _, code := range collectDailySimulationAdditionalTargetCodes(cfg) {
 		additional, resolveErr := resolveDailySimulationTarget(ctx, deps.APIClient, deps.CollectionClient, target.TargetType, code, "")
 		if resolveErr != nil {
-			return cfg, nil, resolveErr
+			return cfg, nil, "", resolveErr
 		}
 		if err := freezeHistoricalTarget(manifest, dailySimulationScenario{Target: additional}); err != nil {
-			return cfg, nil, err
+			return cfg, nil, "", err
 		}
 		versions[additional.TargetCode] = additional.TargetVersion
 	}
-	return cfg, versions, nil
+	return cfg, versions, strings.TrimSpace(target.TargetCode), nil
 }
 
 func restoreHistoricalExistingTestee(stateDir, batchID string, profile dailySimulationProfile, scenarioID string, cfg DailySimulationConfig) (*ApiserverTesteeResponse, error) {
@@ -516,27 +516,58 @@ func restoreHistoricalExistingTestee(stateDir, batchID string, profile dailySimu
 	}, nil
 }
 
-func freezeHistoricalPlans(ctx context.Context, client *APIClient, configured []FlexibleID, manifest *HistoricalManifest) error {
+func freezeHistoricalPlans(ctx context.Context, client *APIClient, configured []FlexibleID, targetCode string, manifest *HistoricalManifest) error {
 	if client == nil || manifest == nil {
 		return fmt.Errorf("historical plan freeze dependencies are required")
 	}
-	for _, planID := range collectDailySimulationPlanIDs(configured) {
+	planIDs := collectDailySimulationPlanIDs(configured)
+	frozenPlans := make(map[string]HistoricalPlanManifest, len(planIDs))
+	for _, planID := range planIDs {
 		plan, err := client.GetPlan(ctx, planID)
 		if err != nil {
 			return fmt.Errorf("load plan %s: %w", planID, err)
+		}
+		if plan == nil {
+			return fmt.Errorf("load plan %s: empty response", planID)
+		}
+		if err := validateHistoricalPlanScale(planID, plan.ScaleCode, targetCode, "historical target"); err != nil {
+			return err
 		}
 		frozen := HistoricalPlanManifest{
 			ID: plan.ID, ScaleCode: plan.ScaleCode, ScheduleType: plan.ScheduleType, TriggerTime: plan.TriggerTime,
 			Interval: plan.Interval, TotalTimes: plan.TotalTimes, FixedDates: append([]string(nil), plan.FixedDates...),
 			RelativeWeeks: append([]int(nil), plan.RelativeWeeks...), Status: plan.Status,
 		}
+		frozenPlans[planID] = frozen
+	}
+	for _, planID := range planIDs {
+		frozen := frozenPlans[planID]
 		if existing, ok := manifest.Plans[planID]; ok {
 			if !reflect.DeepEqual(existing, frozen) {
 				return fmt.Errorf("plan %s changed: frozen=%+v current=%+v", planID, existing, frozen)
 			}
+		}
+	}
+	for _, planID := range planIDs {
+		if _, exists := manifest.Plans[planID]; exists {
 			continue
 		}
+		frozen := frozenPlans[planID]
 		manifest.Plans[planID] = frozen
+	}
+	return nil
+}
+
+func validateHistoricalPlanScale(planID, planScaleCode, targetCode, targetLabel string) error {
+	planID = strings.TrimSpace(planID)
+	planScaleCode = strings.TrimSpace(planScaleCode)
+	targetCode = strings.TrimSpace(targetCode)
+	targetLabel = strings.TrimSpace(targetLabel)
+	if targetCode == "" {
+		return fmt.Errorf("historical target code is required for plan %s", planID)
+	}
+	if !strings.EqualFold(planScaleCode, targetCode) {
+		return fmt.Errorf("historical plan %s scale %s does not match %s %s", planID, planScaleCode, targetLabel, targetCode)
 	}
 	return nil
 }

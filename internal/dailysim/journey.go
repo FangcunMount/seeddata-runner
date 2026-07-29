@@ -473,6 +473,7 @@ func dailySimulationStageEnrollPlan(ctx context.Context, state *dailySimulationJ
 		return toolchain.Decision{}, fmt.Errorf("testee is not initialized before plan enrollment")
 	}
 	var enrollment *EnrollmentResponse
+	var historicalPlan *PlanResponse
 	if historical, ok := historicalseed.FromContext(ctx); ok {
 		record, completed, err := completedHistoricalServerStage(ctx, historical.ScenarioID, string(dailySimulationJourneyStagePlanEnrollment))
 		if err != nil {
@@ -483,6 +484,16 @@ func dailySimulationStageEnrollPlan(ctx context.Context, state *dailySimulationJ
 			if err != nil {
 				return toolchain.Decision{}, err
 			}
+		}
+		historicalPlan, err = state.deps.APIClient.GetPlan(ctx, state.planID)
+		if err != nil {
+			return toolchain.Decision{}, fmt.Errorf("load historical plan %s: %w", state.planID, err)
+		}
+		if historicalPlan == nil {
+			return toolchain.Decision{}, fmt.Errorf("load historical plan %s: empty response", state.planID)
+		}
+		if err := validateHistoricalPlanScale(state.planID, historicalPlan.ScaleCode, state.target.TargetCode, "scenario target"); err != nil {
+			return toolchain.Decision{}, err
 		}
 	}
 	if enrollment == nil {
@@ -506,13 +517,6 @@ func dailySimulationStageEnrollPlan(ctx context.Context, state *dailySimulationJ
 		}
 	}
 	if historical, ok := historicalseed.FromContext(ctx); ok && enrollment != nil {
-		planSnapshot, err := state.deps.APIClient.GetPlan(ctx, state.planID)
-		if err != nil {
-			return toolchain.Decision{}, fmt.Errorf("load historical plan %s: %w", state.planID, err)
-		}
-		if !strings.EqualFold(strings.TrimSpace(planSnapshot.ScaleCode), strings.TrimSpace(state.target.TargetCode)) {
-			return toolchain.Decision{}, fmt.Errorf("historical plan %s scale %s does not match scenario target %s", state.planID, planSnapshot.ScaleCode, state.target.TargetCode)
-		}
 		for _, task := range enrollment.Tasks {
 			taskID := strings.TrimSpace(task.ID)
 			if taskID == "" {
