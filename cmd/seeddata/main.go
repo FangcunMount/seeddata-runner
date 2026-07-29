@@ -23,6 +23,7 @@ type cliOptions struct {
 	batchID    string
 	resume     bool
 	stateDir   string
+	expectedDB string
 }
 
 func main() {
@@ -39,6 +40,22 @@ func main() {
 			os.Exit(1)
 		}
 		writeCLIJSON(manifest)
+		return
+	}
+	if opts.command == "historical-testee-time-repair-sql" {
+		manifest, err := dailysim.LoadHistoricalManifest(opts.stateDir, opts.batchID)
+		if err != nil {
+			logger.Errorw("Load historical manifest failed", "error", err.Error())
+			os.Exit(1)
+		}
+		if manifest.BatchID != opts.batchID {
+			logger.Errorw("Historical manifest batch identity mismatch", "expected", opts.batchID, "actual", manifest.BatchID)
+			os.Exit(1)
+		}
+		if err := dailysim.WriteHistoricalTesteeCreatedAtRepairSQL(os.Stdout, manifest, opts.expectedDB); err != nil {
+			logger.Errorw("Generate historical Testee time repair SQL failed", "error", err.Error())
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -87,7 +104,7 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 	opts := cliOptions{command: "daemon", stateDir: ".seeddata-cache/historical"}
 	if len(args) > 0 {
 		switch args[0] {
-		case "historical-backfill", "historical-verify", "historical-manifest":
+		case "historical-backfill", "historical-verify", "historical-manifest", "historical-testee-time-repair-sql":
 			opts.command = args[0]
 			args = args[1:]
 		}
@@ -101,8 +118,11 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 		fs.StringVar(&opts.to, "to", "", "last historical business date (YYYY-MM-DD)")
 		fs.StringVar(&opts.batchID, "batch-id", "", "stable historical batch identity")
 		fs.BoolVar(&opts.resume, "resume", false, "resume from the first incomplete day")
-	} else if opts.command == "historical-verify" || opts.command == "historical-manifest" {
+	} else if opts.command == "historical-verify" || opts.command == "historical-manifest" || opts.command == "historical-testee-time-repair-sql" {
 		fs.StringVar(&opts.batchID, "batch-id", "", "historical batch identity")
+		if opts.command == "historical-testee-time-repair-sql" {
+			fs.StringVar(&opts.expectedDB, "expected-database", "", "exact QS MySQL database name")
+		}
 	}
 	if err := fs.Parse(args); err != nil {
 		return cliOptions{}, err
@@ -110,8 +130,11 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 	if opts.command == "historical-backfill" && (opts.from == "" || opts.to == "" || opts.batchID == "") {
 		return cliOptions{}, fmt.Errorf("historical-backfill requires --from, --to and --batch-id")
 	}
-	if (opts.command == "historical-verify" || opts.command == "historical-manifest") && opts.batchID == "" {
+	if (opts.command == "historical-verify" || opts.command == "historical-manifest" || opts.command == "historical-testee-time-repair-sql") && opts.batchID == "" {
 		return cliOptions{}, fmt.Errorf("%s requires --batch-id", opts.command)
+	}
+	if opts.command == "historical-testee-time-repair-sql" && opts.expectedDB == "" {
+		return cliOptions{}, fmt.Errorf("historical-testee-time-repair-sql requires --expected-database")
 	}
 	return opts, nil
 }

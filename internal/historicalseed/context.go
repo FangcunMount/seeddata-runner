@@ -20,6 +20,7 @@ const (
 )
 
 type Timeline struct {
+	TesteeCreatedAt       *time.Time `json:"testee_created_at,omitempty"`
 	EntryResolvedAt       *time.Time `json:"entry_resolved_at,omitempty"`
 	EntryIntakeAt         *time.Time `json:"entry_intake_at,omitempty"`
 	EnrollmentJoinedAt    *time.Time `json:"enrollment_joined_at,omitempty"`

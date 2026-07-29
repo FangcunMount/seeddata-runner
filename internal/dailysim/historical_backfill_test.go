@@ -42,12 +42,15 @@ func TestHistoricalCountAndTimelineAreDeterministicAndBounded(t *testing.T) {
 		t.Fatal("timeline is not deterministic")
 	}
 	for name, at := range map[string]*time.Time{
-		"resolve": one.EntryResolvedAt, "intake": one.EntryIntakeAt, "enroll": one.EnrollmentJoinedAt,
+		"testee": one.TesteeCreatedAt, "resolve": one.EntryResolvedAt, "intake": one.EntryIntakeAt, "enroll": one.EnrollmentJoinedAt,
 		"filled": one.AnswerSheetFilledAt, "assessment": one.AssessmentCreatedAt, "outcome": one.EvaluatedAt, "report": one.ReportGeneratedAt,
 	} {
 		if at == nil || at.In(location).Format("2006-01-02") != "2025-01-01" {
 			t.Fatalf("%s escaped business day: %v", name, at)
 		}
+	}
+	if !one.TesteeCreatedAt.Before(*one.EntryResolvedAt) {
+		t.Fatalf("testee_created_at=%s must be before entry_resolved_at=%s", one.TesteeCreatedAt, one.EntryResolvedAt)
 	}
 }
 

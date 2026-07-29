@@ -47,6 +47,33 @@ tmp/bin/seeddata historical-backfill \
 
 不得更换 batch ID 或幂等键来绕过 payload conflict。出现 target/Plan 版本漂移时，恢复原冻结版本或新建经审批的批次，不能继续原批次。
 
+## 修复旧 runner 已创建的 Testee 报到时间
+
+如果批次曾由不携带 `testee_created_at` 的旧 runner 启动，先保持 runner 停止，并用原
+manifest 生成精确 ID 范围的修复 SQL。该命令只读取本地状态并输出 SQL，不连接数据库：
+
+```bash
+umask 077
+tmp/bin/seeddata historical-testee-time-repair-sql \
+  --state-dir /secure/path/seeddata-historical-state \
+  --batch-id hist-20250101-20260727-v1 \
+  --expected-database "$QS_DB_NAME" \
+  > /secure/path/hist-20250101-20260727-v1.testee-time-repair.sql
+```
+
+检查 SQL 中的数据库、Org、Testee 数量和时间范围，然后显式确认并执行：
+
+```bash
+mysql --defaults-extra-file="$QS_MYSQL_CNF" \
+  --init-command="SET @qs_testee_time_repair_confirm='REPAIR_HISTORICAL_TESTEE_CREATED_AT'" \
+  "$QS_DB_NAME" \
+  < /secure/path/hist-20250101-20260727-v1.testee-time-repair.sql
+```
+
+SQL 只更新 manifest 明确归属本批次的 Testee ID，数据库、Org 或行数不匹配时会在事务前拒绝。
+修复命令可幂等重跑，并显式保留原 `updated_at`。确认报到日期分布正确后，才使用同一批次执行
+`historical-backfill --resume`。
+
 ## 只读检查
 
 ```bash

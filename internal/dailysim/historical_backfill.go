@@ -595,7 +595,7 @@ func BuildHistoricalTimeline(batchID string, day time.Time, index int) historica
 	evaluated := filled.Add(5 * time.Second)
 	reported := filled.Add(8 * time.Second)
 	return historicalseed.Timeline{
-		EntryResolvedAt: &resolved, EntryIntakeAt: &intake, EnrollmentJoinedAt: &enrolled,
+		TesteeCreatedAt: &base, EntryResolvedAt: &resolved, EntryIntakeAt: &intake, EnrollmentJoinedAt: &enrolled,
 		AnswerSheetFilledAt: &filled,
 		AssessmentCreatedAt: &assessmentCreated, AssessmentSubmittedAt: &assessmentSubmitted,
 		EvaluatedAt: &evaluated, ReportGeneratedAt: &reported,

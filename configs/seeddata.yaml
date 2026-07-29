@@ -40,7 +40,7 @@ dailySimulation:
   countMin: 40        # 每日模拟最小用户数
   countMax: 200       # 每日模拟最大用户数
   dailyMaxUsers: 300  # 每日模拟用户数上限，超过后当天不再执行模拟；建议设置为 countMax 的整数倍以保证模拟效果，同时也要考虑 IAM 承受能力
-  workers: 5          # 模拟并发数，建议不超过 10，以免 IAM 压力过大
+  workers: 10          # 模拟并发数，建议不超过 10，以免 IAM 压力过大
   runAt: "10:00"      # 兼容单次调度；设置 windowStartAt/windowEndAt/interval 后按窗口模式执行
   windowStartAt: "10:00"  # 模拟时间窗口开始时间，格式 "HH:mm"
   windowEndAt: "23:00"    # 模拟时间窗口结束时间，格式 "HH:mm"

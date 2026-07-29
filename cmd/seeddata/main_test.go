@@ -47,6 +47,18 @@ func TestParseHistoricalReadOnlyCommandsRequireBatch(t *testing.T) {
 	}
 }
 
+func TestParseHistoricalTesteeTimeRepairSQL(t *testing.T) {
+	opts, err := parseCLIOptions([]string{
+		"historical-testee-time-repair-sql", "--state-dir", "/secure/state", "--batch-id", "batch", "--expected-database", "qs",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.command != "historical-testee-time-repair-sql" || opts.batchID != "batch" || opts.expectedDB != "qs" {
+		t.Fatalf("options=%+v", opts)
+	}
+}
+
 func TestParseCLIOptionsOverrides(t *testing.T) {
 	opts, err := parseCLIOptions([]string{"--config", "/tmp/seeddata.yaml", "--verbose"})
 	if err != nil {
