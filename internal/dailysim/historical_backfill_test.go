@@ -88,6 +88,89 @@ func TestHistoricalIdentityNamespaceIsStableAndBatchSpecific(t *testing.T) {
 	}
 }
 
+func TestResolveHistoricalRecoveryScenariosUsesFrozenEntry(t *testing.T) {
+	location, _ := time.LoadLocation(historicalTimezone)
+	day := time.Date(2025, 1, 1, 0, 0, 0, 0, location)
+	target := HistoricalTargetManifest{
+		TargetType: "scale", TargetCode: "3adyDE", TargetVersion: "v1",
+		QuestionnaireCode: "Q", QuestionnaireVersion: "q1", RequiresAssessment: true,
+	}
+	scenarioID := "2025-01-01/0/submit_answer/3adyDE"
+	manifest := HistoricalManifest{
+		OrgID: 1,
+		Targets: map[string]HistoricalTargetManifest{
+			"scale/3adyDE": target,
+		},
+		Scenarios: map[string]HistoricalScenarioManifest{
+			scenarioID: {
+				ScenarioID: scenarioID, BusinessDate: "2025-01-01", Journey: "submit_answer",
+				TargetKey: "scale/3adyDE", EntryID: "entry-frozen", PlanID: "plan-frozen",
+			},
+		},
+	}
+	cfg := DailySimulationConfig{
+		PlanIDs:    []FlexibleID{"plan-frozen"},
+		JourneyMix: DailySimulationJourneyMixConfig{SubmitAnswerWeight: 100},
+	}
+	loader := historicalScenarioRecoveryLoader{
+		getEntry: func(_ context.Context, entryID string) (*AssessmentEntryResponse, error) {
+			if entryID != "entry-frozen" {
+				t.Fatalf("loaded entry %q, want frozen entry", entryID)
+			}
+			return &AssessmentEntryResponse{
+				ID: "entry-frozen", OrgID: "1", ClinicianID: "clinician-frozen",
+				TargetType: "scale", TargetCode: "3adyDE", TargetVersion: "v1", IsActive: true,
+			}, nil
+		},
+		resolveTarget: func(_ context.Context, frozen HistoricalTargetManifest) (*dailySimulationResolvedTarget, error) {
+			if frozen != target {
+				t.Fatalf("resolved target %+v, want %+v", frozen, target)
+			}
+			return &dailySimulationResolvedTarget{
+				TargetType: "scale", TargetCode: "3adyDE", TargetVersion: "v1",
+				QuestionnaireCode: "Q", QuestionnaireVersion: "q1", RequiresAssessment: true,
+			}, nil
+		},
+	}
+
+	scenarios, err := resolveHistoricalRecoveryScenarios(context.Background(), loader, cfg, manifest, day, 1, "3adyDE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario, ok := scenarios[0]
+	if !ok || scenario.Entry == nil || scenario.Entry.ID != "entry-frozen" || scenario.ClinicianID != "clinician-frozen" {
+		t.Fatalf("recovered scenario did not use frozen entry: %+v", scenario)
+	}
+}
+
+func TestSelectDailySimulationBatchScenarioUsesFrozenIndex(t *testing.T) {
+	dynamic := dailySimulationScenario{Entry: &AssessmentEntryResponse{ID: "entry-current"}}
+	frozen := dailySimulationScenario{Entry: &AssessmentEntryResponse{ID: "entry-frozen"}}
+
+	selected := selectDailySimulationBatchScenario(
+		[]dailySimulationScenario{dynamic},
+		map[int]dailySimulationScenario{27: frozen},
+		27,
+	)
+	if selected.Entry == nil || selected.Entry.ID != "entry-frozen" {
+		t.Fatalf("selected scenario did not preserve frozen index: %+v", selected)
+	}
+}
+
+func TestValidateHistoricalParentScenarioIdentityReportsDriftedFields(t *testing.T) {
+	stored := HistoricalScenarioManifest{
+		ScenarioID: "2025-01-01/27/resolve_entry/3adyDE", BusinessDate: "2025-01-01",
+		Journey: "resolve_entry", TargetKey: "scale/3adyDE", EntryID: "entry-frozen", PlanID: "plan-1",
+	}
+	resolved := stored
+	resolved.EntryID = "entry-current"
+
+	err := validateHistoricalParentScenarioIdentity(stored, resolved)
+	if err == nil || !strings.Contains(err.Error(), `entry_id stored="entry-frozen" resolved="entry-current"`) {
+		t.Fatalf("expected entry identity detail, got %v", err)
+	}
+}
+
 func TestFreezeHistoricalPlansRejectsIncompatibleTargetWithoutMutatingManifest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

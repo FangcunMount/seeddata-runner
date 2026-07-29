@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,6 +70,13 @@ type HistoricalDaySnapshot struct {
 	BusinessDate string
 	Expected     map[string]HistoricalScenarioManifest
 	Scenarios    map[string]HistoricalScenarioSnapshot
+
+	scenariosByIndex map[int]dailySimulationScenario
+}
+
+type historicalScenarioRecoveryLoader struct {
+	getEntry      func(context.Context, string) (*AssessmentEntryResponse, error)
+	resolveTarget func(context.Context, HistoricalTargetManifest) (*dailySimulationResolvedTarget, error)
 }
 
 func withHistoricalDaySnapshot(ctx context.Context, snapshot *HistoricalDaySnapshot) context.Context {
@@ -355,7 +363,7 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 		if err := store.putDayState(dayKey, "running"); err != nil {
 			return err
 		}
-		daySnapshot, snapshotErr := buildHistoricalDaySnapshot(dayCtx, deps, cfg, &manifest, day, count, opts.StateDir, store, opts.StageReadWorkers, recoveringDay)
+		daySnapshot, snapshotErr := buildHistoricalDaySnapshot(dayCtx, deps, cfg, &manifest, day, count, primaryTargetCode, opts.StateDir, store, opts.StageReadWorkers, recoveringDay)
 		if snapshotErr != nil {
 			return fmt.Errorf("historical snapshot stopped on %s: %w", dayKey, snapshotErr)
 		}
@@ -371,6 +379,7 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 		err := runDailySimulationBatchWithOptions(dayCtx, deps, cfg, day, count, "historical_backfill_"+dayKey, dailySimulationBatchOptions{
 			HistoricalBatchID: opts.BatchID,
 			IAMWorkers:        opts.IAMWorkers,
+			ScenariosByIndex:  daySnapshot.scenariosByIndex,
 			ShouldSkipScenario: func(profile dailySimulationProfile, scenario dailySimulationScenario) bool {
 				historical := buildHistoricalScenarioContext(opts.BatchID, uint64(deps.Config.Global.OrgID), cfg, profile, scenario)
 				manifestMu.Lock()
@@ -834,6 +843,180 @@ func loadHistoricalSeedStages(ctx context.Context, client *APIClient, batchID st
 	}
 }
 
+func resolveHistoricalRecoveryScenarios(
+	ctx context.Context,
+	loader historicalScenarioRecoveryLoader,
+	cfg DailySimulationConfig,
+	manifest HistoricalManifest,
+	day time.Time,
+	expectedCount int,
+	primaryTargetCode string,
+) (map[int]dailySimulationScenario, error) {
+	if loader.getEntry == nil || loader.resolveTarget == nil {
+		return nil, fmt.Errorf("historical recovery scenario loader is required")
+	}
+	if expectedCount <= 0 {
+		return nil, fmt.Errorf("historical recovery scenario count must be positive")
+	}
+
+	frozenTarget, targetKey, err := historicalPrimaryTarget(manifest.Targets, primaryTargetCode)
+	if err != nil {
+		return nil, err
+	}
+	businessDate := day.Format("2006-01-02")
+	orgID := strconv.FormatInt(manifest.OrgID, 10)
+	scenarios := make(map[int]dailySimulationScenario, expectedCount)
+	entries := make(map[string]*AssessmentEntryResponse)
+	targets := make(map[string]*dailySimulationResolvedTarget)
+
+	for index := 0; index < expectedCount; index++ {
+		journey := resolveDailySimulationJourneyTarget(cfg, day, index)
+		scenarioID := fmt.Sprintf("%s/%d/%s/%s", businessDate, index, journey, frozenTarget.TargetCode)
+		stored, exists := manifest.Scenarios[scenarioID]
+		if !exists || strings.TrimSpace(stored.ScenarioID) == "" {
+			return nil, fmt.Errorf("historical recovery scenario %s is missing from frozen manifest", scenarioID)
+		}
+		planID := selectDailySimulationPlanID(cfg, day, index)
+		resolvedIdentity := HistoricalScenarioManifest{
+			ScenarioID: scenarioID, BusinessDate: businessDate, Journey: string(journey), TargetKey: targetKey,
+			EntryID: strings.TrimSpace(stored.EntryID), PlanID: planID,
+		}
+		storedIdentity := stored
+		if strings.TrimSpace(storedIdentity.PlanID) == "" {
+			storedIdentity.PlanID = planID
+		}
+		if err := validateHistoricalParentScenarioIdentity(storedIdentity, resolvedIdentity); err != nil {
+			return nil, err
+		}
+		entryID := strings.TrimSpace(stored.EntryID)
+		if entryID == "" {
+			return nil, fmt.Errorf("historical recovery scenario %s has empty frozen entry_id", scenarioID)
+		}
+
+		entry := entries[entryID]
+		if entry == nil {
+			entry, err = loader.getEntry(ctx, entryID)
+			if err != nil {
+				return nil, fmt.Errorf("load frozen historical entry %s for %s: %w", entryID, scenarioID, err)
+			}
+			if entry == nil {
+				return nil, fmt.Errorf("frozen historical entry %s for %s was not found", entryID, scenarioID)
+			}
+			if strings.TrimSpace(entry.ID) != entryID {
+				return nil, fmt.Errorf("frozen historical entry identity conflict for %s: requested=%q loaded=%q", scenarioID, entryID, strings.TrimSpace(entry.ID))
+			}
+			if !entry.IsActive {
+				return nil, fmt.Errorf("frozen historical entry %s for %s is inactive", entryID, scenarioID)
+			}
+			if strings.TrimSpace(entry.OrgID) != orgID {
+				return nil, fmt.Errorf("frozen historical entry %s org conflict for %s: stored=%q current=%q", entryID, scenarioID, orgID, strings.TrimSpace(entry.OrgID))
+			}
+			if strings.TrimSpace(entry.ClinicianID) == "" {
+				return nil, fmt.Errorf("frozen historical entry %s for %s has empty clinician_id", entryID, scenarioID)
+			}
+			entryTargetKey := strings.Join([]string{strings.ToLower(strings.TrimSpace(entry.TargetType)), strings.TrimSpace(entry.TargetCode)}, "/")
+			if entryTargetKey != targetKey || strings.TrimSpace(entry.TargetVersion) != strings.TrimSpace(frozenTarget.TargetVersion) {
+				return nil, fmt.Errorf(
+					"frozen historical entry %s target conflict for %s: frozen=%s@%s current=%s@%s",
+					entryID,
+					scenarioID,
+					targetKey,
+					strings.TrimSpace(frozenTarget.TargetVersion),
+					entryTargetKey,
+					strings.TrimSpace(entry.TargetVersion),
+				)
+			}
+			entries[entryID] = entry
+		}
+
+		target := targets[targetKey]
+		if target == nil {
+			target, err = loader.resolveTarget(ctx, frozenTarget)
+			if err != nil {
+				return nil, fmt.Errorf("resolve frozen historical target %s for %s: %w", targetKey, scenarioID, err)
+			}
+			if err := validateResolvedHistoricalTarget(frozenTarget, target); err != nil {
+				return nil, fmt.Errorf("resolve frozen historical target %s for %s: %w", targetKey, scenarioID, err)
+			}
+			targets[targetKey] = target
+		}
+		scenarios[index] = dailySimulationScenario{
+			ClinicianID: strings.TrimSpace(entry.ClinicianID),
+			Entry:       entry,
+			Target:      target,
+		}
+	}
+	return scenarios, nil
+}
+
+func historicalPrimaryTarget(targets map[string]HistoricalTargetManifest, targetCode string) (HistoricalTargetManifest, string, error) {
+	targetCode = strings.TrimSpace(targetCode)
+	if targetCode == "" {
+		return HistoricalTargetManifest{}, "", fmt.Errorf("historical primary target code is required")
+	}
+	var (
+		matched    HistoricalTargetManifest
+		matchedKey string
+	)
+	for key, target := range targets {
+		if strings.TrimSpace(target.TargetCode) != targetCode {
+			continue
+		}
+		if matchedKey != "" {
+			return HistoricalTargetManifest{}, "", fmt.Errorf("historical primary target %s is ambiguous between %s and %s", targetCode, matchedKey, key)
+		}
+		matched = target
+		matchedKey = strings.ToLower(strings.TrimSpace(target.TargetType)) + "/" + strings.TrimSpace(target.TargetCode)
+	}
+	if matchedKey == "" {
+		return HistoricalTargetManifest{}, "", fmt.Errorf("historical primary target %s is missing from frozen manifest", targetCode)
+	}
+	return matched, matchedKey, nil
+}
+
+func validateResolvedHistoricalTarget(frozen HistoricalTargetManifest, resolved *dailySimulationResolvedTarget) error {
+	if resolved == nil {
+		return fmt.Errorf("resolved target is empty")
+	}
+	current := HistoricalTargetManifest{
+		TargetType: strings.ToLower(strings.TrimSpace(resolved.TargetType)), TargetCode: strings.TrimSpace(resolved.TargetCode), TargetVersion: strings.TrimSpace(resolved.TargetVersion),
+		QuestionnaireCode: strings.TrimSpace(resolved.QuestionnaireCode), QuestionnaireVersion: strings.TrimSpace(resolved.QuestionnaireVersion),
+		RequiresAssessment: resolved.RequiresAssessment,
+	}
+	frozen.TargetType = strings.ToLower(strings.TrimSpace(frozen.TargetType))
+	frozen.TargetCode = strings.TrimSpace(frozen.TargetCode)
+	frozen.TargetVersion = strings.TrimSpace(frozen.TargetVersion)
+	frozen.QuestionnaireCode = strings.TrimSpace(frozen.QuestionnaireCode)
+	frozen.QuestionnaireVersion = strings.TrimSpace(frozen.QuestionnaireVersion)
+	if current != frozen {
+		return fmt.Errorf("historical target version drift: frozen=%+v current=%+v", frozen, current)
+	}
+	return nil
+}
+
+func validateHistoricalParentScenarioIdentity(stored, resolved HistoricalScenarioManifest) error {
+	conflicts := make([]string, 0, 6)
+	appendConflict := func(field, storedValue, resolvedValue string) {
+		if storedValue != resolvedValue {
+			conflicts = append(conflicts, fmt.Sprintf("%s stored=%q resolved=%q", field, storedValue, resolvedValue))
+		}
+	}
+	appendConflict("scenario_id", stored.ScenarioID, resolved.ScenarioID)
+	appendConflict("business_date", stored.BusinessDate, resolved.BusinessDate)
+	appendConflict("journey", stored.Journey, resolved.Journey)
+	appendConflict("target_key", stored.TargetKey, resolved.TargetKey)
+	appendConflict("entry_id", stored.EntryID, resolved.EntryID)
+	appendConflict("plan_id", stored.PlanID, resolved.PlanID)
+	if len(conflicts) == 0 {
+		return nil
+	}
+	scenarioID := strings.TrimSpace(resolved.ScenarioID)
+	if scenarioID == "" {
+		scenarioID = strings.TrimSpace(stored.ScenarioID)
+	}
+	return fmt.Errorf("historical parent scenario identity conflict for %s: %s", scenarioID, strings.Join(conflicts, "; "))
+}
+
 func buildHistoricalDaySnapshot(
 	ctx context.Context,
 	deps *Dependencies,
@@ -841,6 +1024,7 @@ func buildHistoricalDaySnapshot(
 	manifest *HistoricalManifest,
 	day time.Time,
 	expectedCount int,
+	primaryTargetCode string,
 	stateDir string,
 	store *historicalStateStore,
 	stageReadWorkers int,
@@ -849,12 +1033,39 @@ func buildHistoricalDaySnapshot(
 	if deps == nil || deps.APIClient == nil || manifest == nil {
 		return nil, fmt.Errorf("historical day snapshot dependencies are required")
 	}
-	scenarios, err := resolveDailySimulationScenariosForRun(ctx, deps, cfg, day)
+	var (
+		scenariosByIndex map[int]dailySimulationScenario
+		err              error
+	)
+	if probeServer {
+		scenariosByIndex, err = resolveHistoricalRecoveryScenarios(ctx, historicalScenarioRecoveryLoader{
+			getEntry: deps.APIClient.GetAssessmentEntry,
+			resolveTarget: func(ctx context.Context, frozen HistoricalTargetManifest) (*dailySimulationResolvedTarget, error) {
+				return resolveDailySimulationTarget(
+					ctx,
+					deps.APIClient,
+					deps.CollectionClient,
+					frozen.TargetType,
+					frozen.TargetCode,
+					frozen.TargetVersion,
+				)
+			},
+		}, cfg, *manifest, day, expectedCount, primaryTargetCode)
+	} else {
+		var scenarios []dailySimulationScenario
+		scenarios, err = resolveDailySimulationScenariosForRun(ctx, deps, cfg, day)
+		if err == nil && len(scenarios) == 0 {
+			err = fmt.Errorf("historical day snapshot resolved zero scenarios")
+		}
+		if err == nil {
+			scenariosByIndex = make(map[int]dailySimulationScenario, expectedCount)
+			for index := 0; index < expectedCount; index++ {
+				scenariosByIndex[index] = scenarios[index%len(scenarios)]
+			}
+		}
+	}
 	if err != nil {
 		return nil, err
-	}
-	if len(scenarios) == 0 {
-		return nil, fmt.Errorf("historical day snapshot resolved zero scenarios")
 	}
 	additionalTargets, err := resolveDailySimulationAdditionalTargetsForRun(ctx, deps, cfg)
 	if err != nil {
@@ -862,11 +1073,11 @@ func buildHistoricalDaySnapshot(
 	}
 	snapshot := &HistoricalDaySnapshot{
 		BusinessDate: day.Format("2006-01-02"), Expected: make(map[string]HistoricalScenarioManifest, expectedCount),
-		Scenarios: make(map[string]HistoricalScenarioSnapshot),
+		Scenarios: make(map[string]HistoricalScenarioSnapshot), scenariosByIndex: scenariosByIndex,
 	}
 	for index := 0; index < expectedCount; index++ {
 		profile := namespaceHistoricalProfile(manifest.BatchID, buildDailySimulationProfile(cfg, day, index))
-		scenario := scenarios[index%len(scenarios)]
+		scenario := scenariosByIndex[index]
 		historical := buildHistoricalScenarioContext(manifest.BatchID, uint64(manifest.OrgID), cfg, profile, scenario)
 		journey := resolveDailySimulationJourneyTarget(cfg, day, index)
 		targetKey := strings.Join([]string{scenario.Target.TargetType, scenario.Target.TargetCode}, "/")
@@ -881,8 +1092,12 @@ func buildHistoricalDaySnapshot(
 		if record.PlanID == "" {
 			record.PlanID = planID
 		}
-		if record.BusinessDate != snapshot.BusinessDate || record.Journey != string(journey) || record.TargetKey != targetKey || record.EntryID != scenario.Entry.ID || record.PlanID != planID {
-			return nil, fmt.Errorf("historical parent scenario identity conflict for %s", historical.ScenarioID)
+		resolved := HistoricalScenarioManifest{
+			ScenarioID: historical.ScenarioID, BusinessDate: snapshot.BusinessDate, Journey: string(journey),
+			TargetKey: targetKey, EntryID: scenario.Entry.ID, PlanID: planID,
+		}
+		if err := validateHistoricalParentScenarioIdentity(record, resolved); err != nil {
+			return nil, err
 		}
 		if journey == dailySimulationJourneySubmitAnswer {
 			for _, target := range selectDailySimulationAdditionalTargetsForTestee(additionalTargets, cfg, day, index) {

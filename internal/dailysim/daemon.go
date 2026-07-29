@@ -47,6 +47,7 @@ type dailySimulationBatchOptions struct {
 	ReuseOnly                 bool
 	ExistingTesteesByIndex    map[int]*ApiserverTesteeResponse
 	JobIndexes                []int
+	ScenariosByIndex          map[int]dailySimulationScenario
 	HistoricalBatchID         string
 	IAMWorkers                int
 	ValidateScenario          func(dailySimulationScenario) error
@@ -55,6 +56,17 @@ type dailySimulationBatchOptions struct {
 	OnScenarioComplete        func(dailySimulationProfile, dailySimulationScenario, dailySimulationOutcome) error
 	OnHistoricalStageComplete func(dailySimulationProfile, dailySimulationScenario, historicalseed.Context, dailySimulationJourneyStage, dailySimulationOutcome, *dailySimulationResolvedTarget) error
 	OnHistoricalPlanTaskFound func(dailySimulationProfile, dailySimulationScenario, historicalseed.Context, HistoricalPlanTaskRecovery) error
+}
+
+func selectDailySimulationBatchScenario(
+	scenarios []dailySimulationScenario,
+	scenariosByIndex map[int]dailySimulationScenario,
+	index int,
+) dailySimulationScenario {
+	if scenariosByIndex != nil {
+		return scenariosByIndex[index]
+	}
+	return scenarios[index%len(scenarios)]
 }
 
 /**
@@ -303,12 +315,39 @@ func runDailySimulationBatchWithOptions(
 		}
 	}()
 
-	// 解析每日模拟用户场景
-	scenarios, err := resolveDailySimulationScenariosForRun(ctx, deps, cfg, runDate)
-	if err != nil {
-		return err
+	// 解析每日模拟用户场景。历史恢复必须沿用 manifest 冻结到每个 index 的 Entry，
+	// 普通批次仍按当前配置动态解析。
+	var scenarios []dailySimulationScenario
+	if options.ScenariosByIndex != nil {
+		seen := make(map[string]struct{}, count)
+		for idx := 0; idx < count; idx++ {
+			scenario, ok := options.ScenariosByIndex[idx]
+			if !ok {
+				return fmt.Errorf("%s missing frozen scenario for index %d", progressLabel, idx)
+			}
+			if scenario.Entry == nil || scenario.Target == nil || strings.TrimSpace(scenario.ClinicianID) == "" {
+				return fmt.Errorf("%s has invalid frozen scenario for index %d", progressLabel, idx)
+			}
+			key := strings.Join([]string{
+				strings.TrimSpace(scenario.ClinicianID),
+				strings.TrimSpace(scenario.Entry.ID),
+				strings.ToLower(strings.TrimSpace(scenario.Target.TargetType)),
+				strings.TrimSpace(scenario.Target.TargetCode),
+				strings.TrimSpace(scenario.Target.TargetVersion),
+			}, "\x00")
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			scenarios = append(scenarios, scenario)
+		}
+	} else {
+		var resolveErr error
+		scenarios, resolveErr = resolveDailySimulationScenariosForRun(ctx, deps, cfg, runDate)
+		if resolveErr != nil {
+			return resolveErr
+		}
 	}
-	// 如果解析的场景为空，则返回错误
 	if len(scenarios) == 0 {
 		return fmt.Errorf("%s resolved zero scenarios", progressLabel)
 	}
@@ -402,7 +441,7 @@ func runDailySimulationBatchWithOptions(
 					profile = namespaceHistoricalProfile(options.HistoricalBatchID, profile)
 				}
 				existingTestee := existingTesteesByIndex[profile.Index]
-				scenario := scenarios[idx%len(scenarios)]
+				scenario := selectDailySimulationBatchScenario(scenarios, options.ScenariosByIndex, idx)
 				if existingTestee == nil && options.RestoreExistingTestee != nil {
 					restoredTestee, restoreErr := options.RestoreExistingTestee(profile, scenario)
 					if restoreErr != nil {
