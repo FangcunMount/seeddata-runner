@@ -539,6 +539,57 @@ func TestEnsureDailySimulationGuardianMockConsumerLoginOmitsTenantID(t *testing.
 	}
 }
 
+func TestDailySimulationGuardianStagePropagatesMockConsumerError(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":100201,"message":"seed mock secret invalid"}`))
+	}))
+	defer server.Close()
+
+	state := &dailySimulationJourneyState{
+		deps: &dependencies{
+			Logger: log.New(log.NewOptions()),
+			Config: &seedconfig.Config{
+				Global: seedconfig.GlobalConfig{OrgID: 1},
+				IAM: seedconfig.IAMConfig{
+					BaseURL:  server.URL,
+					LoginURL: server.URL + "/api/v2/authn/login",
+					MockConsumer: seedconfig.IAMMockConsumerConfig{
+						Enabled:      true,
+						SharedSecret: "wrong-secret",
+						EndpointPath: "/api/v2/internal/authn/mock-consumers/ensure",
+					},
+				},
+			},
+		},
+		cfg: DailySimulationConfig{UserPassword: "DailySim@123"},
+		profile: dailySimulationProfile{
+			GuardianName:  "Guardian",
+			GuardianEmail: "guardian@example.com",
+			GuardianPhone: "+8619900000001",
+			RunDate:       time.Date(2025, 1, 1, 0, 0, 0, 0, time.Local),
+		},
+		mockIAMLimiter: make(chan struct{}, 1),
+	}
+
+	_, err := dailySimulationStageEnsureGuardianAccount(context.Background(), state)
+	if err == nil {
+		t.Fatal("expected mock-consumer error")
+	}
+	if !strings.Contains(err.Error(), "authentication failed (401)") || !strings.Contains(err.Error(), "seed mock secret invalid") {
+		t.Fatalf("expected original mock-consumer error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "guardian token is empty") {
+		t.Fatalf("mock-consumer error was replaced by empty-token error: %v", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("expected one mock-consumer request, got %d", requestCount)
+	}
+}
+
 func TestBuildDailySimulationAssessmentEntryIntakeRequestForNewSeedUser(t *testing.T) {
 	req, err := buildDailySimulationAssessmentEntryIntakeRequest(&dailySimulationJourneyState{
 		profile: dailySimulationProfile{

@@ -363,9 +363,9 @@ func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *daily
 		}
 	}
 	if dailySimulationUsesIAMMockConsumer(state.deps.Config.IAM) {
-		release, err := acquireDailySimulationMockIAMLimiter(ctx, state.mockIAMLimiter)
-		if err != nil {
-			return toolchain.Decision{}, err
+		release, acquireErr := acquireDailySimulationMockIAMLimiter(ctx, state.mockIAMLimiter)
+		if acquireErr != nil {
+			return toolchain.Decision{}, acquireErr
 		}
 		defer release()
 		guardianUserID, guardianToken, userCreated, err = ensureDailySimulationGuardianMockConsumer(
