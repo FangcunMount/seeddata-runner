@@ -32,6 +32,8 @@ const (
 	DefaultPlanSubmitSubmissionStateFile      = ".seeddata-cache/plan-submit-submissions.json"
 	DefaultHistoricalParentWorkers            = 16
 	DefaultHistoricalSubmissionWorkers        = 4
+	DefaultHistoricalReportWorkers            = 4
+	DefaultHistoricalReportQueueCapacity      = 24
 	DefaultHistoricalStageReadWorkers         = 16
 	DefaultHistoricalIAMWorkers               = 2
 	DefaultHistoricalProgressInterval         = "15s"
@@ -202,11 +204,13 @@ type PlanSubmitConfig struct {
 // HistoricalBackfillConfig owns settings that apply only to the finite
 // historical-backfill command, leaving ordinary daemon load unchanged.
 type HistoricalBackfillConfig struct {
-	ParentWorkers     int    `yaml:"parentWorkers"`
-	SubmissionWorkers int    `yaml:"submissionWorkers"`
-	StageReadWorkers  int    `yaml:"stageReadWorkers"`
-	IAMWorkers        int    `yaml:"iamWorkers"`
-	ProgressInterval  string `yaml:"progressInterval"`
+	ParentWorkers       int    `yaml:"parentWorkers"`
+	SubmissionWorkers   int    `yaml:"submissionWorkers"`
+	ReportWorkers       int    `yaml:"reportWorkers"`
+	ReportQueueCapacity int    `yaml:"reportQueueCapacity"`
+	StageReadWorkers    int    `yaml:"stageReadWorkers"`
+	IAMWorkers          int    `yaml:"iamWorkers"`
+	ProgressInterval    string `yaml:"progressInterval"`
 }
 
 func Load(filepath string) (*Config, error) {
@@ -304,6 +308,8 @@ func (cfg *Config) Validate() error {
 func (cfg HistoricalBackfillConfig) IsZero() bool {
 	return cfg.ParentWorkers == 0 &&
 		cfg.SubmissionWorkers == 0 &&
+		cfg.ReportWorkers == 0 &&
+		cfg.ReportQueueCapacity == 0 &&
 		cfg.StageReadWorkers == 0 &&
 		cfg.IAMWorkers == 0 &&
 		strings.TrimSpace(cfg.ProgressInterval) == ""
@@ -313,7 +319,17 @@ func (cfg *HistoricalBackfillConfig) Normalize() {
 	if cfg == nil {
 		return
 	}
+	zero := cfg.IsZero()
 	cfg.ProgressInterval = strings.TrimSpace(cfg.ProgressInterval)
+	if zero {
+		return
+	}
+	if cfg.ReportWorkers <= 0 {
+		cfg.ReportWorkers = DefaultHistoricalReportWorkers
+	}
+	if cfg.ReportQueueCapacity <= 0 {
+		cfg.ReportQueueCapacity = DefaultHistoricalReportQueueCapacity
+	}
 }
 
 func (cfg HistoricalBackfillConfig) Validate() error {
@@ -325,6 +341,12 @@ func (cfg HistoricalBackfillConfig) Validate() error {
 	}
 	if cfg.SubmissionWorkers <= 0 {
 		return fmt.Errorf("historicalBackfill.submissionWorkers must be positive")
+	}
+	if cfg.ReportWorkers <= 0 {
+		return fmt.Errorf("historicalBackfill.reportWorkers must be positive")
+	}
+	if cfg.ReportQueueCapacity <= 0 {
+		return fmt.Errorf("historicalBackfill.reportQueueCapacity must be positive")
 	}
 	if cfg.StageReadWorkers <= 0 {
 		return fmt.Errorf("historicalBackfill.stageReadWorkers must be positive")
@@ -356,6 +378,7 @@ func (cfg Config) ResolveHistoricalBackfill() HistoricalBackfillConfig {
 		}
 		return HistoricalBackfillConfig{
 			ParentWorkers: parentWorkers, SubmissionWorkers: DefaultHistoricalSubmissionWorkers,
+			ReportWorkers: DefaultHistoricalReportWorkers, ReportQueueCapacity: DefaultHistoricalReportQueueCapacity,
 			StageReadWorkers: 1, IAMWorkers: iamWorkers,
 			ProgressInterval: DefaultHistoricalProgressInterval,
 		}

@@ -42,28 +42,51 @@ type dailySimulationSubmissionResult struct {
 	ServerStages  map[string]HistoricalStageRecord
 }
 
+type dailySimulationPendingReport struct {
+	client      *APIClient
+	adminClient *APIClient
+	ledger      toolanswersheet.SubmissionStore
+	logicalID   string
+	testeeID    uint64
+	taskID      string
+	historical  historicalseed.Context
+	result      dailySimulationSubmissionResult
+}
+
 var (
 	dailySimulationReadinessNow  = time.Now
 	dailySimulationReadinessWait = scheduler.Wait
 )
 
 func submitDailySimulationAnswerSheet(ctx context.Context, state *dailySimulationJourneyState, req SubmitAnswerSheetRequest) (dailySimulationSubmissionResult, error) {
+	result, pending, err := prepareDailySimulationAnswerSheet(ctx, state, req)
+	if err != nil || pending == nil {
+		return result, err
+	}
+	return pending.Wait(ctx)
+}
+
+func prepareDailySimulationAnswerSheet(
+	ctx context.Context,
+	state *dailySimulationJourneyState,
+	req SubmitAnswerSheetRequest,
+) (dailySimulationSubmissionResult, *dailySimulationPendingReport, error) {
 	if state == nil || state.deps == nil {
-		return dailySimulationSubmissionResult{}, fmt.Errorf("daily simulation state is not initialized")
+		return dailySimulationSubmissionResult{}, nil, fmt.Errorf("daily simulation state is not initialized")
 	}
 	ledger := state.deps.DailySubmissionLedger
 	if ledger == nil {
-		return dailySimulationSubmissionResult{}, fmt.Errorf("daily submission ledger is not initialized")
+		return dailySimulationSubmissionResult{}, nil, fmt.Errorf("daily submission ledger is not initialized")
 	}
 	client := state.collectionClient
 	if client == nil {
-		return dailySimulationSubmissionResult{}, fmt.Errorf("guardian collection client is not initialized")
+		return dailySimulationSubmissionResult{}, nil, fmt.Errorf("guardian collection client is not initialized")
 	}
 	logicalID := dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID)
 
 	_, exists, err := ledger.Get(logicalID)
 	if err != nil {
-		return dailySimulationSubmissionResult{}, err
+		return dailySimulationSubmissionResult{}, nil, err
 	}
 	_, historical := historicalseed.FromContext(ctx)
 	if !exists && !historical && strings.TrimSpace(state.guardianUserID) != "" {
@@ -71,45 +94,49 @@ func submitDailySimulationAnswerSheet(ctx context.Context, state *dailySimulatio
 			ctx, state.deps.APIClient, req.QuestionnaireCode, state.guardianUserID,
 		)
 		if err != nil {
-			return dailySimulationSubmissionResult{}, err
+			return dailySimulationSubmissionResult{}, nil, err
 		}
 		if legacy != nil {
 			record, err := ledger.ReconcileLegacy(logicalID, legacy.ID, req)
 			if err != nil {
-				return dailySimulationSubmissionResult{}, err
+				return dailySimulationSubmissionResult{}, nil, err
 			}
 			state.outcome.SkippedSubmission = true
-			return finishDailySimulationReadiness(ctx, state, ledger, logicalID, req.TesteeID, record.AnswerSheetID)
+			return finishDailySimulationReadiness(ctx, state, ledger, logicalID, req.TesteeID, req.TaskID, record.AnswerSheetID)
 		}
 	}
 
 	prepared, err := ledger.Prepare(logicalID, req)
 	if err != nil {
-		return dailySimulationSubmissionResult{}, err
+		return dailySimulationSubmissionResult{}, nil, err
 	}
 	req.IdempotencyKey = prepared.Record.IdempotencyKey
 	answerSheetID := strings.TrimSpace(prepared.Record.AnswerSheetID)
 	if prepared.ShouldSubmit {
 		accepted, err := client.AcceptCollectionAnswerSheet(ctx, req, prepared.Record.RequestID)
 		if err != nil {
-			return dailySimulationSubmissionResult{}, err
+			return dailySimulationSubmissionResult{}, nil, err
 		}
 		record, err := ledger.MarkAccepted(logicalID, accepted.AnswerSheetID)
 		if err != nil {
-			return dailySimulationSubmissionResult{}, err
+			return dailySimulationSubmissionResult{}, nil, err
 		}
 		answerSheetID = record.AnswerSheetID
 	} else {
 		state.outcome.SkippedSubmission = true
 	}
-	result, err := finishDailySimulationReadiness(ctx, state, ledger, logicalID, req.TesteeID, answerSheetID)
+	result, pending, err := finishDailySimulationReadiness(ctx, state, ledger, logicalID, req.TesteeID, req.TaskID, answerSheetID)
 	if err != nil {
-		return result, err
+		return result, nil, err
+	}
+	if pending != nil {
+		return result, pending, nil
 	}
 	if historical, ok := historicalseed.FromContext(ctx); ok {
-		return verifyHistoricalSubmissionStages(ctx, state.deps.APIClient, historical, req.TaskID, state.target.RequiresAssessment, result)
+		result, err = verifyHistoricalSubmissionStages(ctx, state.deps.APIClient, historical, req.TaskID, state.target.RequiresAssessment, result)
+		return result, nil, err
 	}
-	return result, nil
+	return result, nil, nil
 }
 
 func finishDailySimulationReadiness(
@@ -118,51 +145,70 @@ func finishDailySimulationReadiness(
 	ledger toolanswersheet.SubmissionStore,
 	logicalID string,
 	testeeID uint64,
+	taskID string,
 	answerSheetID string,
-) (dailySimulationSubmissionResult, error) {
+) (dailySimulationSubmissionResult, *dailySimulationPendingReport, error) {
 	result := dailySimulationSubmissionResult{AnswerSheetID: strings.TrimSpace(answerSheetID)}
 	if !state.target.RequiresAssessment {
 		record, ok, err := ledger.Get(logicalID)
 		if err != nil {
-			return result, err
+			return result, nil, err
 		}
 		if ok && record.Status == toolanswersheet.SubmissionStatusLegacy {
 			result.Status = dailySimulationSubmissionDurableAccepted
-			return result, nil
+			return result, nil, nil
 		}
 		_, err = ledger.MarkCompleted(logicalID, answerSheetID)
 		result.Status = dailySimulationSubmissionDurableAccepted
-		return result, err
+		return result, nil, err
 	}
 	assessmentID, err := waitForDailySimulationReadiness(ctx, state.collectionClient, answerSheetID, testeeID)
 	if errors.Is(err, errDailySimulationAssessmentPending) {
 		_, markErr := ledger.MarkAcceptedPending(logicalID)
 		result.Status = dailySimulationSubmissionAcceptedPending
 		if markErr != nil {
-			return result, markErr
+			return result, nil, markErr
 		}
 		if _, historical := historicalseed.FromContext(ctx); historical {
-			return result, fmt.Errorf("%w: answersheet_id=%s", errHistoricalSubmissionPending, answerSheetID)
+			return result, nil, fmt.Errorf("%w: answersheet_id=%s", errHistoricalSubmissionPending, answerSheetID)
 		}
-		return result, nil
+		return result, nil, nil
 	}
 	if err != nil {
-		return result, err
+		return result, nil, err
 	}
 	result.AssessmentID = strings.TrimSpace(assessmentID)
 	result.Status = dailySimulationSubmissionAssessmentReady
-	if _, historical := historicalseed.FromContext(ctx); historical {
-		if err := waitForDailySimulationReport(ctx, state.collectionClient, assessmentID, testeeID); err != nil {
-			return result, err
-		}
-		result.Status = dailySimulationSubmissionReportGenerated
+	if historical, ok := historicalseed.FromContext(ctx); ok {
+		return result, &dailySimulationPendingReport{
+			client: state.collectionClient, adminClient: state.deps.APIClient, ledger: ledger,
+			logicalID: logicalID, testeeID: testeeID, taskID: taskID,
+			historical: historical, result: result,
+		}, nil
 	}
 	record, err := ledger.MarkReady(logicalID, assessmentID)
+	if err != nil {
+		return result, nil, err
+	}
+	result.AssessmentID = record.AssessmentID
+	return result, nil, nil
+}
+
+func (pending *dailySimulationPendingReport) Wait(ctx context.Context) (dailySimulationSubmissionResult, error) {
+	if pending == nil {
+		return dailySimulationSubmissionResult{}, fmt.Errorf("daily simulation pending report is nil")
+	}
+	result := pending.result
+	if err := waitForDailySimulationReport(ctx, pending.client, result.AssessmentID, pending.testeeID); err != nil {
+		return result, err
+	}
+	result.Status = dailySimulationSubmissionReportGenerated
+	record, err := pending.ledger.MarkReady(pending.logicalID, result.AssessmentID)
 	if err != nil {
 		return result, err
 	}
 	result.AssessmentID = record.AssessmentID
-	return result, nil
+	return verifyHistoricalSubmissionStages(ctx, pending.adminClient, pending.historical, pending.taskID, true, result)
 }
 
 func verifyHistoricalSubmissionStages(

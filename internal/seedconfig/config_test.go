@@ -259,7 +259,7 @@ planSubmit:
 func TestResolveHistoricalBackfillUsesSafeDefaultsWhenBlockMissing(t *testing.T) {
 	cfg := Config{DailySimulation: DailySimulationConfig{Workers: 7}, IAM: IAMConfig{MockConsumer: IAMMockConsumerConfig{MaxConcurrent: 1}}}
 	resolved := cfg.ResolveHistoricalBackfill()
-	if resolved.ParentWorkers != 7 || resolved.SubmissionWorkers != 4 || resolved.StageReadWorkers != 1 || resolved.IAMWorkers != 1 || resolved.ProgressInterval != "15s" {
+	if resolved.ParentWorkers != 7 || resolved.SubmissionWorkers != 4 || resolved.ReportWorkers != 4 || resolved.ReportQueueCapacity != 24 || resolved.StageReadWorkers != 1 || resolved.IAMWorkers != 1 || resolved.ProgressInterval != "15s" {
 		t.Fatalf("unexpected legacy fallback: %+v", resolved)
 	}
 }
@@ -280,6 +280,8 @@ dailySimulation:
 historicalBackfill:
   parentWorkers: 16
   submissionWorkers: 24
+  reportWorkers: 8
+  reportQueueCapacity: 32
   stageReadWorkers: 16
   iamWorkers: 2
   progressInterval: "15s"
@@ -294,8 +296,43 @@ planSubmit:
 		t.Fatal(err)
 	}
 	resolved := cfg.ResolveHistoricalBackfill()
-	if resolved.ParentWorkers != 16 || resolved.SubmissionWorkers != 24 || resolved.StageReadWorkers != 16 || resolved.IAMWorkers != 2 || resolved.ProgressInterval != "15s" {
+	if resolved.ParentWorkers != 16 || resolved.SubmissionWorkers != 24 || resolved.ReportWorkers != 8 || resolved.ReportQueueCapacity != 32 || resolved.StageReadWorkers != 16 || resolved.IAMWorkers != 2 || resolved.ProgressInterval != "15s" {
 		t.Fatalf("unexpected historical config: %+v", resolved)
+	}
+}
+
+func TestLoadHistoricalBackfillConfigDefaultsReportPipelineForLegacyBlock(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "seeddata.yaml")
+	content := `
+global:
+  orgId: 1
+api:
+  baseUrl: "https://qs.example.com"
+dailySimulation:
+  clinicianIds: ["1001"]
+  targetType: "scale"
+  targetCode: "SAS"
+  planIds: ["614333603412718126"]
+historicalBackfill:
+  parentWorkers: 8
+  submissionWorkers: 4
+  stageReadWorkers: 4
+  iamWorkers: 1
+  progressInterval: "15s"
+planSubmit:
+  planIds: ["614333603412718126"]
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := cfg.ResolveHistoricalBackfill()
+	if resolved.ReportWorkers != DefaultHistoricalReportWorkers || resolved.ReportQueueCapacity != DefaultHistoricalReportQueueCapacity {
+		t.Fatalf("legacy historical block did not receive report defaults: %+v", resolved)
 	}
 }
 

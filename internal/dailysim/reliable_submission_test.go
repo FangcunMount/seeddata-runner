@@ -93,6 +93,92 @@ func TestSubmitDailySimulationAnswerSheetUsesCollectionAndReadiness(t *testing.T
 	}
 }
 
+func TestPrepareHistoricalDailySimulationAnswerSheetDefersReportPolling(t *testing.T) {
+	var reportCalls atomic.Int32
+	scenarioID := "2025-01-01/4/submit_answer/MODEL"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/answersheets":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"accepted","answersheet_id":"9004"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/answersheets/9004/assessment-readiness":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"ready","answersheet_id":"9004","assessment_id":"8004"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/assessments/8004/wait-report":
+			reportCalls.Add(1)
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"interpreted"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/internal/v1/historical-seed/batches/batch/scenarios":
+			if r.URL.Query().Get("scenario_id") != scenarioID {
+				t.Fatalf("unexpected scenario query: %s", r.URL.String())
+			}
+			_, _ = w.Write([]byte(`{"code":0,"data":{"batch_id":"batch","stages":[
+				{"stage":"answersheet_submit","status":"completed","resource_id":"9004"},
+				{"stage":"assessment_created","status":"completed","resource_id":"8004"},
+				{"stage":"assessment_submitted","status":"completed","resource_id":"8004"},
+				{"stage":"outcome_committed","status":"completed","resource_id":"outcome-4"},
+				{"stage":"report_generated","status":"completed","resource_id":"report-4"}
+			]}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	ledger, err := toolanswersheet.NewSubmissionLedger(filepath.Join(t.TempDir(), "daily-submissions.json"), "daily")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := log.New(log.NewOptions())
+	client := NewAPIClient(server.URL, "guardian-token", logger)
+	state := &dailySimulationJourneyState{
+		deps: &dependencies{
+			APIClient:             NewAPIClient(server.URL, "admin-token", logger),
+			CollectionClient:      client,
+			DailySubmissionLedger: ledger,
+		},
+		collectionClient: client,
+		profile: dailySimulationProfile{
+			RunDate: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Index: 4,
+		},
+		target: &dailySimulationResolvedTarget{
+			TargetType: "scale", TargetCode: "MODEL", TargetVersion: "1",
+			QuestionnaireCode: "Q", QuestionnaireVersion: "1", RequiresAssessment: true,
+		},
+	}
+	req := SubmitAnswerSheetRequest{
+		QuestionnaireCode: "Q", QuestionnaireVersion: "1", TesteeID: 42,
+		Answers: []Answer{{QuestionCode: "q1", QuestionType: "Radio", Value: "A"}},
+	}
+	historical := historicalseed.Context{BatchID: "batch", ScenarioID: scenarioID, OrgID: 1, Version: historicalseed.Version1}
+	ctx := historicalseed.WithContext(context.Background(), historical)
+
+	result, pending, err := prepareDailySimulationAnswerSheet(ctx, state, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending == nil {
+		t.Fatal("historical report polling was not deferred")
+	}
+	if reportCalls.Load() != 0 {
+		t.Fatalf("report calls before continuation=%d, want 0", reportCalls.Load())
+	}
+	if result.Status != dailySimulationSubmissionAssessmentReady || result.AssessmentID != "8004" {
+		t.Fatalf("prepared result=%+v", result)
+	}
+
+	completed, err := pending.Wait(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reportCalls.Load() != 1 || completed.Status != dailySimulationSubmissionReportGenerated || completed.ReportID != "report-4" {
+		t.Fatalf("completed result=%+v report_calls=%d", completed, reportCalls.Load())
+	}
+	record, ok, err := ledger.Get(dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID))
+	if err != nil || !ok || record.Status != toolanswersheet.SubmissionStatusReady {
+		t.Fatalf("ready ledger record=%+v ok=%v err=%v", record, ok, err)
+	}
+}
+
 func TestDailySimulationReadinessDelayClampsServerHint(t *testing.T) {
 	if got := dailySimulationReadinessDelay(0); got != 2*time.Second {
 		t.Fatalf("default delay=%s", got)

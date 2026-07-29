@@ -25,10 +25,16 @@ export IAM_MOCK_CONSUMER_SHARED_SECRET='<secret>'
 export QS_HISTORICAL_CONTEXT_SECRET='<secret>'
 ```
 
-历史模式默认使用父场景 12、submission 6、stage reader 6、IAM 1 路并发。IAM 限制同时覆盖
+历史模式默认使用父场景 12、submission 6、report poller 4、待报告队列 24、
+stage reader 6、IAM 1 路并发。IAM 限制同时覆盖
 首次创建和历史 guardian 会话恢复，避免恢复批次绕过限流形成登录洪峰。可以在
 `historicalBackfill` 配置块设置，也可以用 `--parent-workers`、`--submission-workers`、
-`--stage-read-workers`、`--iam-workers` 临时覆盖。普通 daemon 不读取这些参数。
+`--report-workers`、`--report-queue-capacity`、`--stage-read-workers`、`--iam-workers` 临时覆盖。
+普通 daemon 不读取这些参数。
+
+submission worker 只推进到 Assessment ready；需要 Report 的任务随后进入有界队列，由
+report poller 完成 `wait-report`、submission ledger ready 标记和历史 stage 校验。队列达到
+`reportQueueCapacity` 时 submission worker 会阻塞，不会无上限积累待报告任务。
 
 先用 3 天范围执行本地或 staging 验证；成功后使用正式批次 ID：
 
@@ -72,7 +78,8 @@ entry、Plan 或非法 journey identity 等其他冻结身份冲突仍会立即�
 映射为 `0..当日人数-1` 的 worker job index，不会改写持久身份。
 
 运行中每 15 秒输出当前自然日、父场景进度、已发现/完成 submission、Report 数、吞吐、
-in-flight、失败数和 ETA。自然日仍然串行，只有日终完整校验通过才推进 checkpoint。
+submission/report in-flight、待报告队列深度、失败数和 ETA。自然日仍然串行，只有日终完整
+校验通过才推进 checkpoint。
 
 ## ServerA 内网一次性容器
 

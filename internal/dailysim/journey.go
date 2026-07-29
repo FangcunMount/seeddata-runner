@@ -339,16 +339,16 @@ func simulateHistoricalAdditionalTargets(
 			TargetKey:  additional.TargetKey,
 		}, func(jobCtx context.Context) (historicalSubmissionJobResult, error) {
 			jobCtx = mergeHistoricalSubmissionContext(jobCtx, targetCtx)
-			if err := runDailySimulationSubmissionJob(jobCtx, jobState, "", target.QuestionnaireDetail, testeeID); err != nil {
+			result, err := prepareDailySimulationSubmissionJob(jobCtx, jobState, "", target.QuestionnaireDetail, testeeID)
+			if err != nil {
 				return historicalSubmissionJobResult{Outcome: jobState.outcome}, err
 			}
-			if err := logDailySimulationOutcome(
-				deps, profile, jobState.clinicianID, jobState.entry, target,
-				dailySimulationTesteeID(jobState.testee), jobState.guardianUserID, jobState.outcome,
-			); err != nil {
-				return historicalSubmissionJobResult{Outcome: jobState.outcome}, err
-			}
-			return historicalSubmissionJobResult{Outcome: jobState.outcome, ReportGenerated: target.RequiresAssessment}, nil
+			return withHistoricalSubmissionCompletion(result, func() error {
+				return logDailySimulationOutcome(
+					deps, profile, jobState.clinicianID, jobState.entry, target,
+					dailySimulationTesteeID(jobState.testee), jobState.guardianUserID, jobState.outcome,
+				)
+			})
 		})
 		if err != nil {
 			return err
@@ -896,10 +896,7 @@ func dailySimulationStageSubmitAnswerSheet(ctx context.Context, state *dailySimu
 			PlannedAt:  spec.plannedAt,
 		}, func(jobCtx context.Context) (historicalSubmissionJobResult, error) {
 			jobCtx = mergeHistoricalSubmissionContext(jobCtx, spec.ctx)
-			if err := runDailySimulationSubmissionJob(jobCtx, jobState, spec.taskID, questionnaireDetail, testeeID); err != nil {
-				return historicalSubmissionJobResult{Outcome: jobState.outcome}, err
-			}
-			return historicalSubmissionJobResult{Outcome: jobState.outcome, ReportGenerated: jobState.target.RequiresAssessment}, nil
+			return prepareDailySimulationSubmissionJob(jobCtx, jobState, spec.taskID, questionnaireDetail, testeeID)
 		})
 		if err != nil {
 			return toolchain.Decision{}, err
@@ -923,22 +920,40 @@ func runDailySimulationSubmissionJob(
 	questionnaireDetail *QuestionnaireDetailResponse,
 	testeeID uint64,
 ) error {
+	result, err := prepareDailySimulationSubmissionJob(submitCtx, state, taskID, questionnaireDetail, testeeID)
+	if err != nil {
+		return err
+	}
+	if result.awaitReport != nil {
+		_, err = result.awaitReport(submitCtx)
+	}
+	return err
+}
+
+func prepareDailySimulationSubmissionJob(
+	submitCtx context.Context,
+	state *dailySimulationJourneyState,
+	taskID string,
+	questionnaireDetail *QuestionnaireDetailResponse,
+	testeeID uint64,
+) (historicalSubmissionJobResult, error) {
 	if taskID != "" {
 		if err := ensureHistoricalPlanTaskOpen(submitCtx, state, taskID); err != nil {
-			return err
+			return historicalSubmissionJobResult{Outcome: state.outcome}, err
 		}
 	}
 	submission, restored, err := restoreDailySimulationHistoricalSubmission(submitCtx, state, taskID)
 	if err != nil {
-		return err
+		return historicalSubmissionJobResult{Outcome: state.outcome}, err
 	}
+	var pendingReport *dailySimulationPendingReport
 	if !restored {
 		rng := newDailySimulationRand(
 			"answers:" + state.profile.RunDate.Format("20060102") + ":" + strconv.Itoa(state.profile.Index) + ":" + state.target.QuestionnaireCode + ":" + taskID,
 		)
 		answers := buildAnswers(questionnaireDetail, rng)
 		if invalidAnswers := validateAnswers(questionnaireDetail, answers); len(invalidAnswers) > 0 {
-			return fmt.Errorf("generated invalid answers for questionnaire %s: %v", state.target.QuestionnaireCode, invalidAnswers)
+			return historicalSubmissionJobResult{Outcome: state.outcome}, fmt.Errorf("generated invalid answers for questionnaire %s: %v", state.target.QuestionnaireCode, invalidAnswers)
 		}
 		req := SubmitAnswerSheetRequest{
 			QuestionnaireCode: state.target.QuestionnaireCode, QuestionnaireVersion: state.target.QuestionnaireVersion,
@@ -948,11 +963,34 @@ func runDailySimulationSubmissionJob(
 		if taskID != "" {
 			req.TaskID = taskID
 		}
-		submission, err = submitDailySimulationAnswerSheet(submitCtx, state, req)
+		submission, pendingReport, err = prepareDailySimulationAnswerSheet(submitCtx, state, req)
 		if err != nil {
-			return err
+			return historicalSubmissionJobResult{Outcome: state.outcome}, err
 		}
 	}
+	if pendingReport != nil {
+		sourceCtx := submitCtx
+		return historicalSubmissionJobResult{
+			Outcome: state.outcome,
+			awaitReport: func(workerCtx context.Context) (historicalSubmissionJobResult, error) {
+				reportCtx := mergeHistoricalSubmissionContext(workerCtx, sourceCtx)
+				completed, err := pendingReport.Wait(reportCtx)
+				if err != nil {
+					return historicalSubmissionJobResult{Outcome: state.outcome}, err
+				}
+				return finishDailySimulationSubmissionJob(reportCtx, state, taskID, completed)
+			},
+		}, nil
+	}
+	return finishDailySimulationSubmissionJob(submitCtx, state, taskID, submission)
+}
+
+func finishDailySimulationSubmissionJob(
+	submitCtx context.Context,
+	state *dailySimulationJourneyState,
+	taskID string,
+	submission dailySimulationSubmissionResult,
+) (historicalSubmissionJobResult, error) {
 	state.outcome.AnswerSheetID = submission.AnswerSheetID
 	state.outcome.AssessmentID = submission.AssessmentID
 	state.outcome.AnswerSheetIDs = appendUniqueString(state.outcome.AnswerSheetIDs, state.outcome.AnswerSheetID)
@@ -960,32 +998,53 @@ func runDailySimulationSubmissionJob(
 		state.outcome.AssessmentIDs = appendUniqueString(state.outcome.AssessmentIDs, state.outcome.AssessmentID)
 	}
 	if err := state.recordHistoricalLocalStage(submitCtx, dailySimulationJourneyStageAnswerSheet); err != nil {
-		return err
+		return historicalSubmissionJobResult{Outcome: state.outcome}, err
 	}
 	if state.target.RequiresAssessment {
 		for _, stage := range []dailySimulationJourneyStage{"assessment_created", "outcome_committed", "report_generated"} {
 			if _, historical := historicalseed.FromContext(submitCtx); historical {
 				if _, verified := submission.ServerStages[string(stage)]; !verified {
-					return fmt.Errorf("historical server stage %s was not verified", stage)
+					return historicalSubmissionJobResult{Outcome: state.outcome}, fmt.Errorf("historical server stage %s was not verified", stage)
 				}
 			}
 			if err := state.recordHistoricalLocalStage(submitCtx, stage); err != nil {
-				return err
+				return historicalSubmissionJobResult{Outcome: state.outcome}, err
 			}
 		}
 	}
 	if taskID != "" {
 		if _, historical := historicalseed.FromContext(submitCtx); historical {
 			if _, verified := submission.ServerStages["task_complete"]; !verified {
-				return fmt.Errorf("historical server stage task_complete was not verified")
+				return historicalSubmissionJobResult{Outcome: state.outcome}, fmt.Errorf("historical server stage task_complete was not verified")
 			}
 		}
 		if err := state.recordHistoricalLocalStage(submitCtx, dailySimulationJourneyStage("task_complete")); err != nil {
-			return err
+			return historicalSubmissionJobResult{Outcome: state.outcome}, err
 		}
 		state.outcome.CompletedTaskIDs = appendUniqueString(state.outcome.CompletedTaskIDs, taskID)
 	}
-	return nil
+	return historicalSubmissionJobResult{Outcome: state.outcome, ReportGenerated: state.target.RequiresAssessment}, nil
+}
+
+func withHistoricalSubmissionCompletion(
+	result historicalSubmissionJobResult,
+	complete func() error,
+) (historicalSubmissionJobResult, error) {
+	if result.awaitReport == nil {
+		return result, complete()
+	}
+	continuation := result.awaitReport
+	result.awaitReport = func(ctx context.Context) (historicalSubmissionJobResult, error) {
+		completed, err := continuation(ctx)
+		if err != nil {
+			return completed, err
+		}
+		if err := complete(); err != nil {
+			return completed, err
+		}
+		return completed, nil
+	}
+	return result, nil
 }
 
 func dailySimulationSubmissionOriginRef(state *dailySimulationJourneyState, taskID string) *OriginRef {

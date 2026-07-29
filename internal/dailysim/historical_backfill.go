@@ -111,18 +111,20 @@ func recordHistoricalPlanTaskDiscovery(ctx context.Context, historical historica
 }
 
 type HistoricalBackfillOptions struct {
-	From              string
-	To                string
-	BatchID           string
-	Resume            bool
-	StateDir          string
-	CountMin          int
-	CountMax          int
-	Workers           int
-	SubmissionWorkers int
-	StageReadWorkers  int
-	IAMWorkers        int
-	ProgressInterval  string
+	From                string
+	To                  string
+	BatchID             string
+	Resume              bool
+	StateDir            string
+	CountMin            int
+	CountMax            int
+	Workers             int
+	SubmissionWorkers   int
+	ReportWorkers       int
+	ReportQueueCapacity int
+	StageReadWorkers    int
+	IAMWorkers          int
+	ProgressInterval    string
 }
 
 type HistoricalTargetManifest struct {
@@ -301,6 +303,12 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 	if opts.SubmissionWorkers <= 0 {
 		opts.SubmissionWorkers = opts.Workers
 	}
+	if opts.ReportWorkers <= 0 {
+		opts.ReportWorkers = opts.SubmissionWorkers
+	}
+	if opts.ReportQueueCapacity <= 0 {
+		opts.ReportQueueCapacity = historicalSubmissionQueueCapacity
+	}
 	if opts.StageReadWorkers <= 0 {
 		opts.StageReadWorkers = 1
 	}
@@ -403,7 +411,10 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 			}
 		}
 		dayCtx = withHistoricalDaySnapshot(dayCtx, daySnapshot)
-		executor := newHistoricalSubmissionExecutor(dayCtx, deps.Logger, dayKey, count, opts.SubmissionWorkers, progressInterval)
+		executor := newHistoricalSubmissionExecutor(
+			dayCtx, deps.Logger, dayKey, count,
+			opts.SubmissionWorkers, opts.ReportWorkers, opts.ReportQueueCapacity, progressInterval,
+		)
 		dayCtx = withHistoricalSubmissionExecutor(dayCtx, executor)
 		cfg.Workers = opts.Workers
 		err := runDailySimulationBatchWithOptions(dayCtx, deps, cfg, day, count, "historical_backfill_"+dayKey, dailySimulationBatchOptions{

@@ -27,6 +27,7 @@ type HistoricalSubmissionJob struct {
 type historicalSubmissionJobResult struct {
 	Outcome         dailySimulationOutcome
 	ReportGenerated bool
+	awaitReport     func(context.Context) (historicalSubmissionJobResult, error)
 }
 
 type historicalSubmissionJob struct {
@@ -38,6 +39,11 @@ type historicalSubmissionJob struct {
 type historicalSubmissionExecution struct {
 	result historicalSubmissionJobResult
 	err    error
+}
+
+type historicalReportJob struct {
+	job    historicalSubmissionJob
+	result historicalSubmissionJobResult
 }
 
 type historicalSubmissionFuture struct {
@@ -53,23 +59,26 @@ func (f historicalSubmissionFuture) Wait() (historicalSubmissionJobResult, error
 }
 
 type historicalSubmissionExecutor struct {
-	ctx             context.Context
-	cancel          context.CancelFunc
-	logger          log.Logger
-	day             string
-	parentExpected  int64
-	jobs            chan historicalSubmissionJob
-	workers         sync.WaitGroup
-	reporter        sync.WaitGroup
-	reporterStop    chan struct{}
-	reporterOnce    sync.Once
-	startedAt       time.Time
-	discovered      atomic.Int64
-	completed       atomic.Int64
-	reports         atomic.Int64
-	inFlight        atomic.Int64
-	failed          atomic.Int64
-	parentCompleted atomic.Int64
+	ctx                context.Context
+	cancel             context.CancelFunc
+	logger             log.Logger
+	day                string
+	parentExpected     int64
+	jobs               chan historicalSubmissionJob
+	reportJobs         chan historicalReportJob
+	workers            sync.WaitGroup
+	reportWorkers      sync.WaitGroup
+	reporter           sync.WaitGroup
+	reporterStop       chan struct{}
+	reporterOnce       sync.Once
+	startedAt          time.Time
+	discovered         atomic.Int64
+	completed          atomic.Int64
+	reports            atomic.Int64
+	submissionInFlight atomic.Int64
+	reportInFlight     atomic.Int64
+	failed             atomic.Int64
+	parentCompleted    atomic.Int64
 }
 
 func newHistoricalSubmissionExecutor(
@@ -77,11 +86,19 @@ func newHistoricalSubmissionExecutor(
 	logger log.Logger,
 	day string,
 	parentExpected int,
-	workers int,
+	submissionWorkers int,
+	reportWorkers int,
+	reportQueueCapacity int,
 	progressInterval time.Duration,
 ) *historicalSubmissionExecutor {
-	if workers <= 0 {
-		workers = 1
+	if submissionWorkers <= 0 {
+		submissionWorkers = 1
+	}
+	if reportWorkers <= 0 {
+		reportWorkers = submissionWorkers
+	}
+	if reportQueueCapacity <= 0 {
+		reportQueueCapacity = historicalSubmissionQueueCapacity
 	}
 	if progressInterval <= 0 {
 		progressInterval = 15 * time.Second
@@ -90,11 +107,16 @@ func newHistoricalSubmissionExecutor(
 	executor := &historicalSubmissionExecutor{
 		ctx: executorCtx, cancel: cancel, logger: logger, day: day,
 		parentExpected: int64(parentExpected), jobs: make(chan historicalSubmissionJob, historicalSubmissionQueueCapacity),
+		reportJobs:   make(chan historicalReportJob, reportQueueCapacity),
 		reporterStop: make(chan struct{}), startedAt: time.Now(),
 	}
-	for worker := 0; worker < workers; worker++ {
+	for worker := 0; worker < submissionWorkers; worker++ {
 		executor.workers.Add(1)
 		go executor.runWorker()
+	}
+	for worker := 0; worker < reportWorkers; worker++ {
+		executor.reportWorkers.Add(1)
+		go executor.runReportWorker()
 	}
 	executor.reporter.Add(1)
 	go executor.runReporter(progressInterval)
@@ -144,27 +166,56 @@ func (e *historicalSubmissionExecutor) runWorker() {
 	defer e.workers.Done()
 	for job := range e.jobs {
 		if err := e.ctx.Err(); err != nil {
-			job.result <- historicalSubmissionExecution{err: err}
-			close(job.result)
+			e.settle(job, historicalSubmissionJobResult{}, err)
 			continue
 		}
-		e.inFlight.Add(1)
+		e.submissionInFlight.Add(1)
 		result, err := job.run(e.ctx)
-		if err != nil {
-			err = fmt.Errorf("historical submission job %s: %w", job.descriptor.ScenarioID, err)
+		e.submissionInFlight.Add(-1)
+		if err != nil || result.awaitReport == nil {
+			e.settle(job, result, err)
+			continue
 		}
-		e.inFlight.Add(-1)
-		if err != nil {
-			e.failed.Add(1)
-		} else {
-			e.completed.Add(1)
-			if result.ReportGenerated {
-				e.reports.Add(1)
-			}
+		select {
+		case <-e.ctx.Done():
+			e.settle(job, result, e.ctx.Err())
+		case e.reportJobs <- historicalReportJob{job: job, result: result}:
 		}
-		job.result <- historicalSubmissionExecution{result: result, err: err}
-		close(job.result)
 	}
+}
+
+func (e *historicalSubmissionExecutor) runReportWorker() {
+	defer e.reportWorkers.Done()
+	for pending := range e.reportJobs {
+		if err := e.ctx.Err(); err != nil {
+			e.settle(pending.job, pending.result, err)
+			continue
+		}
+		continuation := pending.result.awaitReport
+		pending.result.awaitReport = nil
+		e.reportInFlight.Add(1)
+		result, err := continuation(e.ctx)
+		e.reportInFlight.Add(-1)
+		if err == nil && result.awaitReport != nil {
+			err = fmt.Errorf("historical report continuation returned another deferred report")
+		}
+		e.settle(pending.job, result, err)
+	}
+}
+
+func (e *historicalSubmissionExecutor) settle(job historicalSubmissionJob, result historicalSubmissionJobResult, err error) {
+	result.awaitReport = nil
+	if err != nil {
+		err = fmt.Errorf("historical submission job %s: %w", job.descriptor.ScenarioID, err)
+		e.failed.Add(1)
+	} else {
+		e.completed.Add(1)
+		if result.ReportGenerated {
+			e.reports.Add(1)
+		}
+	}
+	job.result <- historicalSubmissionExecution{result: result, err: err}
+	close(job.result)
 }
 
 func (e *historicalSubmissionExecutor) runReporter(interval time.Duration) {
@@ -202,7 +253,11 @@ func (e *historicalSubmissionExecutor) logProgress() {
 		"submission_jobs_completed", completed,
 		"reports_generated", e.reports.Load(),
 		"throughput_per_second", throughput,
-		"in_flight", e.inFlight.Load(),
+		"in_flight", e.submissionInFlight.Load()+e.reportInFlight.Load(),
+		"submission_in_flight", e.submissionInFlight.Load(),
+		"report_in_flight", e.reportInFlight.Load(),
+		"reports_pending", len(e.reportJobs),
+		"report_queue_capacity", cap(e.reportJobs),
 		"failed", e.failed.Load(),
 		"eta", eta,
 	)
@@ -214,6 +269,8 @@ func (e *historicalSubmissionExecutor) Close() {
 	}
 	close(e.jobs)
 	e.workers.Wait()
+	close(e.reportJobs)
+	e.reportWorkers.Wait()
 	e.reporterOnce.Do(func() { close(e.reporterStop) })
 	e.reporter.Wait()
 	e.cancel()

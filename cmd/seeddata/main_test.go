@@ -55,12 +55,13 @@ func TestResolveHistoricalLegacySubmissionPathRequiresExplicitOverride(t *testin
 func TestParseHistoricalBackfillConcurrencyOverrides(t *testing.T) {
 	opts, err := parseCLIOptions([]string{
 		"historical-backfill", "--from", "2025-01-01", "--to", "2026-07-27", "--batch-id", "batch",
-		"--parent-workers", "16", "--submission-workers", "24", "--stage-read-workers", "12", "--iam-workers", "2",
+		"--parent-workers", "16", "--submission-workers", "24", "--report-workers", "8", "--report-queue-capacity", "32",
+		"--stage-read-workers", "12", "--iam-workers", "2",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.parentWorkers != 16 || opts.submissionWorkers != 24 || opts.stageReadWorkers != 12 || opts.iamWorkers != 2 {
+	if opts.parentWorkers != 16 || opts.submissionWorkers != 24 || opts.reportWorkers != 8 || opts.reportQueueCapacity != 32 || opts.stageReadWorkers != 12 || opts.iamWorkers != 2 {
 		t.Fatalf("unexpected concurrency options: %+v", opts)
 	}
 }
