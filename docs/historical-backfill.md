@@ -110,6 +110,10 @@ HMAC 校验全部保留。
 
 ## GitHub Actions 部署
 
+完整的首次配置、ServerA 前置检查、手动启动、审批、监控、停止、同 revision 恢复、常见失败和
+Statistics/K6 收尾步骤见
+[GitHub Actions 历史回填部署与操作手册](./github-actions-historical-backfill.md)。本节只保留契约摘要。
+
 仓库提供三个 workflow：
 
 - `CI`：main/PR 自动执行全库测试、历史关键包 race、部署契约、Linux 静态构建和历史镜像构建。
@@ -189,6 +193,7 @@ SQL 只更新 manifest 明确归属本批次的 Testee ID，数据库、Org 或�
 ```bash
 tmp/bin/seeddata historical-verify \
   --config configs/seeddata.yaml \
+  --state-dir /secure/path/seeddata-historical-state \
   --batch-id hist-20250101-20260727-v1
 
 tmp/bin/seeddata historical-manifest \

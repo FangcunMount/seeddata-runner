@@ -228,8 +228,9 @@ sudo systemctl restart seeddata-runner
 submission 24、stage reader 16、IAM 2 路并发；普通 daemon 继续使用
 `dailySimulation.workers`、原 IAM limiter 和 JSON submission ledger。完整迁移、恢复和
 ServerA 内网容器步骤见 [docs/historical-backfill.md](./docs/historical-backfill.md)。
-同一手册也包含 GitHub Actions 的 CI、production 手动部署以及 status/stop 操作说明；历史
-业务 Secret 始终保留在 ServerA 的受限 env 文件中，不通过 workflow 传输。
+GitHub Actions 的 production 手动部署、审批、status/stop、同 revision 恢复和最终验收见
+[GitHub Actions 历史回填部署与操作手册](./docs/github-actions-historical-backfill.md)；历史业务
+Secret 始终保留在 ServerA 的受限 env 文件中，不通过 workflow 传输。
 
 ## Daily Simulation
 
