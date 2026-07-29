@@ -330,7 +330,7 @@ workflow 完成了以下工作：
 7. 校验 `infra-network`、容器 DNS 和三个内部健康接口。
 8. 安装 revision、systemd unit 和部署 receipt，启动历史容器。
 
-Action 在 unit 和容器成功启动后退出。573 天任务仍在 ServerA 后台运行。
+Action 在 unit 和容器连续稳定运行至少 15 秒后退出。若启动期间失败，部署日志会同时输出 systemd、journal 和 runner append 日志。573 天任务仍在 ServerA 后台运行。
 
 ## 6. 运行中监控
 

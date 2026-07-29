@@ -14,6 +14,14 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 : "${SEEDDATA_BASELINE_FILE:?SEEDDATA_BASELINE_FILE is required}"
 : "${SEEDDATA_DEPLOY_ROOT:?SEEDDATA_DEPLOY_ROOT is required}"
 : "${SEEDDATA_LOG_DIR:?SEEDDATA_LOG_DIR is required}"
+
+startup_stability_seconds="${SEEDDATA_STARTUP_STABILITY_SECONDS:-15}"
+case "$startup_stability_seconds" in
+  ''|*[!0-9]*)
+    echo "SEEDDATA_STARTUP_STABILITY_SECONDS must be a non-negative integer" >&2
+    exit 1
+    ;;
+esac
 : "${SEEDDATA_REMOTE_PACKAGE_DIR:?SEEDDATA_REMOTE_PACKAGE_DIR is required}"
 
 unit_name="seeddata-historical-backfill.service"
@@ -285,28 +293,47 @@ as_root systemctl daemon-reload
 as_root systemctl reset-failed "$unit_name" >/dev/null 2>&1 || true
 as_root systemctl start "$unit_name"
 
+show_startup_diagnostics() {
+  as_root systemctl status "$unit_name" --no-pager || true
+  as_root journalctl -u "$unit_name" -n 100 --no-pager || true
+  if as_root test -r "$log_file"; then
+    echo "--- last 100 runner log lines: $log_file ---"
+    as_root tail -n 100 "$log_file" || true
+  fi
+}
+
+ready_since=
 for attempt in $(seq 1 30); do
   if as_root systemctl is-active --quiet "$unit_name"; then
     if as_root docker ps --format '{{.Names}}' |
       grep -Fxq "seeddata-historical-${SEEDDATA_BATCH_ID}"; then
-      echo "historical backfill started: unit=$unit_name batch=$SEEDDATA_BATCH_ID image=$SEEDDATA_IMAGE_REF"
-      as_root systemctl show "$unit_name" \
-        --property=ActiveState,SubState,Result,ExecMainPID --no-pager
-      exit 0
+      now=$(date +%s)
+      if [ -z "$ready_since" ]; then
+        ready_since=$now
+      fi
+      if [ $((now - ready_since)) -ge "$startup_stability_seconds" ]; then
+        echo "historical backfill stable: unit=$unit_name batch=$SEEDDATA_BATCH_ID image=$SEEDDATA_IMAGE_REF stability=${startup_stability_seconds}s"
+        as_root systemctl show "$unit_name" \
+          --property=ActiveState,SubState,Result,ExecMainPID --no-pager
+        exit 0
+      fi
+    else
+      ready_since=
     fi
   elif as_root systemctl is-failed --quiet "$unit_name"; then
-    as_root journalctl -u "$unit_name" -n 100 --no-pager
+    show_startup_diagnostics
     exit 1
   elif [ "$(as_root systemctl show "$unit_name" --property=ActiveState --value)" = inactive ] &&
        [ "$(as_root systemctl show "$unit_name" --property=Result --value)" = success ] &&
        [ "$(as_root systemctl show "$unit_name" --property=ExecMainStatus --value)" = 0 ]; then
     echo "historical backfill completed during deployment startup"
     exit 0
+  else
+    ready_since=
   fi
   sleep 2
 done
 
 echo "historical service did not become ready within 60 seconds" >&2
-as_root systemctl status "$unit_name" --no-pager || true
-as_root journalctl -u "$unit_name" -n 100 --no-pager || true
+show_startup_diagnostics
 exit 1

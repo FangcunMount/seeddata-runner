@@ -23,9 +23,11 @@ const (
 )
 
 type dailySimulationScenario struct {
-	ClinicianID string
-	Entry       *AssessmentEntryResponse
-	Target      *dailySimulationResolvedTarget
+	ClinicianID   string
+	Entry         *AssessmentEntryResponse
+	Target        *dailySimulationResolvedTarget
+	JourneyTarget dailySimulationJourneyTarget
+	PlanID        string
 }
 
 type dailySimulationDaemonState struct {
@@ -504,9 +506,7 @@ func runDailySimulationBatchWithOptions(
 					iamBundle,
 					cfg,
 					profile,
-					scenario.ClinicianID,
-					scenario.Entry,
-					scenario.Target,
+					scenario,
 					selectedAdditionalTargets,
 					mockIAMLimiter,
 					existingTestee,

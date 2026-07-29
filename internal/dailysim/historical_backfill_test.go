@@ -88,14 +88,14 @@ func TestHistoricalIdentityNamespaceIsStableAndBatchSpecific(t *testing.T) {
 	}
 }
 
-func TestResolveHistoricalRecoveryScenariosUsesFrozenEntry(t *testing.T) {
+func TestResolveHistoricalRecoveryScenariosUsesFrozenIdentity(t *testing.T) {
 	location, _ := time.LoadLocation(historicalTimezone)
 	day := time.Date(2025, 1, 1, 0, 0, 0, 0, location)
 	target := HistoricalTargetManifest{
 		TargetType: "scale", TargetCode: "3adyDE", TargetVersion: "v1",
 		QuestionnaireCode: "Q", QuestionnaireVersion: "q1", RequiresAssessment: true,
 	}
-	scenarioID := "2025-01-01/0/submit_answer/3adyDE"
+	scenarioID := "2025-01-01/0/register_only/3adyDE"
 	manifest := HistoricalManifest{
 		OrgID: 1,
 		Targets: map[string]HistoricalTargetManifest{
@@ -103,14 +103,14 @@ func TestResolveHistoricalRecoveryScenariosUsesFrozenEntry(t *testing.T) {
 		},
 		Scenarios: map[string]HistoricalScenarioManifest{
 			scenarioID: {
-				ScenarioID: scenarioID, BusinessDate: "2025-01-01", Journey: "submit_answer",
+				ScenarioID: scenarioID, BusinessDate: "2025-01-01", Journey: "register_only",
 				TargetKey: "scale/3adyDE", EntryID: "entry-frozen", PlanID: "plan-frozen",
 			},
 		},
 	}
 	cfg := DailySimulationConfig{
-		PlanIDs:    []FlexibleID{"plan-frozen"},
-		JourneyMix: DailySimulationJourneyMixConfig{SubmitAnswerWeight: 100},
+		PlanIDs:    []FlexibleID{"plan-current"},
+		JourneyMix: DailySimulationJourneyMixConfig{CreateTesteeWeight: 100},
 	}
 	loader := historicalScenarioRecoveryLoader{
 		getEntry: func(_ context.Context, entryID string) (*AssessmentEntryResponse, error) {
@@ -141,6 +141,9 @@ func TestResolveHistoricalRecoveryScenariosUsesFrozenEntry(t *testing.T) {
 	if !ok || scenario.Entry == nil || scenario.Entry.ID != "entry-frozen" || scenario.ClinicianID != "clinician-frozen" {
 		t.Fatalf("recovered scenario did not use frozen entry: %+v", scenario)
 	}
+	if scenario.JourneyTarget != dailySimulationJourneyRegisterOnly || scenario.PlanID != "plan-frozen" {
+		t.Fatalf("recovered scenario did not preserve frozen journey/plan: %+v", scenario)
+	}
 }
 
 func TestSelectDailySimulationBatchScenarioUsesFrozenIndex(t *testing.T) {
@@ -154,6 +157,27 @@ func TestSelectDailySimulationBatchScenarioUsesFrozenIndex(t *testing.T) {
 	)
 	if selected.Entry == nil || selected.Entry.ID != "entry-frozen" {
 		t.Fatalf("selected scenario did not preserve frozen index: %+v", selected)
+	}
+}
+
+func TestResolveDailySimulationScenarioIdentityPrefersFrozenJourneyAndPlan(t *testing.T) {
+	day := time.Date(2025, 1, 1, 0, 0, 0, 0, time.Local)
+	cfg := DailySimulationConfig{
+		PlanIDs:    []FlexibleID{"plan-current"},
+		JourneyMix: DailySimulationJourneyMixConfig{CreateTesteeWeight: 100},
+	}
+	scenario := dailySimulationScenario{
+		JourneyTarget: dailySimulationJourneyRegisterOnly,
+		PlanID:        "plan-frozen",
+	}
+
+	journey, planID := resolveDailySimulationScenarioIdentity(cfg, day, 0, scenario)
+	if journey != dailySimulationJourneyRegisterOnly || planID != "plan-frozen" {
+		t.Fatalf("identity resolved journey=%s plan=%s", journey, planID)
+	}
+	context := buildHistoricalScenarioContext("batch", 1, cfg, dailySimulationProfile{Index: 0, RunDate: day}, scenario)
+	if context.ScenarioID != "2025-01-01/0/register_only/unknown" {
+		t.Fatalf("historical context ignored frozen journey: %s", context.ScenarioID)
 	}
 }
 

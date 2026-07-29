@@ -669,7 +669,7 @@ func validateHistoricalPlanScale(planID, planScaleCode, targetCode, targetLabel 
 }
 
 func buildHistoricalScenarioContext(batchID string, orgID uint64, cfg DailySimulationConfig, profile dailySimulationProfile, scenario dailySimulationScenario) historicalseed.Context {
-	journey := resolveDailySimulationJourneyTarget(cfg, profile.RunDate, profile.Index)
+	journey, _ := resolveDailySimulationScenarioIdentity(cfg, profile.RunDate, profile.Index, scenario)
 	targetCode := "unknown"
 	if scenario.Target != nil && strings.TrimSpace(scenario.Target.TargetCode) != "" {
 		targetCode = strings.TrimSpace(scenario.Target.TargetCode)
@@ -864,19 +864,23 @@ func resolveHistoricalRecoveryScenarios(
 		return nil, err
 	}
 	businessDate := day.Format("2006-01-02")
+	frozenParents, err := historicalParentScenariosByIndex(manifest, businessDate, targetKey, frozenTarget.TargetCode, expectedCount)
+	if err != nil {
+		return nil, err
+	}
 	orgID := strconv.FormatInt(manifest.OrgID, 10)
 	scenarios := make(map[int]dailySimulationScenario, expectedCount)
 	entries := make(map[string]*AssessmentEntryResponse)
 	targets := make(map[string]*dailySimulationResolvedTarget)
 
 	for index := 0; index < expectedCount; index++ {
-		journey := resolveDailySimulationJourneyTarget(cfg, day, index)
-		scenarioID := fmt.Sprintf("%s/%d/%s/%s", businessDate, index, journey, frozenTarget.TargetCode)
-		stored, exists := manifest.Scenarios[scenarioID]
-		if !exists || strings.TrimSpace(stored.ScenarioID) == "" {
-			return nil, fmt.Errorf("historical recovery scenario %s is missing from frozen manifest", scenarioID)
+		stored := frozenParents[index]
+		scenarioID := stored.ScenarioID
+		journey := dailySimulationJourneyTarget(stored.Journey)
+		planID := strings.TrimSpace(stored.PlanID)
+		if planID == "" {
+			planID = selectDailySimulationPlanID(cfg, day, index)
 		}
-		planID := selectDailySimulationPlanID(cfg, day, index)
 		resolvedIdentity := HistoricalScenarioManifest{
 			ScenarioID: scenarioID, BusinessDate: businessDate, Journey: string(journey), TargetKey: targetKey,
 			EntryID: strings.TrimSpace(stored.EntryID), PlanID: planID,
@@ -941,12 +945,64 @@ func resolveHistoricalRecoveryScenarios(
 			targets[targetKey] = target
 		}
 		scenarios[index] = dailySimulationScenario{
-			ClinicianID: strings.TrimSpace(entry.ClinicianID),
-			Entry:       entry,
-			Target:      target,
+			ClinicianID:   strings.TrimSpace(entry.ClinicianID),
+			Entry:         entry,
+			Target:        target,
+			JourneyTarget: journey,
+			PlanID:        planID,
 		}
 	}
 	return scenarios, nil
+}
+
+func historicalParentScenariosByIndex(
+	manifest HistoricalManifest,
+	businessDate, targetKey, targetCode string,
+	expectedCount int,
+) (map[int]HistoricalScenarioManifest, error) {
+	parents := make(map[int]HistoricalScenarioManifest, expectedCount)
+	for key, scenario := range manifest.Scenarios {
+		if strings.TrimSpace(scenario.BusinessDate) != businessDate {
+			continue
+		}
+		parts := strings.Split(strings.TrimSpace(key), "/")
+		if len(parts) != 4 || parts[0] != businessDate {
+			return nil, fmt.Errorf("historical recovery scenario %s has invalid parent identity", key)
+		}
+		index, err := strconv.Atoi(parts[1])
+		if err != nil || index < 0 || index >= expectedCount {
+			return nil, fmt.Errorf("historical recovery scenario %s has invalid index", key)
+		}
+		journey := dailySimulationJourneyTarget(parts[2])
+		if !isDailySimulationJourneyTarget(journey) || scenario.Journey != string(journey) {
+			return nil, fmt.Errorf("historical recovery scenario %s has invalid journey %q", key, scenario.Journey)
+		}
+		if scenario.ScenarioID != key || scenario.TargetKey != targetKey || parts[3] != targetCode {
+			return nil, fmt.Errorf("historical recovery scenario %s has frozen identity conflict", key)
+		}
+		if existing, exists := parents[index]; exists {
+			return nil, fmt.Errorf("historical recovery index %d maps to multiple parents: %s and %s", index, existing.ScenarioID, scenario.ScenarioID)
+		}
+		parents[index] = scenario
+	}
+	for index := 0; index < expectedCount; index++ {
+		if _, exists := parents[index]; !exists {
+			return nil, fmt.Errorf("historical recovery index %d is missing from frozen manifest for %s", index, businessDate)
+		}
+	}
+	return parents, nil
+}
+
+func isDailySimulationJourneyTarget(value dailySimulationJourneyTarget) bool {
+	switch value {
+	case dailySimulationJourneyRegisterOnly,
+		dailySimulationJourneyCreateTestee,
+		dailySimulationJourneyResolveEntry,
+		dailySimulationJourneySubmitAnswer:
+		return true
+	default:
+		return false
+	}
 }
 
 func historicalPrimaryTarget(targets map[string]HistoricalTargetManifest, targetCode string) (HistoricalTargetManifest, string, error) {
@@ -1060,7 +1116,9 @@ func buildHistoricalDaySnapshot(
 		if err == nil {
 			scenariosByIndex = make(map[int]dailySimulationScenario, expectedCount)
 			for index := 0; index < expectedCount; index++ {
-				scenariosByIndex[index] = scenarios[index%len(scenarios)]
+				scenario := scenarios[index%len(scenarios)]
+				scenario.JourneyTarget, scenario.PlanID = resolveDailySimulationScenarioIdentity(cfg, day, index, scenario)
+				scenariosByIndex[index] = scenario
 			}
 		}
 	}
@@ -1079,9 +1137,8 @@ func buildHistoricalDaySnapshot(
 		profile := namespaceHistoricalProfile(manifest.BatchID, buildDailySimulationProfile(cfg, day, index))
 		scenario := scenariosByIndex[index]
 		historical := buildHistoricalScenarioContext(manifest.BatchID, uint64(manifest.OrgID), cfg, profile, scenario)
-		journey := resolveDailySimulationJourneyTarget(cfg, day, index)
+		journey, planID := resolveDailySimulationScenarioIdentity(cfg, day, index, scenario)
 		targetKey := strings.Join([]string{scenario.Target.TargetType, scenario.Target.TargetCode}, "/")
-		planID := selectDailySimulationPlanID(cfg, day, index)
 		record := manifest.Scenarios[historical.ScenarioID]
 		if strings.TrimSpace(record.ScenarioID) == "" {
 			record = HistoricalScenarioManifest{

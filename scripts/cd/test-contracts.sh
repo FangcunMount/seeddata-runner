@@ -119,12 +119,20 @@ common_env=(
   SEEDDATA_BASELINE_FILE="$baseline"
   SEEDDATA_DEPLOY_ROOT="$tmp_dir/deploy"
   SEEDDATA_LOG_DIR="$tmp_dir/logs"
+  SEEDDATA_STARTUP_STABILITY_SECONDS=15
   SEEDDATA_REMOTE_PACKAGE_DIR="$package_dir"
   SEEDDATA_EXPECTED_HOSTNAME=
 )
 
 env "${common_env[@]}" bash "$repo_root/scripts/cd/remote-deploy.sh" |
   grep -Fq 'historical deployment contract valid'
+
+if env "${common_env[@]}" \
+  SEEDDATA_STARTUP_STABILITY_SECONDS=invalid \
+  bash "$repo_root/scripts/cd/remote-deploy.sh" >/dev/null 2>&1; then
+  echo "remote deploy accepted invalid startup stability duration" >&2
+  exit 1
+fi
 
 if env "${common_env[@]}" \
   SEEDDATA_BATCH_ID='unsafe/batch' \
@@ -174,5 +182,6 @@ fi
 grep -Fq 'workflow_dispatch:' "$repo_root/.github/workflows/historical-deploy.yml"
 grep -Fq 'START_HISTORICAL_BACKFILL' "$repo_root/.github/workflows/historical-deploy.yml"
 grep -Fq 'STOP_HISTORICAL_BACKFILL' "$repo_root/.github/workflows/historical-control.yml"
+grep -Fq -- '--- last 100 runner log lines:' "$repo_root/scripts/cd/remote-deploy.sh"
 
 echo 'deployment contracts passed'

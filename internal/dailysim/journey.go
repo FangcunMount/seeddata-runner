@@ -212,9 +212,7 @@ func simulateDailyUser(
 		iamBundle,
 		cfg,
 		profile,
-		clinicianID,
-		entry,
-		target,
+		dailySimulationScenario{ClinicianID: clinicianID, Entry: entry, Target: target},
 		nil,
 		mockIAMLimiter,
 		existingTestee,
@@ -227,25 +225,24 @@ func simulateDailyUserWithAdditionalTargets(
 	iamBundle *dailySimulationIAMBundle,
 	cfg DailySimulationConfig,
 	profile dailySimulationProfile,
-	clinicianID string,
-	entry *AssessmentEntryResponse,
-	target *dailySimulationResolvedTarget,
+	scenario dailySimulationScenario,
 	additionalTargets []*dailySimulationResolvedTarget,
 	mockIAMLimiter chan struct{},
 	existingTestee *ApiserverTesteeResponse,
 ) (dailySimulationOutcome, error) {
+	journeyTarget, planID := resolveDailySimulationScenarioIdentity(cfg, profile.RunDate, profile.Index, scenario)
 	state := &dailySimulationJourneyState{
 		deps:           deps,
 		iamBundle:      iamBundle,
 		cfg:            cfg,
 		profile:        profile,
-		clinicianID:    clinicianID,
-		entry:          entry,
-		target:         target,
+		clinicianID:    scenario.ClinicianID,
+		entry:          scenario.Entry,
+		target:         scenario.Target,
 		mockIAMLimiter: mockIAMLimiter,
 		existingTestee: existingTestee,
-		planID:         selectDailySimulationPlanID(cfg, profile.RunDate, profile.Index),
-		journeyTarget:  resolveDailySimulationJourneyTarget(cfg, profile.RunDate, profile.Index),
+		planID:         planID,
+		journeyTarget:  journeyTarget,
 	}
 	if state.entry == nil {
 		return state.outcome, fmt.Errorf("daily simulation entry is nil")
@@ -279,9 +276,9 @@ func simulateDailyUserWithAdditionalTargets(
 	if err := logDailySimulationOutcome(
 		deps,
 		profile,
-		clinicianID,
-		entry,
-		target,
+		scenario.ClinicianID,
+		scenario.Entry,
+		scenario.Target,
 		dailySimulationTesteeID(state.testee),
 		state.guardianUserID,
 		state.outcome,
@@ -1322,6 +1319,23 @@ func resolveDailySimulationJourneyTarget(cfg DailySimulationConfig, runDate time
 	default:
 		return dailySimulationJourneySubmitAnswer
 	}
+}
+
+func resolveDailySimulationScenarioIdentity(
+	cfg DailySimulationConfig,
+	runDate time.Time,
+	index int,
+	scenario dailySimulationScenario,
+) (dailySimulationJourneyTarget, string) {
+	journey := scenario.JourneyTarget
+	if journey == "" {
+		journey = resolveDailySimulationJourneyTarget(cfg, runDate, index)
+	}
+	planID := strings.TrimSpace(scenario.PlanID)
+	if planID == "" {
+		planID = selectDailySimulationPlanID(cfg, runDate, index)
+	}
+	return journey, planID
 }
 
 func normalizeDailySimulationJourneyMix(cfg DailySimulationJourneyMixConfig) DailySimulationJourneyMixConfig {
