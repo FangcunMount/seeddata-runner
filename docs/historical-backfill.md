@@ -5,7 +5,7 @@
 
 ## 前置条件
 
-- IAM `mockConsumer.enabled=true`；历史回填默认将 IAM 并发限制为 2，共享密钥只通过
+- IAM `mockConsumer.enabled=true`；历史回填默认将 IAM 并发限制为 1，共享密钥只通过
   `IAM_MOCK_CONSUMER_SHARED_SECRET` 注入。
 - qs-server apiserver 与 collection-server 使用相同的
   `QS_HISTORICAL_CONTEXT_SECRET`，并已启用限定 Org、`2025-01-01..2026-07-27` 的历史开关。
@@ -25,7 +25,8 @@ export IAM_MOCK_CONSUMER_SHARED_SECRET='<secret>'
 export QS_HISTORICAL_CONTEXT_SECRET='<secret>'
 ```
 
-历史模式默认使用父场景 16、submission 4、stage reader 16、IAM 2 路并发。可以在
+历史模式默认使用父场景 8、submission 2、stage reader 4、IAM 1 路并发。IAM 限制同时覆盖
+首次创建和历史 guardian 会话恢复，避免恢复批次绕过限流形成登录洪峰。可以在
 `historicalBackfill` 配置块设置，也可以用 `--parent-workers`、`--submission-workers`、
 `--stage-read-workers`、`--iam-workers` 临时覆盖。普通 daemon 不读取这些参数。
 

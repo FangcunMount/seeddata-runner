@@ -425,7 +425,7 @@ func dailySimulationStageEnsureGuardianAccount(ctx context.Context, state *daily
 				if guardianUserID == "" {
 					return toolchain.Decision{}, fmt.Errorf("historical guardian_account stage has empty guardian_user_id")
 				}
-				guardianToken, err = restoreDailySimulationGuardianSession(ctx, state.deps, state.cfg, state.profile)
+				guardianToken, err = restoreDailySimulationGuardianSessionWithLimiter(ctx, state)
 				if err != nil {
 					return toolchain.Decision{}, err
 				}
@@ -1742,6 +1742,21 @@ func restoreDailySimulationGuardianSession(
 	return token, nil
 }
 
+func restoreDailySimulationGuardianSessionWithLimiter(
+	ctx context.Context,
+	state *dailySimulationJourneyState,
+) (string, error) {
+	if state == nil {
+		return "", fmt.Errorf("daily simulation journey state is required")
+	}
+	release, err := acquireDailySimulationMockIAMLimiter(ctx, state.mockIAMLimiter)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	return restoreDailySimulationGuardianSession(ctx, state.deps, state.cfg, state.profile)
+}
+
 func ensureDailySimulationGuardianMockConsumer(
 	ctx context.Context,
 	deps *dependencies,
@@ -1896,6 +1911,10 @@ func shouldRetryDailySimulationIAMLogin(err error) bool {
 		return false
 	}
 	return strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "no such host") ||
+		strings.Contains(message, "temporary failure in name resolution") ||
+		strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "connection reset") ||
 		strings.Contains(message, "too many requests") ||
 		strings.Contains(message, "service unavailable") ||
 		strings.Contains(message, "bad gateway") ||

@@ -224,8 +224,8 @@ sudo systemctl restart seeddata-runner
 
 其中 `dailySimulation` 和 `planSubmit` 是必填段；`api.baseUrl` 也是运行时硬要求。
 
-`historicalBackfill` 只影响有限日期区间的历史命令。默认生产配置使用父场景 16、
-submission 4、stage reader 16、IAM 2 路并发；普通 daemon 继续使用
+`historicalBackfill` 只影响有限日期区间的历史命令。默认生产配置使用父场景 8、
+submission 2、stage reader 4、IAM 1 路并发；普通 daemon 继续使用
 `dailySimulation.workers`、原 IAM limiter 和 JSON submission ledger。完整初始化、恢复和
 ServerA 内网容器步骤见 [docs/historical-backfill.md](./docs/historical-backfill.md)。
 GitHub Actions 的 production 手动部署、审批、status/stop、同 revision 恢复和最终验收见

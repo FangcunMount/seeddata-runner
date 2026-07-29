@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -429,8 +431,93 @@ func TestShouldRetryDailySimulationIAMLogin(t *testing.T) {
 	if !shouldRetryDailySimulationIAMLogin(sdkerrors.ErrServiceUnavailable) {
 		t.Fatalf("expected IAM SDK unavailable error to be retryable")
 	}
+	if !shouldRetryDailySimulationIAMLogin(assertErr("dial tcp: lookup iam-apiserver on 127.0.0.11:53: no such host")) {
+		t.Fatalf("expected Docker DNS failure to be retryable")
+	}
+	if !shouldRetryDailySimulationIAMLogin(assertErr("dial tcp 172.20.0.10:9080: connect: connection refused")) {
+		t.Fatalf("expected connection refusal to be retryable")
+	}
 	if shouldRetryDailySimulationIAMLogin(assertErr("iam login failed: status=401 body=unauthorized")) {
 		t.Fatalf("expected 401 not to be retryable")
+	}
+}
+
+func TestHistoricalGuardianSessionRestoreHonorsIAMLimiter(t *testing.T) {
+	const (
+		jobs  = 8
+		limit = 2
+	)
+	var inFlight atomic.Int64
+	var maximum atomic.Int64
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v2/authn/login" {
+			http.NotFound(w, r)
+			return
+		}
+		calls.Add(1)
+		current := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for {
+			previous := maximum.Load()
+			if current <= previous || maximum.CompareAndSwap(previous, current) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 0,
+			"data": map[string]any{"access_token": "token-1"},
+		})
+	}))
+	defer server.Close()
+
+	state := &dailySimulationJourneyState{
+		deps: &dependencies{
+			Logger: log.New(log.NewOptions()),
+			Config: &seedconfig.Config{
+				Global: seedconfig.GlobalConfig{OrgID: 1},
+				IAM: seedconfig.IAMConfig{
+					LoginURL:     server.URL + "/api/v2/authn/login",
+					MockConsumer: seedconfig.IAMMockConsumerConfig{Enabled: true},
+				},
+			},
+		},
+		cfg: DailySimulationConfig{UserPassword: "DailySim@123"},
+		profile: dailySimulationProfile{
+			GuardianEmail: "guardian@example.com",
+			GuardianPhone: "+8619900000001",
+			RunDate:       time.Date(2025, 1, 1, 0, 0, 0, 0, time.Local),
+		},
+		mockIAMLimiter: make(chan struct{}, limit),
+	}
+
+	start := make(chan struct{})
+	errors := make(chan error, jobs)
+	var workers sync.WaitGroup
+	for index := 0; index < jobs; index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			_, err := restoreDailySimulationGuardianSessionWithLimiter(context.Background(), state)
+			errors <- err
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := calls.Load(); got != jobs {
+		t.Fatalf("login calls=%d, want %d", got, jobs)
+	}
+	if got := maximum.Load(); got != limit {
+		t.Fatalf("maximum IAM login concurrency=%d, want %d", got, limit)
 	}
 }
 

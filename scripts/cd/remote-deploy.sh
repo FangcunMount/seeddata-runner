@@ -15,7 +15,7 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 : "${SEEDDATA_DEPLOY_ROOT:?SEEDDATA_DEPLOY_ROOT is required}"
 : "${SEEDDATA_LOG_DIR:?SEEDDATA_LOG_DIR is required}"
 
-startup_stability_seconds="${SEEDDATA_STARTUP_STABILITY_SECONDS:-15}"
+startup_stability_seconds="${SEEDDATA_STARTUP_STABILITY_SECONDS:-45}"
 case "$startup_stability_seconds" in
   ''|*[!0-9]*)
     echo "SEEDDATA_STARTUP_STABILITY_SECONDS must be a non-negative integer" >&2
