@@ -57,8 +57,9 @@ downstream drain 和严格 stage 验收通过后推进 `verified_through`。因�
 报告处理不会占用父场景或 submission worker；命令退出前仍会统一等待并验收所有 pending。
 单场景 `429/5xx`、网络中断或请求超时会被记录为提交缺口，但不会中断后续日期；
 `submitted_through` 停在第一个缺口，全部日期处理完后才返回汇总错误。配置/身份/payload conflict、
-Bbolt 持久化失败、高水位熔断和全局取消仍立即停止；单日瞬时失败超过父场景数的 5% 也会触发
-系统级熔断，避免下游整体故障时继续放大流量。所有失败都会保留两个游标和 Bbolt pending，
+Bbolt 持久化失败、durable pending 高水位熔断和全局取消仍立即停止。瞬时失败数量不再触发单日
+百分比熔断；提交侧只以 Bbolt 中的 durable pending 是否达到明确安全高水位作为系统级熔断条件。
+所有失败都会保留两个游标和 Bbolt pending，
 修复原因后使用同一批次、相同配置和相同版本恢复：
 
 ```bash

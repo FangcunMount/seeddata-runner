@@ -20,7 +20,6 @@ func TestHistoricalContinuableBatchFailures(t *testing.T) {
 		name      string
 		ctx       context.Context
 		causes    []error
-		batchSize int
 		wantCount int
 		wantOK    bool
 	}{
@@ -28,43 +27,45 @@ func TestHistoricalContinuableBatchFailures(t *testing.T) {
 			name:      "transient HTTP and transport failures continue",
 			ctx:       context.Background(),
 			causes:    []error{errors.New("api error: http_status=503"), errors.New("stream terminated by RST_STREAM with error code: CANCEL")},
-			batchSize: 196,
 			wantCount: 2,
 			wantOK:    true,
 		},
 		{
-			name:      "payload conflict remains fatal",
-			ctx:       context.Background(),
-			causes:    []error{errors.New("api error: http_status=503"), errors.New("historical payload conflict")},
-			batchSize: 196,
+			name:   "payload conflict remains fatal",
+			ctx:    context.Background(),
+			causes: []error{errors.New("api error: http_status=503"), errors.New("historical payload conflict")},
 		},
 		{
-			name:      "high watermark remains fatal",
-			ctx:       context.Background(),
-			causes:    []error{errors.New("historical downstream pending high watermark reached")},
-			batchSize: 196,
+			name:   "high watermark remains fatal",
+			ctx:    context.Background(),
+			causes: []error{errors.New("historical downstream pending high watermark reached")},
 		},
 		{
-			name:      "canceled runner remains fatal",
-			ctx:       canceledContext(),
-			causes:    []error{errors.New("api error: http_status=503")},
-			batchSize: 196,
+			name:   "canceled runner remains fatal",
+			ctx:    canceledContext(),
+			causes: []error{errors.New("api error: http_status=503")},
 		},
 		{
-			name: "transient failure surge opens circuit breaker",
+			name: "observed transient failures continue until durable high watermark",
 			ctx:  context.Background(),
 			causes: []error{
 				errors.New("http_status=503"),
 				errors.New("http_status=503"),
 				errors.New("http_status=503"),
+				errors.New("http_status=503 context deadline exceeded"),
+				errors.New("http_status=503 context deadline exceeded"),
+				errors.New("http_status=503 context deadline exceeded"),
+				errors.New("http_status=503 context deadline exceeded"),
+				errors.New("http_status=503 stream terminated by RST_STREAM with error code: CANCEL"),
 			},
-			batchSize: 40,
+			wantCount: 8,
+			wantOK:    true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := newDailySimulationBatchFailuresError("historical_day", tt.causes)
-			count, ok := historicalContinuableBatchFailures(tt.ctx, err, tt.batchSize)
+			count, ok := historicalContinuableBatchFailures(tt.ctx, err)
 			if count != tt.wantCount || ok != tt.wantOK {
 				t.Fatalf("historicalContinuableBatchFailures()=(%d,%t), want (%d,%t)", count, ok, tt.wantCount, tt.wantOK)
 			}

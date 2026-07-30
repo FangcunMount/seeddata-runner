@@ -24,9 +24,6 @@ import (
 const (
 	historicalTimezone        = "Asia/Shanghai"
 	historicalManifestVersion = 2
-	// Sparse transient failures should not stop a multi-month backfill, while a
-	// service-wide outage still needs a circuit breaker before the next day.
-	historicalTransientFailurePercent = 5
 )
 
 type historicalCutoffKey struct{}
@@ -555,7 +552,7 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 			},
 		})
 		executor.Close()
-		continuableFailures, canContinue := historicalContinuableBatchFailures(ctx, err, count)
+		continuableFailures, canContinue := historicalContinuableBatchFailures(ctx, err)
 		if err == nil {
 			manifest.DailyCounts[dayKey] = count
 		}
@@ -640,7 +637,7 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 	return store.exportJSON(opts.StateDir, opts.BatchID)
 }
 
-func historicalContinuableBatchFailures(ctx context.Context, err error, batchSize int) (int, bool) {
+func historicalContinuableBatchFailures(ctx context.Context, err error) (int, bool) {
 	if err == nil || ctx == nil || ctx.Err() != nil {
 		return 0, false
 	}
@@ -650,10 +647,6 @@ func historicalContinuableBatchFailures(ctx context.Context, err error, batchSiz
 	}
 	causes := batchErr.Causes()
 	if len(causes) == 0 {
-		return 0, false
-	}
-	limit := max(1, (batchSize*historicalTransientFailurePercent+99)/100)
-	if len(causes) > limit {
 		return 0, false
 	}
 	for _, cause := range causes {
