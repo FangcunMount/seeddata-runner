@@ -3,6 +3,7 @@ package dailysim
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,86 @@ import (
 	"github.com/FangcunMount/component-base/pkg/log"
 	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
 )
+
+func TestHistoricalContinuableBatchFailures(t *testing.T) {
+	tests := []struct {
+		name      string
+		ctx       context.Context
+		causes    []error
+		batchSize int
+		wantCount int
+		wantOK    bool
+	}{
+		{
+			name:      "transient HTTP and transport failures continue",
+			ctx:       context.Background(),
+			causes:    []error{errors.New("api error: http_status=503"), errors.New("stream terminated by RST_STREAM with error code: CANCEL")},
+			batchSize: 196,
+			wantCount: 2,
+			wantOK:    true,
+		},
+		{
+			name:      "payload conflict remains fatal",
+			ctx:       context.Background(),
+			causes:    []error{errors.New("api error: http_status=503"), errors.New("historical payload conflict")},
+			batchSize: 196,
+		},
+		{
+			name:      "high watermark remains fatal",
+			ctx:       context.Background(),
+			causes:    []error{errors.New("historical downstream pending high watermark reached")},
+			batchSize: 196,
+		},
+		{
+			name:      "canceled runner remains fatal",
+			ctx:       canceledContext(),
+			causes:    []error{errors.New("api error: http_status=503")},
+			batchSize: 196,
+		},
+		{
+			name: "transient failure surge opens circuit breaker",
+			ctx:  context.Background(),
+			causes: []error{
+				errors.New("http_status=503"),
+				errors.New("http_status=503"),
+				errors.New("http_status=503"),
+			},
+			batchSize: 40,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := newDailySimulationBatchFailuresError("historical_day", tt.causes)
+			count, ok := historicalContinuableBatchFailures(tt.ctx, err, tt.batchSize)
+			if count != tt.wantCount || ok != tt.wantOK {
+				t.Fatalf("historicalContinuableBatchFailures()=(%d,%t), want (%d,%t)", count, ok, tt.wantCount, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestAdvanceHistoricalSubmittedCheckpointDoesNotCrossGap(t *testing.T) {
+	now := time.Date(2026, 7, 30, 1, 2, 3, 0, time.UTC)
+	checkpoint := HistoricalCheckpoint{SubmittedThrough: "2025-01-14"}
+	if advanceHistoricalSubmittedCheckpoint(&checkpoint, "2025-01-16", true, now) {
+		t.Fatal("checkpoint advanced across an earlier submission gap")
+	}
+	if checkpoint.SubmittedThrough != "2025-01-14" {
+		t.Fatalf("checkpoint crossed gap: %+v", checkpoint)
+	}
+	if !advanceHistoricalSubmittedCheckpoint(&checkpoint, "2025-01-15", false, now) {
+		t.Fatal("contiguous checkpoint did not advance")
+	}
+	if checkpoint.SubmittedThrough != "2025-01-15" || !checkpoint.UpdatedAt.Equal(now) {
+		t.Fatalf("unexpected checkpoint after contiguous advance: %+v", checkpoint)
+	}
+}
+
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
 
 func TestHistoricalRangeHas573CompleteNaturalDays(t *testing.T) {
 	location, err := time.LoadLocation(historicalTimezone)

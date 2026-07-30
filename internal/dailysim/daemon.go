@@ -61,6 +61,46 @@ type dailySimulationBatchOptions struct {
 	OnHistoricalPlanTaskFound func(dailySimulationProfile, dailySimulationScenario, historicalseed.Context, HistoricalPlanTaskRecovery) error
 }
 
+// dailySimulationBatchFailuresError distinguishes per-user failures from
+// batch setup, validation, persistence, and cancellation errors. Callers such
+// as the historical runner can inspect every cause without weakening fatal
+// error handling for ordinary daemon batches.
+type dailySimulationBatchFailuresError struct {
+	label  string
+	causes []error
+}
+
+func newDailySimulationBatchFailuresError(label string, causes []error) error {
+	if len(causes) == 0 {
+		return nil
+	}
+	return &dailySimulationBatchFailuresError{
+		label:  strings.TrimSpace(label),
+		causes: append([]error(nil), causes...),
+	}
+}
+
+func (e *dailySimulationBatchFailuresError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s completed with %d failures", e.label, len(e.causes))
+}
+
+func (e *dailySimulationBatchFailuresError) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	return append([]error(nil), e.causes...)
+}
+
+func (e *dailySimulationBatchFailuresError) Causes() []error {
+	if e == nil {
+		return nil
+	}
+	return append([]error(nil), e.causes...)
+}
+
 func selectDailySimulationBatchScenario(
 	scenarios []dailySimulationScenario,
 	scenariosByIndex map[int]dailySimulationScenario,
@@ -452,6 +492,20 @@ func runDailySimulationBatchWithOptions(
 	var failureMu sync.Mutex
 	// 创建每日模拟用户失败列表
 	failures := make([]string, 0, 8)
+	// 保留全部原始错误，供历史回填区分可继续的瞬时失败和必须停止的不变量错误。
+	failureCauses := make([]error, 0, 8)
+	recordFailure := func(summary string, cause error) {
+		if cause == nil {
+			cause = fmt.Errorf("daily simulation user failed without a cause")
+		}
+		counters.addFailure()
+		failureMu.Lock()
+		failureCauses = append(failureCauses, cause)
+		if len(failures) < 8 {
+			failures = append(failures, summary)
+		}
+		failureMu.Unlock()
+	}
 
 	for worker := 0; worker < workers; worker++ {
 		wg.Add(1)
@@ -473,24 +527,21 @@ func runDailySimulationBatchWithOptions(
 					restoredTestee, restoreErr := options.RestoreExistingTestee(profile, scenario)
 					if restoreErr != nil {
 						deps.Logger.Warnw("Daily simulation historical testee restore failed", "index", profile.Index, "run_date", runDate.Format("2006-01-02"), "error", restoreErr.Error())
-						counters.addFailure()
-						failureMu.Lock()
-						if len(failures) < 8 {
-							failures = append(failures, fmt.Sprintf("idx=%d guardian=%s child=%s journey=%s err=%v", profile.Index, profile.GuardianEmail, profile.ChildName, dailySimulationJourneySubmitAnswer, restoreErr))
-						}
-						failureMu.Unlock()
+						recordFailure(
+							fmt.Sprintf("idx=%d guardian=%s child=%s journey=%s err=%v", profile.Index, profile.GuardianEmail, profile.ChildName, dailySimulationJourneySubmitAnswer, restoreErr),
+							restoreErr,
+						)
 						progress.Increment()
 						continue
 					}
 					existingTestee = restoredTestee
 				}
 				if options.ReuseOnly && existingTestee == nil {
-					counters.addFailure()
-					failureMu.Lock()
-					if len(failures) < 8 {
-						failures = append(failures, fmt.Sprintf("idx=%d guardian=%s child=%s clinician=%s journey=%s err=%s", profile.Index, profile.GuardianEmail, profile.ChildName, "", dailySimulationJourneySubmitAnswer, "after-hours reuse batch resolved missing existing testee"))
-					}
-					failureMu.Unlock()
+					missingErr := fmt.Errorf("after-hours reuse batch resolved missing existing testee")
+					recordFailure(
+						fmt.Sprintf("idx=%d guardian=%s child=%s clinician=%s journey=%s err=%s", profile.Index, profile.GuardianEmail, profile.ChildName, "", dailySimulationJourneySubmitAnswer, missingErr),
+						missingErr,
+					)
 					progress.Increment()
 					continue
 				}
@@ -554,12 +605,10 @@ func runDailySimulationBatchWithOptions(
 						"journey_target", outcome.JourneyTarget,
 						"error", simErr.Error(),
 					)
-					counters.addFailure()
-					failureMu.Lock()
-					if len(failures) < 8 {
-						failures = append(failures, fmt.Sprintf("idx=%d guardian=%s child=%s clinician=%s journey=%s err=%v", profile.Index, profile.GuardianEmail, profile.ChildName, scenario.ClinicianID, outcome.JourneyTarget, simErr))
-					}
-					failureMu.Unlock()
+					recordFailure(
+						fmt.Sprintf("idx=%d guardian=%s child=%s clinician=%s journey=%s err=%v", profile.Index, profile.GuardianEmail, profile.ChildName, scenario.ClinicianID, outcome.JourneyTarget, simErr),
+						simErr,
+					)
 				} else {
 					counters.add(outcome)
 				}
@@ -607,10 +656,7 @@ func runDailySimulationBatchWithOptions(
 	if len(failures) > 0 {
 		deps.Logger.Warnw("Daily simulation failure samples", "count", len(failures), "samples", failures)
 	}
-	if atomic.LoadInt64(&counters.failed) > 0 {
-		return fmt.Errorf("%s completed with %d failures", progressLabel, atomic.LoadInt64(&counters.failed))
-	}
-	return nil
+	return newDailySimulationBatchFailuresError(progressLabel, failureCauses)
 }
 
 func newDailySimulationMockIAMLimiter(cfg IAMConfig) chan struct{} {

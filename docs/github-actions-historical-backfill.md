@@ -514,7 +514,7 @@ gh run watch <original-deploy-run-id> \
 | IAM 登录后 QS 返回 403 | 确认 IAM 在 QS 启动前可用、QS Token Verifier 已注入、JWT 含正确 Org |
 | Report/Outcome 长时间缺失 | 检查 Evaluation/Interpretation Worker、Mongo/MySQL Outbox 与队列积压；当天不会写 checkpoint |
 | payload/version conflict | 立即停止，比较冻结配置、manifest 和服务端 stage；不能换 ID 继续 |
-| unit `Result=failed` | 先看 runner 日志和 failed attempt，修复后按第 8 节用原 revision 恢复 |
+| unit `Result=failed` | 瞬时单场景错误会继续跑完剩余日期，并在最后汇总失败；先看 runner 日志和 failed attempt，修复后按第 8 节用原 revision 恢复 |
 
 以下任一情况应立即停止，不进入下一天：
 

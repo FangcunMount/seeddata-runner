@@ -3,6 +3,7 @@ package dailysim
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +13,22 @@ import (
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 	seedapi "github.com/FangcunMount/seeddata-runner/internal/seedapi"
 )
+
+func TestDailySimulationBatchFailuresErrorPreservesEveryCause(t *testing.T) {
+	first := errors.New("http_status=503")
+	second := errors.New("connection reset by peer")
+	err := newDailySimulationBatchFailuresError("historical_day", []error{first, second})
+	if err == nil || err.Error() != "historical_day completed with 2 failures" {
+		t.Fatalf("unexpected batch error: %v", err)
+	}
+	if !errors.Is(err, first) || !errors.Is(err, second) {
+		t.Fatalf("batch error did not preserve causes: %v", err)
+	}
+	var batchErr *dailySimulationBatchFailuresError
+	if !errors.As(err, &batchErr) || len(batchErr.Causes()) != 2 {
+		t.Fatalf("batch error causes are not inspectable: %v", err)
+	}
+}
 
 func TestResolveDailySimulationBatchCountStableRange(t *testing.T) {
 	cfg := DailySimulationConfig{

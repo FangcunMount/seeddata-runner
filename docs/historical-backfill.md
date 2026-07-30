@@ -55,8 +55,11 @@ tmp/bin/seeddata historical-backfill \
 checkpoint 分为两个游标：当天全部提交任务已完成后推进 `submitted_through`，最终全批次
 downstream drain 和严格 stage 验收通过后推进 `verified_through`。因此提交可以持续向前，
 报告处理不会占用父场景或 submission worker；命令退出前仍会统一等待并验收所有 pending。
-任何提交失败、高水位熔断或最终验收失败都会保留两个游标和 Bbolt pending，修复原因后使用
-同一批次、相同配置和相同版本恢复：
+单场景 `429/5xx`、网络中断或请求超时会被记录为提交缺口，但不会中断后续日期；
+`submitted_through` 停在第一个缺口，全部日期处理完后才返回汇总错误。配置/身份/payload conflict、
+Bbolt 持久化失败、高水位熔断和全局取消仍立即停止；单日瞬时失败超过父场景数的 5% 也会触发
+系统级熔断，避免下游整体故障时继续放大流量。所有失败都会保留两个游标和 Bbolt pending，
+修复原因后使用同一批次、相同配置和相同版本恢复：
 
 ```bash
 tmp/bin/seeddata historical-backfill \
@@ -86,7 +89,8 @@ entry、Plan 或非法 journey identity 等其他冻结身份冲突仍会立即�
 映射为 `0..当日人数-1` 的 worker job index，不会改写持久身份。
 
 运行中每 15 秒输出当前自然日、父场景进度、已发现/完成 submission、吞吐、
-submission in-flight、失败数和 ETA。自然日仍然串行推进 `submitted_through`；
+submission in-flight、失败数和 ETA。自然日仍然串行执行；没有提交缺口时连续推进
+`submitted_through`，出现缺口后仍可处理和持久化后续日期，但游标不会越过缺口。
 `verified_through` 只代表已经完成严格 stage 验收的连续范围，不能用提交游标替代最终完成判定。
 
 ## ServerA 内网一次性容器

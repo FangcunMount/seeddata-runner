@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"os"
@@ -23,6 +24,9 @@ import (
 const (
 	historicalTimezone        = "Asia/Shanghai"
 	historicalManifestVersion = 2
+	// Sparse transient failures should not stop a multi-month backfill, while a
+	// service-wide outage still needs a circuit breaker before the next day.
+	historicalTransientFailurePercent = 5
 )
 
 type historicalCutoffKey struct{}
@@ -412,6 +416,9 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 		start = completed.AddDate(0, 0, 1)
 	}
 	var manifestMu sync.Mutex
+	submissionGap := false
+	transientFailureDays := 0
+	transientScenarioFailures := 0
 	ctx = withHistoricalCutoff(ctx, to.AddDate(0, 0, 1))
 	for day := start; !day.After(to); day = day.AddDate(0, 0, 1) {
 		dayKey := day.Format("2006-01-02")
@@ -548,6 +555,7 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 			},
 		})
 		executor.Close()
+		continuableFailures, canContinue := historicalContinuableBatchFailures(ctx, err, count)
 		if err == nil {
 			manifest.DailyCounts[dayKey] = count
 		}
@@ -559,15 +567,30 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 			return saveErr
 		}
 		if err != nil {
-			return fmt.Errorf("historical backfill stopped on %s: %w", dayKey, err)
+			if !canContinue {
+				return fmt.Errorf("historical backfill stopped on %s: %w", dayKey, err)
+			}
+			submissionGap = true
+			transientFailureDays++
+			transientScenarioFailures += continuableFailures
+			deps.Logger.Warnw("Historical day completed with transient scenario failures; continuing",
+				"business_date", dayKey,
+				"failed_scenarios", continuableFailures,
+				"submitted_through", checkpoint.SubmittedThrough,
+				"continue_through", opts.To,
+			)
+			if exportErr := store.exportJSON(opts.StateDir, opts.BatchID); exportErr != nil {
+				return exportErr
+			}
+			continue
 		}
-		checkpoint.SubmittedThrough = dayKey
-		checkpoint.UpdatedAt = time.Now().UTC()
 		if err := store.putDayState(dayKey, "submitted"); err != nil {
 			return err
 		}
-		if err := store.putCheckpoint(checkpoint); err != nil {
-			return err
+		if advanceHistoricalSubmittedCheckpoint(&checkpoint, dayKey, submissionGap, time.Now().UTC()) {
+			if err := store.putCheckpoint(checkpoint); err != nil {
+				return err
+			}
 		}
 		if err := store.exportJSON(opts.StateDir, opts.BatchID); err != nil {
 			return err
@@ -578,6 +601,17 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 	cancelDrain()
 	if drainErr != nil {
 		return drainErr
+	}
+	if transientScenarioFailures > 0 {
+		if err := store.exportJSON(opts.StateDir, opts.BatchID); err != nil {
+			return err
+		}
+		return fmt.Errorf(
+			"historical backfill processed all dates with %d transient scenario failures across %d days; resume from submitted_through %q",
+			transientScenarioFailures,
+			transientFailureDays,
+			checkpoint.SubmittedThrough,
+		)
 	}
 	stages, err := loadHistoricalSeedStages(ctx, deps.APIClient, opts.BatchID)
 	if err != nil {
@@ -604,6 +638,93 @@ func RunHistoricalBackfill(ctx context.Context, deps *Dependencies, opts Histori
 		return err
 	}
 	return store.exportJSON(opts.StateDir, opts.BatchID)
+}
+
+func historicalContinuableBatchFailures(ctx context.Context, err error, batchSize int) (int, bool) {
+	if err == nil || ctx == nil || ctx.Err() != nil {
+		return 0, false
+	}
+	var batchErr *dailySimulationBatchFailuresError
+	if !errors.As(err, &batchErr) {
+		return 0, false
+	}
+	causes := batchErr.Causes()
+	if len(causes) == 0 {
+		return 0, false
+	}
+	limit := max(1, (batchSize*historicalTransientFailurePercent+99)/100)
+	if len(causes) > limit {
+		return 0, false
+	}
+	for _, cause := range causes {
+		if !isHistoricalTransientScenarioError(cause) {
+			return 0, false
+		}
+	}
+	return len(causes), true
+}
+
+func advanceHistoricalSubmittedCheckpoint(
+	checkpoint *HistoricalCheckpoint,
+	day string,
+	blockedByEarlierGap bool,
+	updatedAt time.Time,
+) bool {
+	if checkpoint == nil || blockedByEarlierGap || strings.TrimSpace(day) == "" {
+		return false
+	}
+	checkpoint.SubmittedThrough = strings.TrimSpace(day)
+	checkpoint.UpdatedAt = updatedAt
+	return true
+}
+
+func isHistoricalTransientScenarioError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if message == "" {
+		return false
+	}
+	patterns := []string{
+		"context deadline exceeded",
+		"client.timeout exceeded",
+		"http_status=408",
+		"http_status=429",
+		"http_status=500",
+		"http_status=502",
+		"http_status=503",
+		"http_status=504",
+		"status=408",
+		"status=429",
+		"status=500",
+		"status=502",
+		"status=503",
+		"status=504",
+		"rst_stream",
+		"stream terminated",
+		"connection reset",
+		"connection refused",
+		"broken pipe",
+		"unexpected eof",
+		"tls handshake timeout",
+		"timeout awaiting headers",
+		"timeout awaiting response headers",
+		"i/o timeout",
+		"temporary failure in name resolution",
+		"no such host",
+		"server misbehaving",
+		"too many requests",
+		"service unavailable",
+		"bad gateway",
+		"gateway timeout",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(message, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func historicalManifestContainsDay(manifest HistoricalManifest, day string) bool {
