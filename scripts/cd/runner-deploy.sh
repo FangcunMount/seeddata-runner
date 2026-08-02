@@ -37,6 +37,7 @@ cleanup_remote() {
 }
 trap cleanup_remote EXIT
 
+"${SSH[@]}" "$RUNNER_SSH_ALIAS" "sudo -n true"
 "${SSH[@]}" "$RUNNER_SSH_ALIAS" "umask 077 && mkdir -p '$REMOTE_DIR'"
 "${SCP[@]}" \
   scripts/cd/remote-common.sh \
@@ -51,8 +52,8 @@ if [ "$OPERATION" = "deploy" ]; then
   "${SCP[@]}" "$DEPLOY_PACKAGE" "${RUNNER_SSH_ALIAS}:${REMOTE_PACKAGE}"
   "${SSH[@]}" "$RUNNER_SSH_ALIAS" "gzip -t '$REMOTE_PACKAGE'"
   "${SSH[@]}" "$RUNNER_SSH_ALIAS" \
-    "'$REMOTE_DIR/remote-deploy.sh' --package '$REMOTE_PACKAGE' --sha '$DEPLOY_SHA'"
+    "sudo -n -- '$REMOTE_DIR/remote-deploy.sh' --package '$REMOTE_PACKAGE' --sha '$DEPLOY_SHA'"
 else
   "${SSH[@]}" "$RUNNER_SSH_ALIAS" \
-    "'$REMOTE_DIR/remote-rollback.sh' --backup '$ROLLBACK_BACKUP'"
+    "sudo -n -- '$REMOTE_DIR/remote-rollback.sh' --backup '$ROLLBACK_BACKUP'"
 fi

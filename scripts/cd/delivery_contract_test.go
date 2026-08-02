@@ -88,6 +88,18 @@ func TestSSHSetupPinsTheProductionHostKey(t *testing.T) {
 	}
 }
 
+func TestRunnerUsesNonInteractiveSudoForPrivilegedOperations(t *testing.T) {
+	runner := readRepositoryFile(t, "scripts/cd/runner-deploy.sh")
+	requireContains(t, runner,
+		`"${SSH[@]}" "$RUNNER_SSH_ALIAS" "sudo -n true"`,
+		`"sudo -n -- '$REMOTE_DIR/remote-deploy.sh' --package '$REMOTE_PACKAGE' --sha '$DEPLOY_SHA'"`,
+		`"sudo -n -- '$REMOTE_DIR/remote-rollback.sh' --backup '$ROLLBACK_BACKUP'"`,
+	)
+	if count := strings.Count(runner, "sudo -n --"); count != 2 {
+		t.Fatalf("deploy and rollback must each use non-interactive sudo; got %d privileged invocations", count)
+	}
+}
+
 func TestRemoteDeployPreservesProductionStateAndSupportsImmediateRollback(t *testing.T) {
 	common := readRepositoryFile(t, "scripts/cd/remote-common.sh")
 	deploy := readRepositoryFile(t, "scripts/cd/remote-deploy.sh")
