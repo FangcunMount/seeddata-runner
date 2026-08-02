@@ -4,8 +4,6 @@ set -Eeuo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=remote-common.sh
 . "$SCRIPT_DIR/remote-common.sh"
-# shellcheck source=retire-removed-config.sh
-. "$SCRIPT_DIR/retire-removed-config.sh"
 
 PACKAGE_FILE=""
 DEPLOY_SHA=""
@@ -27,7 +25,6 @@ BACKUP_PATH=""
 EXPECTED_BINARY_SHA=""
 deployed=0
 rollback_allowed=0
-config_restore_allowed=0
 
 cleanup() {
   rm -rf "$STAGE_DIR"
@@ -53,11 +50,6 @@ rollback_immediate() {
 handle_error() {
   local rc=$?
   trap - ERR
-  if [ "$config_restore_allowed" -eq 1 ]; then
-    if ! restore_removed_config_block; then
-      echo "Restoring the production config also failed; immediate operator attention is required" >&2
-    fi
-  fi
   if [ "$deployed" -eq 1 ] && [ "$rollback_allowed" -eq 1 ]; then
     if ! rollback_immediate; then
       echo "Automatic binary rollback also failed; service requires immediate operator attention" >&2
@@ -89,12 +81,7 @@ validate_sha256 "$EXPECTED_BINARY_SHA" || fail "deployment package contains an i
 printf '%s  bin/seeddata\n' "$EXPECTED_BINARY_SHA" | (cd "$STAGE_DIR" && sha256sum -c -)
 chmod 0755 "$STAGE_DIR/bin/seeddata"
 
-retire_removed_config_block "$STAGE_DIR"
-if [ "$CONFIG_RETIREMENT_CHANGED" -eq 1 ]; then
-  config_restore_allowed=1
-fi
 run_config_preflight "$STAGE_DIR/bin/seeddata" "$SCRIPT_DIR/seeddata-runner-preflight.service"
-config_restore_allowed=0
 
 deploy_started_epoch=$(date +%s)
 backup_current_binary "deploy"
@@ -129,7 +116,7 @@ fi
 RECENT_LOG=$(mktemp "/tmp/seeddata-deploy-log.XXXXXX")
 trap 'rm -f "$RECENT_LOG"; cleanup' EXIT
 sudo_journalctl -u "$SERVICE" --since "@${deploy_started_epoch}" --no-pager -o cat >"$RECENT_LOG"
-if grep -E 'Load seeddata config failed|Initialize seeddata dependencies failed|Seeddata supervisor exited with error|Daily simulation daemon (run|after-hours catchup) failed' "$RECENT_LOG"; then
+if journal_contains_runtime_failure "$RECENT_LOG"; then
   fail "post-deploy journal contains a startup or immediate runtime failure"
 fi
 

@@ -50,10 +50,6 @@ sudo_sha256sum() {
   sudo -n /usr/bin/sha256sum "$@"
 }
 
-sudo_stat() {
-  sudo -n /usr/bin/stat "$@"
-}
-
 sudo_test() {
   sudo -n /usr/bin/test "$@"
 }
@@ -89,7 +85,6 @@ seeddata_cd_init() {
     /usr/bin/ls \
     /usr/bin/rsync \
     /usr/bin/sha256sum \
-    /usr/bin/stat \
     /usr/bin/systemctl \
     /usr/bin/test; do
     sudo_test -x "$command_path" || fail "required privileged command is missing: $command_path"
@@ -239,6 +234,18 @@ service_restart_count() {
     *[!0-9]*|'') fail "service NRestarts is not numeric: $value"; return 1 ;;
   esac
   printf '%s\n' "$value"
+}
+
+journal_contains_runtime_failure() {
+  local log_file="$1"
+  if grep -E 'Load seeddata config failed|Initialize seeddata dependencies failed|Daily simulation daemon (run|after-hours catchup) failed' "$log_file"; then
+    return 0
+  fi
+  if grep -F 'Seeddata supervisor exited with error' "$log_file" |
+    grep -Ev '"error":[[:space:]]*"context canceled"'; then
+    return 0
+  fi
+  return 1
 }
 
 write_deployment_receipt() {
