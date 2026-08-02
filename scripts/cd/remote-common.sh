@@ -50,6 +50,10 @@ sudo_sha256sum() {
   sudo -n /usr/bin/sha256sum "$@"
 }
 
+sudo_stat() {
+  sudo -n /usr/bin/stat "$@"
+}
+
 sudo_test() {
   sudo -n /usr/bin/test "$@"
 }
@@ -85,6 +89,7 @@ seeddata_cd_init() {
     /usr/bin/ls \
     /usr/bin/rsync \
     /usr/bin/sha256sum \
+    /usr/bin/stat \
     /usr/bin/systemctl \
     /usr/bin/test; do
     sudo_test -x "$command_path" || fail "required privileged command is missing: $command_path"

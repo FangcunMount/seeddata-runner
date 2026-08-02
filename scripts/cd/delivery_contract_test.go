@@ -96,6 +96,7 @@ func TestRunnerUsesExistingNopasswdPolicyWithoutElevatingScripts(t *testing.T) {
 		`"'$REMOTE_DIR/remote-deploy.sh' --package '$REMOTE_PACKAGE' --sha '$DEPLOY_SHA'"`,
 		`"'$REMOTE_DIR/remote-rollback.sh' --backup '$ROLLBACK_BACKUP'"`,
 		"scripts/cd/seeddata-runner-preflight.service",
+		"scripts/cd/retire-removed-config.sh",
 	)
 	for _, forbidden := range []string{"sudo -S", "SUDO_PASSWORD", "RUNNER_SUDO_PASSWORD", "SVRA_SUDO_PASSWORD"} {
 		if strings.Contains(runner, forbidden) {
@@ -157,6 +158,7 @@ func TestRemoteScriptsOnlyElevateAllowlistedCommands(t *testing.T) {
 		"/usr/bin/ls":         true,
 		"/usr/bin/rsync":      true,
 		"/usr/bin/sha256sum":  true,
+		"/usr/bin/stat":       true,
 		"/usr/bin/systemctl":  true,
 		"/usr/bin/test":       true,
 		"/usr/bin/true":       true,
@@ -168,6 +170,7 @@ func TestRemoteScriptsOnlyElevateAllowlistedCommands(t *testing.T) {
 		"scripts/cd/remote-common.sh",
 		"scripts/cd/remote-deploy.sh",
 		"scripts/cd/remote-rollback.sh",
+		"scripts/cd/retire-removed-config.sh",
 	} {
 		body := readRepositoryFile(t, path)
 		all.WriteString(body)
@@ -261,6 +264,108 @@ func TestPreflightUnitUsesTheProductionRuntimeContract(t *testing.T) {
 	)
 }
 
+func TestRemovedConfigMigrationOnlyDeletesTheSelectedTopLevelBlock(t *testing.T) {
+	root := repositoryRoot(t)
+	script := filepath.Join(root, "scripts/cd/retire-removed-config.sh")
+	keyCommand := exec.Command("bash", "-c", `. "$1"; printf '%s' "$RETIRED_CONFIG_KEY"`, "key", script)
+	keyOutput, err := keyCommand.CombinedOutput()
+	if err != nil {
+		t.Fatalf("read retired key: %v\n%s", err, keyOutput)
+	}
+	key := string(keyOutput)
+	if key == "" {
+		t.Fatal("retired key is empty")
+	}
+
+	tempDir := t.TempDir()
+	source := filepath.Join(tempDir, "source.yaml")
+	destination := filepath.Join(tempDir, "destination.yaml")
+	fixture := "daily:\n  enabled: true\n\n" + key + ":\n  workers: 8\n  nested:\n    value: keep-out\n\nplan:\n  enabled: true\n"
+	if err := os.WriteFile(source, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("bash", "-c", `. "$1"; strip_removed_config_block "$2" "$3"`, "strip", script, source, destination)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("strip removed config block: %v\n%s", err, output)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "daily:\n  enabled: true\n\nplan:\n  enabled: true\n"
+	if string(got) != want {
+		t.Fatalf("unexpected migrated config:\n%s", got)
+	}
+
+	liveConfig := filepath.Join(tempDir, "live.yaml")
+	backupDir := filepath.Join(tempDir, "backups")
+	workDir := filepath.Join(tempDir, "work")
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(liveConfig, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	common := filepath.Join(root, "scripts/cd/remote-common.sh")
+	migrate := exec.Command("bash", "-c", `
+. "$1"
+. "$2"
+CONFIG_FILE="$3"
+CONFIG_RETIREMENT_BACKUP_DIR="$4"
+sudo_grep() { grep "$@"; }
+sudo_stat() { printf '600 %s %s\n' "$(id -u)" "$(id -g)"; }
+sudo_install() { install "$@"; }
+binary_sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
+retire_removed_config_block "$5"
+printf '%s\n%s\n' "$CONFIG_RETIREMENT_CHANGED" "$CONFIG_RETIREMENT_BACKUP"
+`, "migrate", common, script, liveConfig, backupDir, workDir)
+	migrationOutput, err := migrate.CombinedOutput()
+	if err != nil {
+		t.Fatalf("migrate production config: %v\n%s", err, migrationOutput)
+	}
+	lines := strings.Split(strings.TrimSpace(string(migrationOutput)), "\n")
+	if len(lines) < 3 || lines[len(lines)-2] != "1" {
+		t.Fatalf("migration did not report a changed config:\n%s", migrationOutput)
+	}
+	backupPath := lines[len(lines)-1]
+	backup, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("read config backup: %v", err)
+	}
+	if string(backup) != fixture {
+		t.Fatal("config backup did not preserve the original bytes")
+	}
+	migrated, err := os.ReadFile(liveConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(migrated) != want {
+		t.Fatalf("live config was not migrated:\n%s", migrated)
+	}
+	restore := exec.Command("bash", "-c", `
+. "$1"
+. "$2"
+CONFIG_FILE="$3"
+CONFIG_RETIREMENT_CHANGED=1
+CONFIG_RETIREMENT_BACKUP="$4"
+CONFIG_RETIREMENT_MODE=600
+CONFIG_RETIREMENT_UID="$(id -u)"
+CONFIG_RETIREMENT_GID="$(id -g)"
+sudo_install() { install "$@"; }
+restore_removed_config_block
+`, "restore", common, script, liveConfig, backupPath)
+	if output, err := restore.CombinedOutput(); err != nil {
+		t.Fatalf("restore production config: %v\n%s", err, output)
+	}
+	restored, err := os.ReadFile(liveConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != fixture {
+		t.Fatal("config restore did not reproduce the original bytes")
+	}
+}
+
 func TestCDShellScriptsParse(t *testing.T) {
 	root := repositoryRoot(t)
 	for _, path := range []string{
@@ -270,6 +375,7 @@ func TestCDShellScriptsParse(t *testing.T) {
 		"scripts/cd/remote-common.sh",
 		"scripts/cd/remote-deploy.sh",
 		"scripts/cd/remote-rollback.sh",
+		"scripts/cd/retire-removed-config.sh",
 	} {
 		path := path
 		t.Run(filepath.Base(path), func(t *testing.T) {
