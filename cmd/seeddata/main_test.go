@@ -19,6 +19,9 @@ func TestParseCLIOptionsDefaults(t *testing.T) {
 	if opts.verbose {
 		t.Fatalf("expected verbose=false by default")
 	}
+	if opts.checkConfig {
+		t.Fatalf("expected check-config=false by default")
+	}
 }
 
 func TestParseCLIOptionsRejectsRetiredCommandsFlagsAndPositionals(t *testing.T) {
@@ -60,7 +63,7 @@ func decodeRetiredCLIInput(t *testing.T, encoded string) string {
 }
 
 func TestParseCLIOptionsOverrides(t *testing.T) {
-	opts, err := parseCLIOptions([]string{"--config", "/tmp/seeddata.yaml", "--verbose"})
+	opts, err := parseCLIOptions([]string{"--config", "/tmp/seeddata.yaml", "--verbose", "--check-config"})
 	if err != nil {
 		t.Fatalf("parse cli options: %v", err)
 	}
@@ -69,6 +72,9 @@ func TestParseCLIOptionsOverrides(t *testing.T) {
 	}
 	if !opts.verbose {
 		t.Fatalf("expected verbose=true")
+	}
+	if !opts.checkConfig {
+		t.Fatalf("expected check-config=true")
 	}
 }
 

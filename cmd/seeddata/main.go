@@ -13,8 +13,9 @@ import (
 )
 
 type cliOptions struct {
-	configPath string
-	verbose    bool
+	configPath  string
+	verbose     bool
+	checkConfig bool
 }
 
 func main() {
@@ -29,6 +30,10 @@ func main() {
 	if err != nil {
 		logger.Errorw("Load seeddata config failed", "config", opts.configPath, "error", err.Error())
 		os.Exit(1)
+	}
+	if opts.checkConfig {
+		logger.Infow("Seeddata configuration check passed", "config", opts.configPath)
+		return
 	}
 
 	ctx, cancel := seedruntime.NewSignalContext()
@@ -51,6 +56,7 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 	fs := flag.NewFlagSet("seeddata", flag.ContinueOnError)
 	fs.StringVar(&opts.configPath, "config", "./configs/seeddata.yaml", "path to seeddata config yaml")
 	fs.BoolVar(&opts.verbose, "verbose", false, "enable verbose logging")
+	fs.BoolVar(&opts.checkConfig, "check-config", false, "validate configuration and exit without starting daemons")
 	if err := fs.Parse(args); err != nil {
 		return cliOptions{}, err
 	}

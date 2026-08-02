@@ -176,6 +176,29 @@ sudo systemctl status seeddata-runner --no-pager
 sudo journalctl -u seeddata-runner -n 200 --no-pager
 ```
 
+## 生产自动 CD
+
+`.github/workflows/cd.yml` 在 `main` 的 `CI` 成功后构建对应精确 Git SHA 的 Linux amd64 静态二进制，并通过 `production` Environment 发布到 serverA。生产 Environment 建议先启用 required reviewer；批准后无需再登录服务器执行构建或替换。
+
+CD 锁定以下生产契约：
+
+- `seeddata-runner.service`
+- `WorkingDirectory=/root/workspace/golang/src/github.com/fangcun-mount/seeddata-runner`
+- `ExecStart=/root/workspace/golang/src/github.com/fangcun-mount/seeddata-runner/bin/seeddata --config /root/workspace/golang/src/github.com/fangcun-mount/seeddata-runner/configs/seeddata.yaml`
+- `EnvironmentFile=/etc/default/seeddata-runner`
+- `User=root`、`Restart=always`
+
+发布只原子替换 `bin/seeddata`，不会执行远端 `git pull`，也不会安装或覆盖生产配置、EnvironmentFile 和 `.seeddata-cache`。候选二进制先通过 systemd 使用真实 WorkingDirectory、EnvironmentFile 和配置文件执行 `--check-config`；替换后校验 systemd MainPID 对应的 `/proc/<pid>/exe` SHA-256。
+
+每次发布前，旧二进制备份到 `/opt/backups/seeddata-runner/deployments/<timestamp>-<sha-prefix>-deploy/`。如果新二进制在启动校验完成前失败，CD 自动恢复旧二进制；如果 supervisor 已开始业务执行，则保留新二进制和持久状态供排查，不自动回滚 `.seeddata-cache`。
+
+手动发布或回滚使用 `Production Deploy` Workflow：
+
+- `operation=deploy`：可留空 `deploy_sha` 使用所选分支当前 SHA，或填写完整 40 位 SHA。
+- `operation=rollback`：`rollback_backup=latest` 恢复最新二进制备份，也可填写发布日志中输出的备份目录 basename。
+
+回滚只恢复二进制，不恢复配置、EnvironmentFile、调度状态或提交账本。CD 所需的组织配置为 `SVRA_HOST`、`SVRA_USERNAME`、`SVRA_SSH_PORT`、`SVRA_SSH_FINGERPRINT`，以及 `SVR_MINI_SSH_KEY` 或 `SVRA_SSH_KEY`；SSH host key 必须与配置的 SHA-256 指纹匹配。
+
 ## 当前日期单用户验收
 
 使用临时配置执行完整每日闭环时，建议：

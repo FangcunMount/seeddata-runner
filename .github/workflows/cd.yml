@@ -1,0 +1,206 @@
+name: Production Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Deploy the selected SHA or roll back the production binary'
+        required: true
+        type: choice
+        default: deploy
+        options:
+          - deploy
+          - rollback
+      deploy_sha:
+        description: 'Optional 40-character Git SHA for a manual deploy'
+        required: false
+        type: string
+        default: ''
+      rollback_backup:
+        description: 'Rollback backup directory basename, or latest'
+        required: false
+        type: string
+        default: latest
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seeddata-production-deploy
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: '1.25.9'
+  GOTOOLCHAIN: go1.25.9
+  DEPLOY_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.event.inputs.deploy_sha || github.sha }}
+  BUILD_TIME: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.updated_at || github.event.repository.updated_at }}
+
+jobs:
+  package:
+    name: Build Immutable Linux Package
+    if: |
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main') ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.event.inputs.operation == 'deploy')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout successful CI revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Verify manually selected revision
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          go mod verify
+          go vet ./...
+          go test ./...
+
+      - name: Build and verify package
+        env:
+          DEPLOY_SHA: ${{ env.DEPLOY_SHA }}
+          BUILD_TIME: ${{ env.BUILD_TIME }}
+        run: bash scripts/cd/build-package.sh
+
+      - name: Upload deployment package
+        uses: actions/upload-artifact@v4
+        with:
+          name: seeddata-runner-linux-amd64-${{ env.DEPLOY_SHA }}
+          path: dist/seeddata-runner-linux-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  deploy:
+    name: Deploy to ServerA
+    needs: [package]
+    if: needs.package.result == 'success'
+    runs-on:
+      group: qlume
+      labels: [self-hosted, macOS, ARM64, ops]
+    timeout-minutes: 10
+    environment:
+      name: production
+    steps:
+      - name: Checkout deployment scripts
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          fetch-depth: 1
+
+      - name: Download deployment package
+        uses: actions/download-artifact@v4
+        with:
+          name: seeddata-runner-linux-amd64-${{ env.DEPLOY_SHA }}
+          path: dist
+
+      - name: Setup pinned SSH connection
+        env:
+          RUNNER_SSH_KEY: ${{ secrets.SVR_MINI_SSH_KEY || secrets.SVRA_SSH_KEY }}
+          RUNNER_SSH_HOST: ${{ vars.SVRA_HOST }}
+          RUNNER_SSH_USER: ${{ vars.SVRA_USERNAME }}
+          RUNNER_SSH_PORT: ${{ vars.SVRA_SSH_PORT || 22 }}
+          RUNNER_SSH_FINGERPRINT: ${{ vars.SVRA_SSH_FINGERPRINT }}
+          RUNNER_SSH_ALIAS: seeddata-production
+          EXPECTED_HOSTNAME: serverA
+        run: bash scripts/cd/setup-runner-ssh.sh
+
+      - name: Deploy and verify systemd service
+        env:
+          OPERATION: deploy
+          DEPLOY_SHA: ${{ env.DEPLOY_SHA }}
+          DEPLOY_PACKAGE: dist/seeddata-runner-linux-amd64.tar.gz
+          RUNNER_SSH_ALIAS: seeddata-production
+        run: bash scripts/cd/runner-deploy.sh
+
+      - name: Cleanup SSH material
+        if: always()
+        run: |
+          if [ -n "${RUNNER_SSH_DIR:-}" ] && [ -d "$RUNNER_SSH_DIR" ]; then
+            rm -rf -- "$RUNNER_SSH_DIR"
+          fi
+
+  rollback:
+    name: Roll Back Production Binary
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'rollback'
+    runs-on:
+      group: qlume
+      labels: [self-hosted, macOS, ARM64, ops]
+    timeout-minutes: 10
+    environment:
+      name: production
+    steps:
+      - name: Checkout rollback scripts
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Setup pinned SSH connection
+        env:
+          RUNNER_SSH_KEY: ${{ secrets.SVR_MINI_SSH_KEY || secrets.SVRA_SSH_KEY }}
+          RUNNER_SSH_HOST: ${{ vars.SVRA_HOST }}
+          RUNNER_SSH_USER: ${{ vars.SVRA_USERNAME }}
+          RUNNER_SSH_PORT: ${{ vars.SVRA_SSH_PORT || 22 }}
+          RUNNER_SSH_FINGERPRINT: ${{ vars.SVRA_SSH_FINGERPRINT }}
+          RUNNER_SSH_ALIAS: seeddata-production
+          EXPECTED_HOSTNAME: serverA
+        run: bash scripts/cd/setup-runner-ssh.sh
+
+      - name: Restore selected binary backup
+        env:
+          OPERATION: rollback
+          ROLLBACK_BACKUP: ${{ github.event.inputs.rollback_backup || 'latest' }}
+          RUNNER_SSH_ALIAS: seeddata-production
+        run: bash scripts/cd/runner-deploy.sh
+
+      - name: Cleanup SSH material
+        if: always()
+        run: |
+          if [ -n "${RUNNER_SSH_DIR:-}" ] && [ -d "$RUNNER_SSH_DIR" ]; then
+            rm -rf -- "$RUNNER_SSH_DIR"
+          fi
+
+  summary:
+    name: Deployment Summary
+    needs: [package, deploy, rollback]
+    runs-on: ubuntu-latest
+    if: |
+      always() &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.workflow_run.conclusion == 'success')
+    steps:
+      - name: Report result
+        env:
+          OPERATION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation || 'deploy' }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          ROLLBACK_RESULT: ${{ needs.rollback.result }}
+        run: |
+          echo "Operation: ${OPERATION}"
+          echo "Target Git SHA: ${DEPLOY_SHA}"
+          echo "Package: ${PACKAGE_RESULT}"
+          echo "Deploy: ${DEPLOY_RESULT}"
+          echo "Rollback: ${ROLLBACK_RESULT}"
+          if [ "${OPERATION}" = "rollback" ]; then
+            [ "${ROLLBACK_RESULT}" = "success" ]
+          else
+            [ "${PACKAGE_RESULT}" = "success" ]
+            [ "${DEPLOY_RESULT}" = "success" ]
+          fi
