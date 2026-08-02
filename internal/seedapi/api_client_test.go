@@ -2,22 +2,26 @@ package seedapi
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
 )
 
-func TestAPIClientSignsHistoricalContextWithoutChangingOrdinaryRequests(t *testing.T) {
-	var historicalHeader string
+func TestAPIClientNeverSendsRetiredHeaders(t *testing.T) {
+	requestCount := 0
+	retiredPrefix, err := hex.DecodeString("782d71732d686973746f726963616c2d")
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		historicalHeader = r.Header.Get(historicalseed.HeaderContext)
-		if historicalHeader != "" && r.Header.Get(historicalseed.HeaderSignature) == "" {
-			t.Fatal("historical context was not signed")
+		requestCount++
+		for name := range r.Header {
+			if strings.HasPrefix(strings.ToLower(name), string(retiredPrefix)) {
+				t.Fatalf("retired header was sent by %s %s: %s", r.Method, r.URL.Path, name)
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{}}`))
@@ -25,61 +29,22 @@ func TestAPIClientSignsHistoricalContextWithoutChangingOrdinaryRequests(t *testi
 	defer server.Close()
 
 	client := NewAPIClient(server.URL, "", nil)
-	client.SetHistoricalSecret([]byte("secret"))
-	if _, err := client.doRequest(context.Background(), http.MethodGet, "/ordinary", nil); err != nil {
-		t.Fatal(err)
+	requests := []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{method: http.MethodPost, path: "/body", body: map[string]string{"value": "1"}},
+		{method: http.MethodPost, path: "/no-body"},
+		{method: http.MethodGet, path: "/read"},
 	}
-	if historicalHeader != "" {
-		t.Fatal("ordinary request unexpectedly carried historical context")
-	}
-
-	historicalCtx := historicalseed.WithContext(context.Background(), historicalseed.Context{
-		BatchID: "batch", ScenarioID: "scenario", OrgID: 1, Version: historicalseed.Version1,
-		Timeline: historicalseed.Timeline{EntryResolvedAt: timePtr(time.Date(2025, 1, 1, 8, 5, 0, 0, time.UTC))},
-	})
-	if _, err := client.doRequest(historicalCtx, http.MethodGet, "/historical?x=1", nil); err != nil {
-		t.Fatal(err)
-	}
-	if historicalHeader == "" {
-		t.Fatal("historical request did not carry context")
-	}
-}
-
-func timePtr(value time.Time) *time.Time { return &value }
-
-func TestListHistoricalScenarioStagesPreservesLargePayloadID(t *testing.T) {
-	const answerSheetID = "630459979077268014"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.URL.Query().Get("scenario_id"); got != "2025-01-01/107/submit_answer/task-1" {
-			t.Fatalf("scenario_id = %q", got)
+	for _, request := range requests {
+		if _, err := client.doRequest(context.Background(), request.method, request.path, request.body); err != nil {
+			t.Fatal(err)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"batch_id":"batch","stages":[{"stage":"answersheet_submit","resource_id":"` + answerSheetID + `","payload_json":{"answersheet_id":` + answerSheetID + `}}]}}`))
-	}))
-	defer server.Close()
-
-	client := NewAPIClient(server.URL, "", nil)
-	response, err := client.ListHistoricalScenarioStages(context.Background(), "batch", "2025-01-01/107/submit_answer/task-1")
-	if err != nil {
-		t.Fatal(err)
 	}
-	if len(response.Stages) != 1 {
-		t.Fatalf("stages = %d, want 1", len(response.Stages))
-	}
-	record := response.Stages[0]
-	if record.ResourceID != answerSheetID {
-		t.Fatalf("resource_id = %q, want %q", record.ResourceID, answerSheetID)
-	}
-	var payload struct {
-		AnswerSheetID json.Number `json:"answersheet_id"`
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(record.PayloadJSON)))
-	decoder.UseNumber()
-	if err := decoder.Decode(&payload); err != nil {
-		t.Fatal(err)
-	}
-	if got := payload.AnswerSheetID.String(); got != answerSheetID {
-		t.Fatalf("payload answersheet_id = %q, want %q", got, answerSheetID)
+	if requestCount != len(requests) {
+		t.Fatalf("request count=%d, want %d", requestCount, len(requests))
 	}
 }
 

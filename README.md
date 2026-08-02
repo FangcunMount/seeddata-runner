@@ -1,106 +1,159 @@
 # Seeddata Runner
 
-`seeddata-runner` 是一个独立的 Go module，用来为 QS 环境持续制造更接近真实使用轨迹的 seed data。它不再提供按 step 执行的一次性脚本，而是由一个 supervisor 进程并发托管两条常驻 daemon：
+`seeddata-runner` 是 QS 环境的每日模拟服务。一个 supervisor 进程并发托管两条常驻 daemon：
 
-- `daily_simulation_daemon`：每天生成一批模拟用户，完成注册、建档、绑定量表入口、加入 plan、填写答卷等流程。
-- `plan_submit_open_tasks_daemon`：持续扫描指定 plan 下已经进入 `opened` 状态的任务，并代替用户提交答卷。
+- `daily_simulation_daemon`：只使用进程所在时区的当前日期，创建 Guardian、Testee、Assessment Entry 访问关系、Plan enrollment，并通过普通 collection 接口提交 AnswerSheet。
+- `plan_submit_open_tasks_daemon`：查询指定 Plan 当天已经进入 `opened` 的任务，通过普通 admin submit 接口幂等提交答卷。
 
-这个仓库只负责“模拟用户行为”和“补齐已打开任务的答卷提交”。plan 的创建、调度、打开、过期等生命周期仍由业务侧其他服务负责。
+runner 不创建 Plan，也不推进 Plan 的 schedule/open/expire 生命周期。
 
-## 运行模型
+## CLI
 
-`cmd/seeddata` 的启动流程固定如下：
+可执行程序只接受两个参数：
 
-1. 解析 CLI 参数；无子命令时以 daemon 模式运行并支持 `--config`、`--verbose`
-2. 加载 `seeddata.yaml`
-3. 初始化 API client / collection client
-4. 优先使用 `api.token`；如果为空，则使用 IAM 凭据换取 token
-5. 并发启动 daily simulation 与 plan submit 两条 daemon
+```text
+--config <path>   配置文件，默认 ./configs/seeddata.yaml
+--verbose         开启 debug 日志
+```
 
-两个 daemon 共享同一个进程。任意一条退出报错，supervisor 就会退出；收到 `SIGINT` / `SIGTERM` 时会整体停止。
+位置参数、未知参数和其他命令都会立即返回 CLI 错误。配置文件采用严格 YAML 字段解析，未知字段会导致启动失败。
 
-一次性历史回填使用 `historical-backfill`、`historical-verify` 和
-`historical-manifest` 子命令；其状态、并发、安全恢复和 ServerA 内网容器运行方式见
-[历史回填运行手册](./docs/historical-backfill.md)。
+## 启动
 
-## 快速开始
-
-先准备配置文件：
-
-- 复制或修改 [configs/seeddata.yaml](./configs/seeddata.yaml)
-- 填好 `api.baseUrl`
-- 选择一种认证方式：
-  - 直接提供 `api.token`
-  - 或提供 `iam.*` 凭据，并让 runner 启动时自动换取 token
-
-推荐通过脚本启动：
+推荐通过现有脚本启动：
 
 ```bash
-cd seeddata-runner
 ./scripts/run_seeddata_daemon.sh
 ```
 
-脚本支持以下环境变量覆盖：
+脚本支持：
 
-- `SEEDDATA_CONFIG`：配置文件路径，默认 `./configs/seeddata.yaml`
-- `SEEDDATA_GO`：Go 可执行文件，默认 `go`
-- `SEEDDATA_LOG_FILE`：日志文件路径，默认 `./logs/seeddata-daemon.log`
+- `SEEDDATA_CONFIG`：配置文件路径。
+- `SEEDDATA_GO`：Go 可执行文件。
+- `SEEDDATA_LOG_FILE`：日志文件路径。
 
 也可以直接运行：
 
 ```bash
-cd seeddata-runner
 go run ./cmd/seeddata --config ./configs/seeddata.yaml --verbose
 ```
 
-`--verbose` 会把日志级别提升到 `debug`。
+两个 daemon 共享进程生命周期：任意一条异常退出都会结束 supervisor；`SIGINT` 和 `SIGTERM` 会停止整个进程。
 
-## 编译二进制并通过 systemd 运行
+## 认证和环境变量
 
-如果 `seeddata-runner` 已经以 `seeddata-runner.service` 的形式托管在服务器上，推荐把可执行文件编译成固定二进制，再交给 `systemd` 启停，而不是在线上直接 `go run`。
+业务 API token 优先读取 `api.token`；为空时使用 IAM 登录配置换取并自动刷新 token。
 
-### 1. 编译二进制
+可用环境变量：
 
-在仓库根目录执行：
+- `IAM_USERNAME`
+- `IAM_PASSWORD`
+- `IAM_MOCK_CONSUMER_SHARED_SECRET`
+- `SEEDDATA_API_BASE_URL`
+- `SEEDDATA_COLLECTION_BASE_URL`
+- `SEEDDATA_IAM_BASE_URL`
+- `SEEDDATA_IAM_LOGIN_URL`
+- `SEEDDATA_DAILY_SUBMISSION_STATE_FILE`
+
+新建模拟 Guardian 时应启用 `iam.mockConsumer`。shared secret 不应提交到仓库，应通过 `IAM_MOCK_CONSUMER_SHARED_SECRET` 或部署密钥注入。
+
+## 配置
+
+配置固定为五段：
+
+| 段落 | 作用 |
+| --- | --- |
+| `global` | 机构 ID 和默认标签 |
+| `api` | qs-server、collection-server、token 和重试 |
+| `iam` | IAM 登录、mock-consumer 和可选 gRPC |
+| `dailySimulation` | 当前日期的每日模拟 |
+| `planSubmit` | 当天 opened task 的幂等提交 |
+
+完整示例见 [configs/seeddata.yaml](./configs/seeddata.yaml)。
+
+### dailySimulation
+
+调度支持：
+
+- 单时刻：设置 `runAt`。
+- 时间窗口：设置 `windowStartAt`、`windowEndAt`、`interval`。
+- `dailyMaxUsers` 限制当天成功用户总数。
+- 如果进程在窗口结束后启动，只复用当前日期已存在且身份匹配的 Testee 做一次 catch-up，不创建其他日期的数据。
+- `countMin` / `countMax` 决定每轮数量；两者均为 0 时使用 `countPerRun`。
+- `workers` 只控制单轮普通用户并发。
+
+`journeyMix` 用相对权重选择停止位置：
+
+- `registerOnlyWeight`
+- `createTesteeWeight`
+- `resolveEntryWeight`
+- `submitAnswerWeight`
+
+`additionalTargetCodes` 和 `additionalTargetMaxCount` 可在主入口完成后追加普通 self-service Questionnaire；追加目标按顺序提交。
+
+### Plan enrollment 与 planSubmit
+
+每日完整旅程会调用普通 Plan enroll 接口，并记录返回的 `enrollment_id` 和任务 ID。任务提交仍由独立的 `plan_submit_open_tasks_daemon` 完成。
+
+`planSubmit` 只处理：
+
+- 配置中指定的 Plan。
+- 当前日期窗口内的任务。
+- 状态为 `opened` 的任务。
+- Testee source 与 `dailySimulation.testeeSource` 一致的任务。
+
+`completionPercent` 可限制当天完成比例；设为 `0` 可在验收时暂停任务提交而不停止 daemon。
+
+## 每日 AnswerSheet 闭环
+
+需要测评的提交只有完成以下步骤才算成功：
+
+1. 在 JSON 账本中持久化 logical ID、payload fingerprint、稳定 idempotency key 和 request ID。
+2. POST collection AnswerSheet；accepted 后立即持久化 `answersheet_id`。
+3. 查询 assessment readiness；ready 后立即持久化 `assessment_id`，账本状态为 `ready`。
+4. 查询 report wait；只有 `status=interpreted` 才完成本次旅程，并在日志中写入 `report_status=interpreted`。
+
+异常语义：
+
+- readiness 超时：账本保存为 `accepted_pending`，本轮返回错误。
+- report pending/processing 超时或 failed：账本保持 `ready`，本轮返回错误。
+- 重试会复用既有 idempotency key、AnswerSheet 和 Assessment，只继续缺失的查询，不重复 POST 答卷。
+- 不需要测评的 Questionnaire 以 AnswerSheet durable accepted 为终点。
+
+daily 与 plan 账本都采用原子临时文件、fsync 和 rename；已完成记录保留 30 天。旧 JSON 记录可直接加载，payload fingerprint 冲突会保持 sticky conflict。
+
+## 使用的普通接口
+
+runner 只调用以下现行接口职责：
+
+- IAM mock-consumer ensure。
+- Testee 创建和当前日期 Testee 查询。
+- Assessment Entry 创建、resolve、intake、reactivate。
+- Published Assessment Model 和 Published Questionnaire 查询。
+- Plan 查询、enroll 和普通 task window。
+- Collection AnswerSheet submit。
+- Assessment readiness。
+- Assessment report wait。
+- Plan task admin submit。
+
+## 构建与验证
+
+本地门禁：
 
 ```bash
-cd seeddata-runner
-mkdir -p ./bin
-go build -o ./bin/seeddata ./cmd/seeddata
+go mod verify
+go vet ./...
+go test ./...
+go test -race ./internal/answersheet ./internal/dailysim ./internal/plansubmit ./internal/seedapi ./internal/seedruntime
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/seeddata ./cmd/seeddata
+git diff --check
 ```
 
-如果需要交叉编译 Linux AMD64：
+CI 还会运行 actionlint 和剩余 shell 脚本的 `bash -n`。
 
-```bash
-cd seeddata-runner
-mkdir -p ./bin
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ./bin/seeddata-linux-amd64 ./cmd/seeddata
-```
+## systemd 部署
 
-
-
-### 2. 确认 systemd 当前使用的启动方式
-
-先检查服务单元文件，确认它当前是直接跑二进制，还是仍然在跑 `go run`：
-
-```bash
-sudo systemctl cat seeddata-runner.service
-```
-
-重点关注：
-
-- `ExecStart`
-- `WorkingDirectory`
-- `Environment`
-- `EnvironmentFile`
-
-如果 `ExecStart` 还是类似：
-
-```ini
-ExecStart=/usr/bin/env bash -lc 'go run ./cmd/seeddata --config ./configs/seeddata.yaml'
-```
-
-建议改成固定二进制，例如：
+推荐部署固定二进制：
 
 ```ini
 ExecStart=/opt/seeddata-runner/bin/seeddata --config /opt/seeddata-runner/configs/seeddata.yaml
@@ -108,309 +161,32 @@ WorkingDirectory=/opt/seeddata-runner
 EnvironmentFile=-/etc/seeddata-runner.env
 ```
 
-这样升级时只需要替换二进制，不需要依赖线上 Go 编译环境。
-
-### 3. 替换二进制
-
-下面假设服务实际使用的二进制路径是 `/opt/seeddata-runner/bin/seeddata`。如果你的 unit file 使用的是别的路径，以 `ExecStart` 为准。
+升级前先检查真实 unit：
 
 ```bash
-sudo install -d /opt/seeddata-runner/bin
-sudo install -m 0755 ./bin/seeddata /opt/seeddata-runner/bin/seeddata
+sudo systemctl cat seeddata-runner.service
+sudo systemctl show seeddata-runner.service -p EnvironmentFiles -p DropInPaths -p WorkingDirectory
 ```
 
-如果同时更新了配置文件，也一并覆盖对应路径。
-
-### 4. 重新加载并重启服务
-
-如果只替换二进制，不改 unit file，通常直接重启即可：
+替换二进制后：
 
 ```bash
 sudo systemctl restart seeddata-runner
-```
-
-如果修改了 unit file 或 `EnvironmentFile`，先 reload 再 restart：
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart seeddata-runner
-```
-
-
-
-### 5. 验证服务是否按新版本运行
-
-```bash
 sudo systemctl status seeddata-runner --no-pager
-```
-
-```bash
 sudo journalctl -u seeddata-runner -n 200 --no-pager
 ```
 
-建议重点看这几类日志：
-
-- `Fetching API token from IAM`
-- `Initialized API client`
-- `Daily simulation daemon started`
-- `Plan opened-task answersheet daemon started`
-- `Daily simulation daemon batch failed`
-
-如果服务不断重启，可以继续检查：
-
-```bash
-sudo systemctl show seeddata-runner -p Environment
-sudo systemctl cat seeddata-runner.service
-```
-
-这样可以快速确认：
-
-- IAM 用户名/密码是否真的注入到了进程环境里
-- `ExecStart` 是否已经切到新二进制
-- `--config` 指向的是否是你预期的配置文件
-
-
-
-### 6. 一次典型升级流程
-
-```bash
-cd /path/to/seeddata-runner
-go build -o ./bin/seeddata ./cmd/seeddata
-sudo install -m 0755 ./bin/seeddata
-sudo systemctl restart seeddata-runner
-sudo systemctl status seeddata-runner --no-pager
-sudo journalctl -u seeddata-runner -n 100 --no-pager
-```
-
-如果这次升级还改了 unit file 或环境文件，则改为：
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart seeddata-runner
-```
-
-
-
-## 认证与依赖
-
-运行时依赖主要分为三类：
-
-- `api.baseUrl`：业务 API 地址，必填
-- `api.collectionBaseUrl`：采集/问卷和 C 端答卷 API 地址；启用 daemon 时必填，不再回退到 `api.baseUrl`
-- `iam.*`：当 `api.token` 为空时，用于登录并自动刷新 token；daily simulation 新建模拟 C 端账号时还会使用 IAM v2 内部 mock-consumer REST ensure
-
-凭据优先级如下：
-
-1. `api.token`
-2. 环境变量 `IAM_USERNAME` / `IAM_PASSWORD`
-3. 配置文件中的 `iam.username` / `iam.password`
-
-如果 daily simulation 需要新建 guardian / testee，应启用 `iam.mockConsumer`。shared secret 不应写入仓库，只允许通过 `IAM_MOCK_CONSUMER_SHARED_SECRET` 或部署密钥注入。runner 通过 IAM 创建或确保 guardian 登录身份后，用 guardian token 调用 collection `POST /api/v1/testees` 建档（会创建 IAM profile 并建立 ProfileLink），再带 `profile_id` 走公开 intake；答卷提交走 collection，依赖该 ProfileLink 通过权限校验。
-
-## 配置总览
-
-配置结构固定为六段：
-
-
-| 段落                | 作用                                 |
-| ----------------- | ---------------------------------- |
-| `global`          | 默认机构 ID、默认标签前缀                     |
-| `api`             | 业务 API、采集 API、重试策略、静态 token        |
-| `iam`             | IAM 登录、mock-consumer 建号与可选 gRPC 配置 |
-| `dailySimulation` | 每日模拟用户生成策略                         |
-| `historicalBackfill` | 一次性历史回填的并发和进度策略             |
-| `planSubmit`      | opened task 答卷提交策略                 |
-
-
-其中 `dailySimulation` 和 `planSubmit` 是必填段；`api.baseUrl` 也是运行时硬要求。
-
-`historicalBackfill` 只影响有限日期区间的历史命令。默认生产配置使用父场景 12、
-submission 6、downstream reconciler 4、内存调度队列 24、durable pending 高水位 4096、
-stage reader 6、IAM 1 路并发。submission worker 在答卷 accepted 且 AnswerSheetID 写入 Bbolt 后
-立即返回；reconciler 独立扫描 Bbolt 并核验 Assessment、Outcome、Report。调度队列满不会阻塞提交，
-只有 durable pending 达到安全高水位才熔断新的远端提交；普通 daemon 继续使用
-`dailySimulation.workers`、原 IAM limiter 和 JSON submission ledger。完整初始化、恢复和
-ServerA 内网容器步骤见 [docs/historical-backfill.md](./docs/historical-backfill.md)。
-GitHub Actions 的 production 手动部署、审批、status/stop、同 revision 恢复和最终验收见
-[GitHub Actions 历史回填部署与操作手册](./docs/github-actions-historical-backfill.md)；历史业务
-Secret 始终保留在 ServerA 的受限 env 文件中，不通过 workflow 传输。
-
-## Daily Simulation
-
-`dailySimulation` 用于构造“像真实用户漏斗一样”的新增数据，核心行为如下：
-
-- 按计划时间触发批量生成
-- 每个用户会确定性地选择一个 plan 和一个 journey 目标
-- 旅程可在注册、建 testee、解析入口、提交答卷几个阶段提前停止
-- 成功批次会写入 `stateFile`，用于限制每日总量并避免重复执行已完成的 slot
-
-关键字段如下：
-
-
-| 字段                                                                | 说明                                                                                                                         |
-| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `countPerRun`                                                     | 固定每轮生成数量；当 `countMin` / `countMax` 都为 0 时生效                                                                                |
-| `countMin` / `countMax`                                           | 每轮随机生成数量区间；设置后优先于 `countPerRun`                                                                                            |
-| `dailyMaxUsers`                                                   | 当天成功新增用户上限；`<= 0` 表示不限制                                                                                                    |
-| `workers`                                                         | 并发 worker 数                                                                                                                |
-| `runAt`                                                           | 兼容单次调度模式，每天固定时刻跑一次                                                                                                         |
-| `windowStartAt` / `windowEndAt` / `interval`                      | 窗口调度模式，在时间窗口内按固定间隔反复触发                                                                                                     |
-| `retryDelay`                                                      | 一轮失败后的重试等待时间                                                                                                               |
-| `stateFile`                                                       | daemon 状态文件，默认 `.seeddata-cache/daily-simulation-daemon-state.json`                                                        |
-| `submissionStateFile`                                             | 提交恢复账本，默认 `.seeddata-cache/daily-simulation-submissions.json`；仅保存指纹与业务标识，文件权限为 `0600`                                  |
-| `clinicianIds`                                                    | 可用医生范围；当 `entryId` 为空时必填                                                                                                   |
-| `focusCliniciansPerRunMin` / `focusCliniciansPerRunMax`           | 每轮从 `clinicianIds` 中抽取多少位医生参与本轮模拟；不配时默认使用全部医生                                                                              |
-| `entryId`                                                         | 指定现成 assessment entry；设置后优先复用这个入口，并忽略 `clinicianIds` 选入口的逻辑                                                                |
-| `targetType` / `targetCode` / `targetVersion`                     | 当未指定 `entryId` 时，用于定位或创建 assessment entry；每个 testee 仍然只拿这一个入口                                                              |
-| `additionalTargetCodes` / `additionalTargetMaxCount`              | 入口填完后额外填报的量表池，以及每个 testee 从池子里随机抽取 `1..additionalTargetMaxCount` 个量表；`additionalTargetMaxCount=0` 表示不额外填报                  |
-| `planIds`                                                         | 必填；每个模拟用户会从这里确定性选一个 plan 加入                                                                                                |
-| `journeyMix`                                                      | 控制四种旅程深度的权重分布                                                                                                              |
-| `userPassword` / `userPhonePrefix` / `userEmailDomain`            | 模拟 guardian 账号生成规则                                                                                                         |
-| `guardianRelation` / `testeeSource` / `testeeTags` / `isKeyFocus` | 创建 testee 时写入的业务属性；`guardianRelation` 需使用 IAM 当前词表 `self / parent / grandparent / other`，legacy `guardian` 会自动归一化为 `other` |
-
-
-`journeyMix` 支持四种目标：
-
-- `registerOnlyWeight`
-- `createTesteeWeight`
-- `resolveEntryWeight`
-- `submitAnswerWeight`
-
-如果四项权重都不填，默认全部走 `submitAnswerWeight=100`。
-
-当 `entryId` 为空时，runner 会：
-
-1. 从本轮选中的 clinician 范围里寻找匹配 `targetType + targetCode + targetVersion` 的 assessment entry
-2. 若找到了但已停用，则自动重新激活
-3. 若没有找到，则自动创建一个新 entry
-
-提交答卷时，runner 使用 guardian token 调用 collection：先按已发布模型锁定精确的 `code@version` 问卷，再以稳定幂等键提交，最后只通过 `assessment-readiness` 等待测评结果。超时会保留为 `accepted_pending`，下一轮从恢复账本继续查询，不会重新生成答卷。
-
-
-
-## Plan Submit
-
-`planSubmit` 只处理当天“已经 opened 的任务”，不会参与 plan 调度本身。它会按 `planned_after = 当天 00:00:00` 且 `planned_before = 当天 23:59:59` 拉取任务窗口（需要 qs-apiserver 支持 `planned_after`），再在本地校验当天任务；随后按 task 的 `testee_id` 查询 testee 来源，只提交 `source == dailySimulation.testeeSource` 的任务，并用 `completionPercent` 控制当天最多完成的比例。
-
-关键字段如下：
-
-
-| 字段                  | 说明                                                  |
-| ------------------- | --------------------------------------------------- |
-| `planIds`           | 必填；持续扫描这些 plan                                      |
-| `workers`           | 并发提交 opened task 的 worker 数                         |
-| `completionPercent` | 当天 task 目标完成比例，取值 `0..100`；默认 `100` 保持旧行为，`0` 表示不提交 |
-| `idleInterval`      | 本轮没有活跃 opened task 时，下次轮询等待时间                       |
-| `activeInterval`    | 本轮发现 opened task 并执行提交后，下次轮询等待时间                    |
-| `submissionStateFile` | 提交恢复账本，默认 `.seeddata-cache/plan-submit-submissions.json`；重启后复用同一幂等键和确定性请求体 |
-
-
-`planSubmit` 会复用 `dailySimulation.testeeSource` 作为安全边界，避免自动完成正常业务渠道创建的 testee 任务；如果某个 task 的 testee 来源查询失败，会跳过该 task。
-
-每个扫描周期都会重新解析一次当前 published assessment model，并在该周期内固定模型绑定的精确问卷快照。提交仍走 apiserver `admin-submit` 以保留 `task_id`，但网络重试始终复用同一业务幂等键，并为每次 HTTP 尝试生成新的 `X-Request-ID`；409 会进入人工检查，不会自动换 key。
-
-## 发布、恢复与回滚
-
-发布顺序固定为：轮换 IAM mock-consumer secret → 发布 qs-server → 验证 `admin-submit.idempotency_key` → 停止旧 runner 并等待请求窗口结束 → 备份旧状态文件 → 发布新 runner → 单组织小流量验证。若需要回滚 qs-server，必须先回滚 runner。
-
-两份 submission state file 是独立恢复账本。`prepared`、`accepted`、`accepted_pending` 和 `conflict` 不会自动删除；完成记录保留 30 天。不要删除账本来规避 409，因为这会失去“同一逻辑任务不得换 key”的保护。
-
-## 最小示例
-
-下面是一份保留关键字段的最小配置骨架：
-
-```yaml
-global:
-  orgId: 1
-
-api:
-  baseUrl: "https://qs.example.com"
-  collectionBaseUrl: "https://collect.example.com"
-  token: ""
-
-iam:
-  baseUrl: "https://iam.example.com"
-  loginUrl: "https://iam.example.com/api/v2/authn/login"
-  username: ""
-  password: ""
-  tenantId: "1"
-  mockConsumer:
-    enabled: true
-    sharedSecret: "" # 通过 IAM_MOCK_CONSUMER_SHARED_SECRET 注入
-    endpointPath: "/api/v2/internal/authn/mock-consumers/ensure"
-    maxConcurrent: 1
-  grpc:
-    address: "iam-apiserver:9090"
-
-dailySimulation:
-  countPerRun: 20
-  dailyMaxUsers: 120
-  workers: 6
-  windowStartAt: "10:00"
-  windowEndAt: "18:00"
-  interval: "30m"
-  retryDelay: "30m"
-  submissionStateFile: ".seeddata-cache/daily-simulation-submissions.json"
-  clinicianIds:
-    - "614995509882401326"
-  targetType: "scale"
-  targetCode: "3adyDE"
-  additionalTargetCodes: []
-  additionalTargetMaxCount: 0
-  planIds:
-    - "614333603412718126"
-  journeyMix:
-    submitAnswerWeight: 100
-
-planSubmit:
-  submissionStateFile: ".seeddata-cache/plan-submit-submissions.json"
-  planIds:
-    - "614333603412718126"
-  workers: 1
-  completionPercent: 50
-  idleInterval: "30s"
-  activeInterval: "5s"
-```
-
-完整示例见 [configs/seeddata.yaml](./configs/seeddata.yaml)。
-
-## CLI 约束
-
-当前 CLI 明确只有一个 supervisor 入口，不再支持历史上的 step 式执行：
-
-- 支持 `--config`
-- 支持 `--verbose`
-- 不支持 `--steps`
-- 不支持按单个 seed step 运行
-- 不再包含历史 backfill / fixup 工具入口
-
-
-
-## 项目结构
-
-主要目录如下：
-
-- [cmd/seeddata](./cmd/seeddata)：唯一进程入口与 supervisor
-- [configs](./configs)：配置样例
-- [scripts](./scripts)：启动脚本
-- [internal/dailysim](./internal/dailysim)：每日模拟用户 daemon
-- [internal/plansubmit](./internal/plansubmit)：opened task 提交 daemon
-- [internal/seedconfig](./internal/seedconfig)：配置加载、默认值、校验
-- [internal/seedruntime](./internal/seedruntime)：日志、signal、client 初始化
-- [internal/seedapi](./internal/seedapi) / [internal/seediauth](./internal/seediauth)：API 与 IAM 访问封装
-
-
-
-## 开发与验证
-
-常用命令：
-
-```bash
-go test ./...
-```
-
-如果只想检查 CLI 或配置解析，也可以从这些文件开始：
-
-- [cmd/seeddata/main.go](./cmd/seeddata/main.go)
-- [internal/seedconfig/config.go](./internal/seedconfig/config.go)
-- [scripts/run_seeddata_daemon.sh](./scripts/run_seeddata_daemon.sh)
+## 当前日期单用户验收
+
+使用临时配置执行完整每日闭环时，建议：
+
+- `TZ=Asia/Shanghai`
+- `countMin=countMax=dailyMaxUsers=workers=1`
+- `registerOnlyWeight=createTesteeWeight=resolveEntryWeight=0`
+- `submitAnswerWeight=100`
+- `additionalTargetCodes=[]`、`additionalTargetMaxCount=0`
+- `planSubmit.completionPercent=0`
+- 使用独立 `testeeSource`、phone prefix、email domain 和全新状态文件
+- `runAt` 设置为当前日期的下一可执行分钟
+
+成功日志应同时出现当前上海日期、Guardian user ID、Testee ID、Entry ID、Plan ID、enrollment ID、AnswerSheet ID、Assessment ID、`report_status=interpreted` 和 `stop_reason=completed`。

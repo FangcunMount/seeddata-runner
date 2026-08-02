@@ -7,21 +7,22 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
 	toolanswersheet "github.com/FangcunMount/seeddata-runner/internal/answersheet"
-	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
 )
 
 func TestSubmitDailySimulationAnswerSheetUsesCollectionAndReadiness(t *testing.T) {
 	var readinessCalls atomic.Int32
-	var waited time.Duration
+	var reportCalls atomic.Int32
+	var waited []time.Duration
 	originalWait := dailySimulationReadinessWait
 	dailySimulationReadinessWait = func(_ context.Context, delay time.Duration) error {
-		waited = delay
+		waited = append(waited, delay)
 		return nil
 	}
 	t.Cleanup(func() { dailySimulationReadinessWait = originalWait })
@@ -49,6 +50,12 @@ func TestSubmitDailySimulationAnswerSheetUsesCollectionAndReadiness(t *testing.T
 				return
 			}
 			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"status":"ready","answersheet_id":"9001","assessment_id":"8001"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/assessments/8001/wait-report":
+			if reportCalls.Add(1) == 1 {
+				_, _ = w.Write([]byte(`{"code":0,"data":{"status":"processing","next_poll_after_ms":500}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"interpreted"}}`))
 		default:
 			t.Fatalf("unexpected daily submission request: %s %s", r.Method, r.URL.String())
 		}
@@ -81,172 +88,18 @@ func TestSubmitDailySimulationAnswerSheetUsesCollectionAndReadiness(t *testing.T
 		QuestionnaireCode: "Q", QuestionnaireVersion: "1", TesteeID: 42,
 		Answers: []Answer{{QuestionCode: "q1", QuestionType: "Radio", Value: "A"}},
 	}
-	result, err := submitDailySimulationAnswerSheet(context.Background(), state, req)
-	if err != nil {
+	if err := submitDailySimulationAnswerSheet(context.Background(), state, req); err != nil {
 		t.Fatal(err)
 	}
-	if result.AnswerSheetID != "9001" || result.AssessmentID != "8001" || result.Status != dailySimulationSubmissionAssessmentReady {
-		t.Fatalf("unexpected submission result: %+v", result)
+	if state.outcome.AnswerSheetID != "9001" || state.outcome.AssessmentID != "8001" || state.outcome.ReportStatus != "interpreted" {
+		t.Fatalf("unexpected daily outcome: %+v", state.outcome)
 	}
-	if waited != 2400*time.Millisecond {
-		t.Fatalf("readiness wait=%s, want 2.4s", waited)
-	}
-}
-
-func TestPrepareHistoricalDailySimulationAnswerSheetDefersReportPolling(t *testing.T) {
-	var reportCalls atomic.Int32
-	scenarioID := "2025-01-01/4/submit_answer/MODEL"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/answersheets":
-			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"accepted","answersheet_id":"9004"}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/answersheets/9004/assessment-readiness":
-			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"ready","answersheet_id":"9004","assessment_id":"8004"}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/assessments/8004/wait-report":
-			reportCalls.Add(1)
-			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"interpreted"}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/internal/v1/historical-seed/batches/batch/scenarios":
-			if r.URL.Query().Get("scenario_id") != scenarioID {
-				t.Fatalf("unexpected scenario query: %s", r.URL.String())
-			}
-			_, _ = w.Write([]byte(`{"code":0,"data":{"batch_id":"batch","stages":[
-				{"stage":"answersheet_submit","status":"completed","resource_id":"9004"},
-				{"stage":"assessment_created","status":"completed","resource_id":"8004"},
-				{"stage":"assessment_submitted","status":"completed","resource_id":"8004"},
-				{"stage":"outcome_committed","status":"completed","resource_id":"outcome-4"},
-				{"stage":"report_generated","status":"completed","resource_id":"report-4"}
-			]}}`))
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
-		}
-	}))
-	defer server.Close()
-
-	ledger, err := toolanswersheet.NewSubmissionLedger(filepath.Join(t.TempDir(), "daily-submissions.json"), "daily")
-	if err != nil {
-		t.Fatal(err)
-	}
-	logger := log.New(log.NewOptions())
-	client := NewAPIClient(server.URL, "guardian-token", logger)
-	state := &dailySimulationJourneyState{
-		deps: &dependencies{
-			APIClient:             NewAPIClient(server.URL, "admin-token", logger),
-			CollectionClient:      client,
-			DailySubmissionLedger: ledger,
-		},
-		collectionClient: client,
-		profile: dailySimulationProfile{
-			RunDate: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Index: 4,
-		},
-		target: &dailySimulationResolvedTarget{
-			TargetType: "scale", TargetCode: "MODEL", TargetVersion: "1",
-			QuestionnaireCode: "Q", QuestionnaireVersion: "1", RequiresAssessment: true,
-		},
-	}
-	req := SubmitAnswerSheetRequest{
-		QuestionnaireCode: "Q", QuestionnaireVersion: "1", TesteeID: 42,
-		Answers: []Answer{{QuestionCode: "q1", QuestionType: "Radio", Value: "A"}},
-	}
-	historical := historicalseed.Context{BatchID: "batch", ScenarioID: scenarioID, OrgID: 1, Version: historicalseed.Version1}
-	ctx := historicalseed.WithContext(context.Background(), historical)
-
-	result, pending, err := prepareDailySimulationAnswerSheet(ctx, state, req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pending == nil {
-		t.Fatal("historical report polling was not deferred")
-	}
-	if reportCalls.Load() != 0 {
-		t.Fatalf("report calls before continuation=%d, want 0", reportCalls.Load())
-	}
-	if result.Status != dailySimulationSubmissionAssessmentReady || result.AssessmentID != "8004" {
-		t.Fatalf("prepared result=%+v", result)
-	}
-
-	completed, err := pending.Wait(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reportCalls.Load() != 1 || completed.Status != dailySimulationSubmissionReportGenerated || completed.ReportID != "report-4" {
-		t.Fatalf("completed result=%+v report_calls=%d", completed, reportCalls.Load())
+	if len(waited) != 2 || waited[0] != 2400*time.Millisecond || waited[1] != 500*time.Millisecond {
+		t.Fatalf("poll waits=%v", waited)
 	}
 	record, ok, err := ledger.Get(dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID))
-	if err != nil || !ok || record.Status != toolanswersheet.SubmissionStatusReady {
+	if err != nil || !ok || record.Status != toolanswersheet.SubmissionStatusReady || record.AssessmentID != "8001" {
 		t.Fatalf("ready ledger record=%+v ok=%v err=%v", record, ok, err)
-	}
-}
-
-func TestHistoricalStateSubmissionReturnsAfterDurableAcceptance(t *testing.T) {
-	var requestCount atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount.Add(1)
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/answersheets" {
-			t.Fatalf("historical submit hot path must not poll downstream: %s %s", r.Method, r.URL.String())
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write([]byte(`{"code":0,"data":{"status":"accepted","answersheet_id":"answer-5"}}`))
-	}))
-	defer server.Close()
-
-	stateDir := t.TempDir()
-	opts := historicalStateTestOptions(stateDir, false)
-	if err := PrepareHistoricalBackfillState(opts, 1, ""); err != nil {
-		t.Fatal(err)
-	}
-	store, err := openHistoricalStateStore(stateDir, opts.BatchID, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = store.Close() }()
-	logger := log.New(log.NewOptions())
-	client := NewAPIClient(server.URL, "guardian-token", logger)
-	state := &dailySimulationJourneyState{
-		deps: &dependencies{
-			APIClient: NewAPIClient(server.URL, "admin-token", logger), CollectionClient: client, DailySubmissionLedger: store,
-		},
-		collectionClient: client,
-		profile:          dailySimulationProfile{RunDate: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Index: 5},
-		target: &dailySimulationResolvedTarget{
-			TargetType: "scale", TargetCode: "MODEL", TargetVersion: "1",
-			QuestionnaireCode: "Q", QuestionnaireVersion: "1", RequiresAssessment: true,
-		},
-	}
-	req := SubmitAnswerSheetRequest{
-		QuestionnaireCode: "Q", QuestionnaireVersion: "1", TesteeID: 42,
-		Answers: []Answer{{QuestionCode: "q1", QuestionType: "Radio", Value: "A"}},
-	}
-	historical := historicalseed.Context{
-		BatchID: opts.BatchID, ScenarioID: "2025-01-01/5/submit_answer/MODEL", OrgID: 1, Version: historicalseed.Version1,
-	}
-	ctx := historicalseed.WithContext(context.Background(), historical)
-	fullWake := make(chan struct{}, 1)
-	fullWake <- struct{}{}
-	ctx = withHistoricalDownstreamReconciler(ctx, &historicalDownstreamReconciler{
-		store: store, highWatermark: 10, wake: fullWake,
-	})
-
-	result, pending, err := prepareDailySimulationAnswerSheet(ctx, state, req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pending != nil || result.Status != dailySimulationSubmissionAcceptedPending || result.AnswerSheetID != "answer-5" {
-		t.Fatalf("hot-path result=%+v pending=%v", result, pending != nil)
-	}
-	if requestCount.Load() != 1 {
-		t.Fatalf("request count=%d, want only the acceptance POST", requestCount.Load())
-	}
-	logicalID := dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID)
-	downstream, ok, err := store.loadDownstream(logicalID)
-	if err != nil || !ok || downstream.Status != historicalDownstreamSubmitted || downstream.AnswerSheetID != "answer-5" {
-		t.Fatalf("durable downstream record=%+v ok=%v err=%v", downstream, ok, err)
-	}
-	submission, ok, err := store.Get(logicalID)
-	if err != nil || !ok || submission.Status != toolanswersheet.SubmissionStatusAcceptedPending || submission.AnswerSheetID != "answer-5" {
-		t.Fatalf("durable submission record=%+v ok=%v err=%v", submission, ok, err)
 	}
 }
 
@@ -259,70 +112,6 @@ func TestDailySimulationReadinessDelayClampsServerHint(t *testing.T) {
 	}
 	if got := dailySimulationReadinessDelay(60_000); got != 10*time.Second {
 		t.Fatalf("maximum delay=%s", got)
-	}
-}
-
-func TestWaitForDailySimulationReportRequiresInterpretedTerminal(t *testing.T) {
-	var calls atomic.Int32
-	originalWait := dailySimulationReadinessWait
-	dailySimulationReadinessWait = func(context.Context, time.Duration) error { return nil }
-	t.Cleanup(func() { dailySimulationReadinessWait = originalWait })
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/assessments/assessment-1/wait-report" {
-			t.Fatalf("unexpected report request: %s %s", r.Method, r.URL.String())
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if calls.Add(1) == 1 {
-			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"processing","next_poll_after_ms":1}}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"code":0,"data":{"status":"interpreted"}}`))
-	}))
-	defer server.Close()
-
-	client := NewAPIClient(server.URL, "guardian-token", log.New(log.NewOptions()))
-	if err := waitForDailySimulationReport(context.Background(), client, "assessment-1", 42); err != nil {
-		t.Fatal(err)
-	}
-	if calls.Load() != 2 {
-		t.Fatalf("report calls=%d, want 2", calls.Load())
-	}
-}
-
-func TestDailySimulationSubmissionLogicalIDPreservesLegacyWithoutTask(t *testing.T) {
-	state := &dailySimulationJourneyState{
-		profile: dailySimulationProfile{RunDate: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Index: 7},
-		target: &dailySimulationResolvedTarget{
-			TargetType: "scale", TargetCode: "MODEL", TargetVersion: "1",
-			QuestionnaireCode: "Q", QuestionnaireVersion: "2",
-		},
-	}
-	legacy := "daily|20250101|7|42|scale|MODEL|1|Q|2"
-	if got := dailySimulationSubmissionLogicalID(state, 42, ""); got != legacy {
-		t.Fatalf("logical id=%q, want legacy %q", got, legacy)
-	}
-	if got := dailySimulationSubmissionLogicalID(state, 42, "task-1"); got != legacy+"|task-1" {
-		t.Fatalf("task logical id=%q", got)
-	}
-	state.submissionOriginRef = &OriginRef{Type: "self_service"}
-	if got := dailySimulationSubmissionLogicalID(state, 42, ""); got != legacy+"|origin:self_service:v1" {
-		t.Fatalf("self-service logical id=%q", got)
-	}
-}
-
-func TestDailySimulationSubmissionOriginRef(t *testing.T) {
-	state := &dailySimulationJourneyState{entry: &AssessmentEntryResponse{ID: " entry-1 "}}
-
-	if got := dailySimulationSubmissionOriginRef(state, ""); got.Type != "assessment_entry" || got.ID != "entry-1" {
-		t.Fatalf("primary origin=%+v", got)
-	}
-	state.submissionOriginRef = &OriginRef{Type: " self_service "}
-	if got := dailySimulationSubmissionOriginRef(state, ""); got.Type != "self_service" || got.ID != "" {
-		t.Fatalf("additional origin=%+v", got)
-	}
-	if got := dailySimulationSubmissionOriginRef(state, " task-1 "); got.Type != "plan_task" || got.ID != "task-1" {
-		t.Fatalf("plan-task origin=%+v", got)
 	}
 }
 
@@ -382,12 +171,8 @@ func TestDailySimulationReadinessTimeoutPersistsAcceptedPending(t *testing.T) {
 		QuestionnaireCode: "Q", QuestionnaireVersion: "1", TesteeID: 42,
 		Answers: []Answer{{QuestionCode: "q1", QuestionType: "Radio", Value: "A"}},
 	}
-	result, err := submitDailySimulationAnswerSheet(context.Background(), state, req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != dailySimulationSubmissionAcceptedPending {
-		t.Fatalf("unexpected pending result: %+v", result)
+	if err := submitDailySimulationAnswerSheet(context.Background(), state, req); !errors.Is(err, errDailySimulationAssessmentPending) {
+		t.Fatalf("expected retryable readiness error, got %v", err)
 	}
 	record, ok, err := ledger.Get(dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID))
 	if err != nil || !ok {
@@ -398,12 +183,12 @@ func TestDailySimulationReadinessTimeoutPersistsAcceptedPending(t *testing.T) {
 	}
 }
 
-func TestHistoricalDailySimulationReadinessTimeoutStopsTheDay(t *testing.T) {
+func TestDailySimulationRetryFromAcceptedPendingDoesNotSubmitAgain(t *testing.T) {
 	current := time.Date(2026, 7, 18, 10, 0, 0, 0, time.UTC)
 	originalNow := dailySimulationReadinessNow
 	originalWait := dailySimulationReadinessWait
 	dailySimulationReadinessNow = func() time.Time { return current }
-	dailySimulationReadinessWait = func(_ context.Context, _ time.Duration) error {
+	dailySimulationReadinessWait = func(context.Context, time.Duration) error {
 		current = current.Add(seedAssessmentPollTimeout + time.Second)
 		return nil
 	}
@@ -412,73 +197,272 @@ func TestHistoricalDailySimulationReadinessTimeoutStopsTheDay(t *testing.T) {
 		dailySimulationReadinessWait = originalWait
 	})
 
+	var postCalls atomic.Int32
+	var ready atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/answersheets":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"total":0,"items":[]}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/answersheets":
+			postCalls.Add(1)
 			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"accepted","answersheet_id":"9003"}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/answersheets/9003/assessment-readiness":
-			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"pending","answersheet_id":"9003"}}`))
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"accepted","answersheet_id":"answer-retry"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/answersheets/answer-retry/assessment-readiness":
+			if !ready.Load() {
+				_, _ = w.Write([]byte(`{"code":0,"data":{"status":"pending"}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"ready","assessment_id":"assessment-retry"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/assessments/assessment-retry/wait-report":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"interpreted"}}`))
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
 		}
 	}))
 	defer server.Close()
 
+	state, ledger := newDailySubmissionTestState(t, server.URL, true, 3)
+	req := dailySubmissionTestRequest()
+	if err := submitDailySimulationAnswerSheet(context.Background(), state, req); !errors.Is(err, errDailySimulationAssessmentPending) {
+		t.Fatalf("first attempt error=%v", err)
+	}
+	ready.Store(true)
+	if err := submitDailySimulationAnswerSheet(context.Background(), state, req); err != nil {
+		t.Fatal(err)
+	}
+	if postCalls.Load() != 1 {
+		t.Fatalf("answer sheet POST calls=%d, want 1", postCalls.Load())
+	}
+	record, ok, err := ledger.Get(dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID))
+	if err != nil || !ok || record.Status != toolanswersheet.SubmissionStatusReady || record.AssessmentID != "assessment-retry" {
+		t.Fatalf("ready ledger record=%+v ok=%v err=%v", record, ok, err)
+	}
+}
+
+func TestDailySimulationReportTimeoutRetainsReadyAndRetriesWithoutSubmit(t *testing.T) {
+	current := time.Date(2026, 7, 18, 10, 0, 0, 0, time.UTC)
+	originalNow := dailySimulationReadinessNow
+	originalWait := dailySimulationReadinessWait
+	dailySimulationReadinessNow = func() time.Time { return current }
+	dailySimulationReadinessWait = func(context.Context, time.Duration) error {
+		current = current.Add(seedAssessmentPollTimeout + time.Second)
+		return nil
+	}
+	t.Cleanup(func() {
+		dailySimulationReadinessNow = originalNow
+		dailySimulationReadinessWait = originalWait
+	})
+
+	var postCalls atomic.Int32
+	var readinessCalls atomic.Int32
+	var interpreted atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/answersheets":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"total":0,"items":[]}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/answersheets":
+			postCalls.Add(1)
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"accepted","answersheet_id":"answer-report"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/answersheets/answer-report/assessment-readiness":
+			readinessCalls.Add(1)
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"ready","assessment_id":"assessment-report"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/assessments/assessment-report/wait-report":
+			if interpreted.Load() {
+				_, _ = w.Write([]byte(`{"code":0,"data":{"status":"interpreted"}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"processing"}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	state, ledger := newDailySubmissionTestState(t, server.URL, true, 4)
+	req := dailySubmissionTestRequest()
+	if err := submitDailySimulationAnswerSheet(context.Background(), state, req); !errors.Is(err, errDailySimulationReportPending) {
+		t.Fatalf("first attempt error=%v", err)
+	}
+	record, ok, err := ledger.Get(dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID))
+	if err != nil || !ok || record.Status != toolanswersheet.SubmissionStatusReady || record.AssessmentID != "assessment-report" {
+		t.Fatalf("ready ledger record=%+v ok=%v err=%v", record, ok, err)
+	}
+	interpreted.Store(true)
+	if err := submitDailySimulationAnswerSheet(context.Background(), state, req); err != nil {
+		t.Fatal(err)
+	}
+	if postCalls.Load() != 1 || readinessCalls.Load() != 1 {
+		t.Fatalf("post_calls=%d readiness_calls=%d", postCalls.Load(), readinessCalls.Load())
+	}
+}
+
+func TestDailySimulationReportFailureRetainsReady(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/answersheets":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"total":0,"items":[]}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/answersheets":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"accepted","answersheet_id":"answer-failed"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/answersheets/answer-failed/assessment-readiness":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"ready","assessment_id":"assessment-failed"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/assessments/assessment-failed/wait-report":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"failed","reason":"worker failed"}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	state, ledger := newDailySubmissionTestState(t, server.URL, true, 5)
+	req := dailySubmissionTestRequest()
+	err := submitDailySimulationAnswerSheet(context.Background(), state, req)
+	if err == nil || !strings.Contains(err.Error(), "worker failed") {
+		t.Fatalf("report failure error=%v", err)
+	}
+	record, ok, getErr := ledger.Get(dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID))
+	if getErr != nil || !ok || record.Status != toolanswersheet.SubmissionStatusReady || record.AssessmentID != "assessment-failed" {
+		t.Fatalf("ready ledger record=%+v ok=%v err=%v", record, ok, getErr)
+	}
+}
+
+func TestDailySimulationQuestionnaireStopsAtDurableAcceptance(t *testing.T) {
+	var downstreamCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/answersheets":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"total":0,"items":[]}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/answersheets":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"accepted","answersheet_id":"answer-questionnaire"}}`))
+		default:
+			downstreamCalls.Add(1)
+			t.Fatalf("questionnaire called downstream endpoint: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	state, ledger := newDailySubmissionTestState(t, server.URL, false, 6)
+	req := dailySubmissionTestRequest()
+	if err := submitDailySimulationAnswerSheet(context.Background(), state, req); err != nil {
+		t.Fatal(err)
+	}
+	if downstreamCalls.Load() != 0 {
+		t.Fatalf("downstream calls=%d", downstreamCalls.Load())
+	}
+	record, ok, err := ledger.Get(dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID))
+	if err != nil || !ok || record.Status != toolanswersheet.SubmissionStatusCompleted {
+		t.Fatalf("completed ledger record=%+v ok=%v err=%v", record, ok, err)
+	}
+}
+
+func TestDailySimulationAdditionalTargetUsesSelfServiceAndWaitsForReport(t *testing.T) {
+	var origin OriginRef
+	var reportCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/answersheets":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"total":0,"items":[]}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/answersheets":
+			var body struct {
+				OriginRef OriginRef `json:"origin_ref"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			origin = body.OriginRef
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"accepted","answersheet_id":"answer-additional"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/answersheets/answer-additional/assessment-readiness":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"ready","assessment_id":"assessment-additional"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/assessments/assessment-additional/wait-report":
+			reportCalls.Add(1)
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"interpreted"}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	state, _ := newDailySubmissionTestState(t, server.URL, true, 7)
+	state.testee = &TesteeResponse{ID: "42"}
+	state.target = &dailySimulationResolvedTarget{
+		TargetType: "scale", TargetCode: "EXTRA", TargetVersion: "1",
+		QuestionnaireCode: "Q-EXTRA", QuestionnaireVersion: "1", QuestionnaireTitle: "Extra",
+		QuestionnaireDetail: &QuestionnaireDetailResponse{Questions: []QuestionResponse{{
+			Code: "q1", Type: "Radio", Options: []OptionResponse{{Code: "A"}},
+		}}},
+		RequiresAssessment: true,
+	}
+	if err := simulateDailyUserAdditionalTarget(context.Background(), state.deps, state.profile, state, state.target); err != nil {
+		t.Fatal(err)
+	}
+	if origin.Type != "self_service" || origin.ID != "" {
+		t.Fatalf("additional target origin=%+v", origin)
+	}
+	if reportCalls.Load() != 1 || state.outcome.ReportStatus != "interpreted" {
+		t.Fatalf("report_calls=%d outcome=%+v", reportCalls.Load(), state.outcome)
+	}
+}
+
+func TestDailySimulationSubmissionIdentityPreservesPrimaryLedgerCompatibility(t *testing.T) {
+	state := &dailySimulationJourneyState{
+		profile: dailySimulationProfile{RunDate: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Index: 7},
+		entry:   &AssessmentEntryResponse{ID: "entry-1"},
+		target: &dailySimulationResolvedTarget{
+			TargetType: "scale", TargetCode: "MODEL", TargetVersion: "1",
+			QuestionnaireCode: "Q", QuestionnaireVersion: "2",
+		},
+	}
+	legacy := "daily|20250101|7|42|scale|MODEL|1|Q|2"
+	if got := dailySimulationSubmissionLogicalID(state, 42, ""); got != legacy {
+		t.Fatalf("primary logical id=%q, want %q", got, legacy)
+	}
+	state.submissionOriginRef = &OriginRef{Type: "self_service"}
+	if got := dailySimulationSubmissionLogicalID(state, 42, ""); got != legacy+"|origin:self_service:v1" {
+		t.Fatalf("self-service logical id=%q", got)
+	}
+}
+
+func newDailySubmissionTestState(t *testing.T, serverURL string, requiresAssessment bool, index int) (*dailySimulationJourneyState, *toolanswersheet.SubmissionLedger) {
+	t.Helper()
 	ledger, err := toolanswersheet.NewSubmissionLedger(filepath.Join(t.TempDir(), "daily-submissions.json"), "daily")
 	if err != nil {
 		t.Fatal(err)
 	}
 	logger := log.New(log.NewOptions())
-	client := NewAPIClient(server.URL, "guardian-token", logger)
+	client := NewAPIClient(serverURL, "guardian-token", logger)
 	state := &dailySimulationJourneyState{
-		deps:             &dependencies{APIClient: NewAPIClient(server.URL, "admin-token", logger), CollectionClient: client, DailySubmissionLedger: ledger},
+		deps: &dependencies{
+			Logger:                logger,
+			APIClient:             NewAPIClient(serverURL, "admin-token", logger),
+			CollectionClient:      client,
+			DailySubmissionLedger: ledger,
+		},
 		collectionClient: client,
-		profile:          dailySimulationProfile{RunDate: current, Index: 3},
-		target:           &dailySimulationResolvedTarget{TargetType: "scale", TargetCode: "MODEL", TargetVersion: "1", QuestionnaireCode: "Q", QuestionnaireVersion: "1", RequiresAssessment: true},
+		guardianUserID:   "7001",
+		entry:            &AssessmentEntryResponse{ID: "entry-1"},
+		profile: dailySimulationProfile{
+			RunDate: time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC), Index: index,
+		},
+		target: &dailySimulationResolvedTarget{
+			TargetType: "scale", TargetCode: "MODEL", TargetVersion: "1",
+			QuestionnaireCode: "Q", QuestionnaireVersion: "1", RequiresAssessment: requiresAssessment,
+		},
 	}
-	req := SubmitAnswerSheetRequest{QuestionnaireCode: "Q", QuestionnaireVersion: "1", TesteeID: 42, Answers: []Answer{{QuestionCode: "q1", QuestionType: "Radio", Value: "A"}}}
-	ctx := historicalseed.WithContext(context.Background(), historicalseed.Context{BatchID: "batch", ScenarioID: "2025-01-01/3/submit_answer/MODEL", OrgID: 1, Version: historicalseed.Version1})
-	result, err := submitDailySimulationAnswerSheet(ctx, state, req)
-	if !errors.Is(err, errHistoricalSubmissionPending) {
-		t.Fatalf("err=%v", err)
-	}
-	if result.Status != dailySimulationSubmissionAcceptedPending || result.AnswerSheetID != "9003" {
-		t.Fatalf("unexpected pending result: %+v", result)
-	}
-	record, ok, getErr := ledger.Get(dailySimulationSubmissionLogicalID(state, req.TesteeID, req.TaskID))
-	if getErr != nil || !ok || record.Status != toolanswersheet.SubmissionStatusAcceptedPending {
-		t.Fatalf("pending ledger record=%+v ok=%v err=%v", record, ok, getErr)
-	}
+	return state, ledger
 }
 
-func TestVerifyHistoricalSubmissionStagesUsesServerFactsAndSlashSafeScenarioQuery(t *testing.T) {
-	scenarioID := "2025-01-01/3/submit_answer/task-1"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/internal/v1/historical-seed/batches/batch/scenarios" || r.URL.Query().Get("scenario_id") != scenarioID {
-			t.Fatalf("unexpected stage query %s", r.URL.String())
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":0,"data":{"batch_id":"batch","stages":[
-			{"stage":"task_open","status":"completed","resource_id":"task-1"},
-			{"stage":"answersheet_submit","status":"completed","resource_id":"answer-1"},
-			{"stage":"assessment_created","status":"completed","resource_id":"assessment-1"},
-			{"stage":"assessment_submitted","status":"completed","resource_id":"assessment-1"},
-			{"stage":"task_complete","status":"completed","resource_id":"task-1"},
-			{"stage":"outcome_committed","status":"completed","resource_id":"outcome-1"},
-			{"stage":"report_generated","status":"completed","resource_id":"report-1"}
-		]}}`))
-	}))
-	defer server.Close()
-
-	client := NewAPIClient(server.URL, "admin-token", log.New(log.NewOptions()))
-	historical := historicalseed.Context{BatchID: "batch", ScenarioID: scenarioID, OrgID: 9, Version: historicalseed.Version1}
-	result, err := verifyHistoricalSubmissionStages(context.Background(), client, historical, "task-1", true, dailySimulationSubmissionResult{AnswerSheetID: "answer-1", AssessmentID: "assessment-1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != dailySimulationSubmissionReportGenerated || result.OutcomeID != "outcome-1" || result.ReportID != "report-1" || len(result.ServerStages) != 7 {
-		t.Fatalf("verified result=%+v", result)
+func dailySubmissionTestRequest() SubmitAnswerSheetRequest {
+	return SubmitAnswerSheetRequest{
+		QuestionnaireCode: "Q", QuestionnaireVersion: "1", TesteeID: 42,
+		OriginRef: &OriginRef{Type: "assessment_entry", ID: "entry-1"},
+		Answers:   []Answer{{QuestionCode: "q1", QuestionType: "Radio", Value: "A"}},
 	}
 }

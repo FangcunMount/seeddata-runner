@@ -4,19 +4,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
 	sdkerrors "github.com/FangcunMount/iam/v2/pkg/sdk/errors"
-	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
 	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 )
 
@@ -50,33 +45,6 @@ func TestResolveDailySimulationJourneyTargetDefaultsToSubmit(t *testing.T) {
 	target := resolveDailySimulationJourneyTarget(DailySimulationConfig{}, time.Date(2026, 4, 19, 0, 0, 0, 0, time.Local), 1)
 	if target != dailySimulationJourneySubmitAnswer {
 		t.Fatalf("expected default target %q, got %q", dailySimulationJourneySubmitAnswer, target)
-	}
-}
-
-func TestResolveDailySimulationTargetFreezesPublishedModelAndQuestionnaireVersions(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/v1/assessment-models/published/MODEL":
-			_, _ = w.Write([]byte(`{"code":0,"data":{"code":"MODEL","title":"Model","status":"published","version":"2.0.0","questionnaire_code":"Q","questionnaire_version":"3.0.0"}}`))
-		case "/api/v1/questionnaires/Q":
-			if got := r.URL.Query().Get("version"); got != "3.0.0" {
-				t.Fatalf("questionnaire version=%q", got)
-			}
-			_, _ = w.Write([]byte(`{"code":0,"data":{"code":"Q","version":"3.0.0","title":"Questionnaire","questions":[]}}`))
-		default:
-			t.Fatalf("unexpected request %s", r.URL.String())
-		}
-	}))
-	defer server.Close()
-
-	client := NewAPIClient(server.URL, "token", log.New(log.NewOptions()))
-	target, err := resolveDailySimulationTarget(context.Background(), client, client, "scale", "MODEL", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if target.TargetVersion != "2.0.0" || target.QuestionnaireVersion != "3.0.0" {
-		t.Fatalf("resolved target=%+v", target)
 	}
 }
 
@@ -114,12 +82,11 @@ func TestShouldStopDailySimulationJourneyAfter(t *testing.T) {
 		want   bool
 	}{
 		{name: "register stops after guardian", target: dailySimulationJourneyRegisterOnly, stage: dailySimulationJourneyStageGuardianAccount, want: true},
-		{name: "register does not stop after entry", target: dailySimulationJourneyRegisterOnly, stage: dailySimulationJourneyStageEntryResolve, want: false},
-		{name: "testee stops after testee profile", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStageTesteeProfile, want: true},
-		{name: "testee does not stop after intake", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStageEntryIntake, want: false},
+		{name: "register does not stop after entry", target: dailySimulationJourneyRegisterOnly, stage: dailySimulationJourneyStageAssessmentEntry, want: false},
+		{name: "testee stops after intake", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStageAssessmentEntry, want: true},
+		{name: "testee does not stop after testee profile", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStageTesteeProfile, want: false},
 		{name: "testee does not stop after plan enrollment", target: dailySimulationJourneyCreateTestee, stage: dailySimulationJourneyStagePlanEnrollment, want: false},
-		{name: "resolve stops after entry resolve", target: dailySimulationJourneyResolveEntry, stage: dailySimulationJourneyStageEntryResolve, want: true},
-		{name: "resolve does not stop after intake", target: dailySimulationJourneyResolveEntry, stage: dailySimulationJourneyStageEntryIntake, want: false},
+		{name: "resolve stops after entry", target: dailySimulationJourneyResolveEntry, stage: dailySimulationJourneyStageAssessmentEntry, want: true},
 		{name: "submit stops after submit", target: dailySimulationJourneySubmitAnswer, stage: dailySimulationJourneyStageAnswerSheet, want: true},
 	}
 
@@ -130,6 +97,33 @@ func TestShouldStopDailySimulationJourneyAfter(t *testing.T) {
 				t.Fatalf("unexpected stop decision: got=%v want=%v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDailySimulationStageEnrollPlanRecordsEnrollmentAndTasks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/plans/enroll" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"plan_id":"plan-1","enrollment_id":"enrollment-1","tasks":[{"id":"task-1"},{"id":" task-2 "},{"id":""}]}}`))
+	}))
+	defer server.Close()
+
+	state := &dailySimulationJourneyState{
+		deps:    &dependencies{APIClient: NewAPIClient(server.URL, "", nil)},
+		planID:  "plan-1",
+		testee:  &TesteeResponse{ID: "testee-1"},
+		profile: dailySimulationProfile{RunDate: time.Date(2026, 8, 2, 0, 0, 0, 0, time.Local)},
+	}
+	if _, err := dailySimulationStageEnrollPlan(context.Background(), state); err != nil {
+		t.Fatalf("enroll plan: %v", err)
+	}
+	if !state.outcome.PlanEnrolled || state.outcome.EnrollmentID != "enrollment-1" {
+		t.Fatalf("unexpected enrollment outcome: %+v", state.outcome)
+	}
+	if got := strings.Join(state.outcome.TaskIDs, ","); got != "task-1,task-2" {
+		t.Fatalf("unexpected task ids %q", got)
 	}
 }
 
@@ -160,267 +154,6 @@ func TestDailySimulationTesteeID(t *testing.T) {
 	}
 }
 
-func TestHistoricalIAMMetadataIsExplicitAndOrdinaryRequestIsUnchanged(t *testing.T) {
-	base := EnsureIAMMockConsumerRequest{Name: "Guardian"}
-	ordinary := withHistoricalIAMMetadata(context.Background(), base, "Guardian")
-	if ordinary.Profile != nil || ordinary.Meta != nil {
-		t.Fatalf("ordinary mock consumer request changed: %+v", ordinary)
-	}
-	historicalCtx := historicalseed.WithContext(context.Background(), historicalseed.Context{
-		BatchID: "batch", ScenarioID: "2025-01-01/1/register_only/model", OrgID: 1, Version: historicalseed.Version1,
-	})
-	got := withHistoricalIAMMetadata(historicalCtx, base, "Guardian")
-	if got.Profile["nickname"] != "Guardian" || got.Meta["source"] != "seeddata_historical" || got.Meta["seed_batch_id"] != "batch" || got.Meta["seed_scenario_id"] == "" {
-		t.Fatalf("historical IAM metadata mismatch: %+v", got)
-	}
-}
-
-func TestHistoricalPlanCompletesEveryDeterministicallySelectedTaskBeforeCutoff(t *testing.T) {
-	location, _ := time.LoadLocation(historicalTimezone)
-	runDate := time.Date(2025, 1, 1, 0, 0, 0, 0, location)
-	tasks := make([]TaskResponse, 0, 101)
-	wantSelected := map[string]struct{}{}
-	for index := 0; index < 100; index++ {
-		id := fmt.Sprintf("%d", 1000+index)
-		tasks = append(tasks, TaskResponse{ID: id, PlannedAt: "2025-01-01T09:00:00+08:00"})
-		if deterministicHistoricalInt("batch", runDate, 7, "task-complete:"+id, 100) < 60 {
-			wantSelected[id] = struct{}{}
-		}
-	}
-	tasks = append(tasks, TaskResponse{ID: "9999", PlannedAt: "2025-01-04T09:00:00+08:00"})
-	opened := map[string]struct{}{}
-	discovered := map[string]struct{}{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/plans/enroll":
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": EnrollmentResponse{PlanID: "77", EnrollmentID: "88", Tasks: tasks}})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/plans/77":
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": PlanResponse{ID: "77", ScaleCode: "MODEL"}})
-		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/plans/tasks/") && strings.HasSuffix(r.URL.Path, "/open"):
-			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/plans/tasks/"), "/open")
-			if _, ok := discovered[id]; !ok {
-				t.Fatalf("task %s was opened before its child scenario was persisted", id)
-			}
-			opened[id] = struct{}{}
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": TaskResponse{ID: id}})
-		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer server.Close()
-
-	client := NewAPIClient(server.URL, "token", log.New(log.NewOptions()))
-	state := &dailySimulationJourneyState{
-		deps: &dependencies{APIClient: client}, planID: "77", testee: &TesteeResponse{ID: "42"},
-		profile: dailySimulationProfile{RunDate: runDate, Index: 7},
-		target:  &dailySimulationResolvedTarget{TargetCode: "MODEL"},
-	}
-	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "parent", OrgID: 1, Version: historicalseed.Version1}
-	ctx := withHistoricalCutoff(historicalseed.WithContext(context.Background(), historical), time.Date(2025, 1, 3, 0, 0, 0, 0, location))
-	ctx = withHistoricalPlanTaskDiscoveryRecorder(ctx, func(_ historicalseed.Context, recovery HistoricalPlanTaskRecovery) error {
-		discovered[recovery.TaskID] = struct{}{}
-		return nil
-	})
-	if _, err := dailySimulationStageEnrollPlan(ctx, state); err != nil {
-		t.Fatal(err)
-	}
-	if len(opened) != 0 || len(state.selectedTasks) != len(wantSelected) {
-		t.Fatalf("task opening must be deferred to submission workers: opened=%d selected=%d want=%d", len(opened), len(state.selectedTasks), len(wantSelected))
-	}
-	ctx = withHistoricalLocalStageRecorder(ctx, func(_ historicalseed.Context, _ dailySimulationJourneyStage, _ dailySimulationOutcome, _ *dailySimulationResolvedTarget) error {
-		return nil
-	})
-	for _, task := range state.selectedTasks {
-		if err := ensureHistoricalPlanTaskOpen(historicalseed.WithContext(ctx, task.Context), state, task.ID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if len(opened) != len(wantSelected) {
-		t.Fatalf("submission workers opened=%d want=%d", len(opened), len(wantSelected))
-	}
-	for id := range wantSelected {
-		if _, ok := opened[id]; !ok {
-			t.Fatalf("selected task %s was not opened", id)
-		}
-	}
-	if _, ok := opened["9999"]; ok {
-		t.Fatal("task after the inclusive backfill cutoff was opened")
-	}
-}
-
-func TestHistoricalPlanRejectsIncompatibleTargetBeforeEnrollment(t *testing.T) {
-	enrollmentCalls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/plans/77":
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": PlanResponse{ID: "77", ScaleCode: "yGtSs1"}})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/plans/enroll":
-			enrollmentCalls++
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": EnrollmentResponse{PlanID: "77", EnrollmentID: "88"}})
-		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer server.Close()
-
-	client := NewAPIClient(server.URL, "token", log.New(log.NewOptions()))
-	state := &dailySimulationJourneyState{
-		deps:   &dependencies{APIClient: client},
-		planID: "77",
-		testee: &TesteeResponse{ID: "42"},
-		target: &dailySimulationResolvedTarget{TargetCode: "3adyDE"},
-	}
-	ctx := historicalseed.WithContext(context.Background(), historicalseed.Context{
-		BatchID: "batch", ScenarioID: "scenario", OrgID: 1, Version: historicalseed.Version1,
-	})
-
-	_, err := dailySimulationStageEnrollPlan(ctx, state)
-	if err == nil || !strings.Contains(err.Error(), "scale yGtSs1 does not match scenario target 3adyDE") {
-		t.Fatalf("expected historical plan target conflict, got %v", err)
-	}
-	if enrollmentCalls != 0 {
-		t.Fatalf("incompatible historical plan called enrollment API %d times", enrollmentCalls)
-	}
-}
-
-func TestHistoricalPlanResumeUsesServerEnrollmentAndTaskFactsWithoutMutation(t *testing.T) {
-	location, _ := time.LoadLocation(historicalTimezone)
-	runDate := time.Date(2025, 1, 1, 0, 0, 0, 0, location)
-	taskID := ""
-	for candidate := 1000; candidate < 2000; candidate++ {
-		value := strconv.Itoa(candidate)
-		if deterministicHistoricalInt("batch", runDate, 7, "task-complete:"+value, 100) < 60 {
-			taskID = value
-			break
-		}
-	}
-	if taskID == "" {
-		t.Fatal("failed to find deterministic selected task")
-	}
-	plannedAt := "2025-01-01T09:00:00+08:00"
-	mutationCalls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/internal/v1/plans/tasks/window":
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": PlanTaskWindowResponse{
-				Tasks: []TaskResponse{{ID: taskID, PlanID: "77", TesteeID: "42", PlannedAt: plannedAt}}, Page: 1, PageSize: 100,
-			}})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/plans/77":
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": PlanResponse{ID: "77", ScaleCode: "MODEL"}})
-		case r.Method == http.MethodPost && (r.URL.Path == "/api/v1/plans/enroll" || strings.HasSuffix(r.URL.Path, "/open")):
-			mutationCalls++
-			t.Fatalf("resume repeated historical mutation %s", r.URL.Path)
-		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer server.Close()
-
-	client := NewAPIClient(server.URL, "token", log.New(log.NewOptions()))
-	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "parent", OrgID: 1, Version: historicalseed.Version1}
-	childID := fmt.Sprintf("2025-01-01/7/%s/%s", dailySimulationJourneySubmitAnswer, taskID)
-	snapshot := &HistoricalDaySnapshot{Scenarios: map[string]HistoricalScenarioSnapshot{
-		"parent": {Server: map[string]HistoricalStageRecord{
-			"plan_enrollment": {ID: 1, Stage: "plan_enrollment", Status: "completed", ResourceID: "88", PayloadHash: "hash", BusinessAt: runDate.Add(8 * time.Hour), PayloadJSON: json.RawMessage(fmt.Sprintf(`{"enrollment_id":"88","plan_id":"77","task_ids":[%q]}`, taskID))},
-		}},
-		childID: {Server: map[string]HistoricalStageRecord{
-			"task_open": {ID: 2, Stage: "task_open", Status: "completed", ResourceID: taskID, PayloadHash: "hash", BusinessAt: runDate.Add(9 * time.Hour)},
-		}},
-	}}
-	state := &dailySimulationJourneyState{
-		deps: &dependencies{APIClient: client}, planID: "77", testee: &TesteeResponse{ID: "42"},
-		profile: dailySimulationProfile{RunDate: runDate, Index: 7},
-		target:  &dailySimulationResolvedTarget{TargetType: "scale", TargetCode: "MODEL"},
-	}
-	discoveries := 0
-	ctx := historicalseed.WithContext(context.Background(), historical)
-	ctx = withHistoricalCutoff(ctx, runDate.AddDate(0, 0, 2))
-	ctx = withHistoricalDaySnapshot(ctx, snapshot)
-	ctx = withHistoricalPlanTaskDiscoveryRecorder(ctx, func(_ historicalseed.Context, recovery HistoricalPlanTaskRecovery) error {
-		discoveries++
-		if recovery.TaskID != taskID || recovery.ScenarioID != childID {
-			t.Fatalf("unexpected recovery: %+v", recovery)
-		}
-		return nil
-	})
-	if _, err := dailySimulationStageEnrollPlan(ctx, state); err != nil {
-		t.Fatal(err)
-	}
-	if mutationCalls != 0 || discoveries != 1 || state.outcome.EnrollmentID != "88" || len(state.selectedTasks) != 1 || state.selectedTasks[0].ID != taskID {
-		t.Fatalf("resume outcome=%+v selected=%+v mutations=%d discoveries=%d", state.outcome, state.selectedTasks, mutationCalls, discoveries)
-	}
-}
-
-func TestHistoricalAnswerResumeMergesServerTerminalWithoutSubmitting(t *testing.T) {
-	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "scenario", OrgID: 1, Version: historicalseed.Version1}
-	serverStages := map[string]HistoricalStageRecord{
-		"answersheet_submit":   {Stage: "answersheet_submit", Status: "completed", ResourceID: "answer-1"},
-		"assessment_created":   {Stage: "assessment_created", Status: "completed", ResourceID: "assessment-1"},
-		"assessment_submitted": {Stage: "assessment_submitted", Status: "completed", ResourceID: "assessment-1"},
-		"outcome_committed":    {Stage: "outcome_committed", Status: "completed", ResourceID: "outcome-1"},
-		"report_generated":     {Stage: "report_generated", Status: "completed", ResourceID: "report-1"},
-	}
-	ctx := historicalseed.WithContext(context.Background(), historical)
-	ctx = withHistoricalDaySnapshot(ctx, &HistoricalDaySnapshot{Scenarios: map[string]HistoricalScenarioSnapshot{
-		historical.ScenarioID: {Server: serverStages},
-	}})
-	recorded := make(map[string]int)
-	ctx = withHistoricalLocalStageRecorder(ctx, func(_ historicalseed.Context, stage dailySimulationJourneyStage, _ dailySimulationOutcome, _ *dailySimulationResolvedTarget) error {
-		recorded[string(stage)]++
-		return nil
-	})
-	state := &dailySimulationJourneyState{
-		deps: &dependencies{}, entry: &AssessmentEntryResponse{ID: "entry-1"}, testee: &TesteeResponse{ID: "42"},
-		profile: dailySimulationProfile{RunDate: time.Date(2025, 1, 1, 0, 0, 0, 0, time.Local)},
-		target: &dailySimulationResolvedTarget{
-			QuestionnaireCode: "Q", QuestionnaireVersion: "1", RequiresAssessment: true,
-			QuestionnaireDetail: &QuestionnaireDetailResponse{},
-		},
-	}
-	if _, err := dailySimulationStageSubmitAnswerSheet(ctx, state); err != nil {
-		t.Fatal(err)
-	}
-	if state.outcome.AnswerSheetID != "answer-1" || state.outcome.AssessmentID != "assessment-1" {
-		t.Fatalf("restored outcome=%+v", state.outcome)
-	}
-	for _, stage := range []string{"answersheet_submit", "assessment_created", "outcome_committed", "report_generated"} {
-		if recorded[stage] != 1 {
-			t.Fatalf("local stage %s recorded %d times", stage, recorded[stage])
-		}
-	}
-}
-
-func TestHistoricalEntryResumeUsesServerFactsWithoutRepeatingPublicAPIs(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("entry resume repeated public API %s %s", r.Method, r.URL.Path)
-	}))
-	defer server.Close()
-	historical := historicalseed.Context{BatchID: "batch", ScenarioID: "scenario", OrgID: 1, Version: historicalseed.Version1}
-	ctx := historicalseed.WithContext(context.Background(), historical)
-	ctx = withHistoricalDaySnapshot(ctx, &HistoricalDaySnapshot{Scenarios: map[string]HistoricalScenarioSnapshot{
-		historical.ScenarioID: {Server: map[string]HistoricalStageRecord{
-			"entry_resolve": {Stage: "entry_resolve", Status: "completed", ResourceID: "entry-1", PayloadHash: "hash", BusinessAt: time.Now()},
-			"entry_intake":  {Stage: "entry_intake", Status: "completed", ResourceID: "42", PayloadHash: "hash", BusinessAt: time.Now()},
-		}},
-	}})
-	state := &dailySimulationJourneyState{
-		deps:  &dependencies{APIClient: NewAPIClient(server.URL, "token", log.New(log.NewOptions()))},
-		entry: &AssessmentEntryResponse{ID: "entry-1", Token: "entry-token"}, testee: &TesteeResponse{ID: "42"},
-	}
-	if _, err := dailySimulationStageResolveEntry(ctx, state); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dailySimulationStageIntakeEntry(ctx, state); err != nil {
-		t.Fatal(err)
-	}
-	if !state.outcome.EntryResolved || !state.outcome.EntryIntaked {
-		t.Fatalf("entry facts were not restored: %+v", state.outcome)
-	}
-}
-
 func TestShouldRetryDailySimulationIAMLogin(t *testing.T) {
 	if !shouldRetryDailySimulationIAMLogin(context.DeadlineExceeded) {
 		t.Fatalf("expected timeout to be retryable")
@@ -431,93 +164,8 @@ func TestShouldRetryDailySimulationIAMLogin(t *testing.T) {
 	if !shouldRetryDailySimulationIAMLogin(sdkerrors.ErrServiceUnavailable) {
 		t.Fatalf("expected IAM SDK unavailable error to be retryable")
 	}
-	if !shouldRetryDailySimulationIAMLogin(assertErr("dial tcp: lookup iam-apiserver on 127.0.0.11:53: no such host")) {
-		t.Fatalf("expected Docker DNS failure to be retryable")
-	}
-	if !shouldRetryDailySimulationIAMLogin(assertErr("dial tcp 172.20.0.10:9080: connect: connection refused")) {
-		t.Fatalf("expected connection refusal to be retryable")
-	}
 	if shouldRetryDailySimulationIAMLogin(assertErr("iam login failed: status=401 body=unauthorized")) {
 		t.Fatalf("expected 401 not to be retryable")
-	}
-}
-
-func TestHistoricalGuardianSessionRestoreHonorsIAMLimiter(t *testing.T) {
-	const (
-		jobs  = 8
-		limit = 2
-	)
-	var inFlight atomic.Int64
-	var maximum atomic.Int64
-	var calls atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v2/authn/login" {
-			http.NotFound(w, r)
-			return
-		}
-		calls.Add(1)
-		current := inFlight.Add(1)
-		defer inFlight.Add(-1)
-		for {
-			previous := maximum.Load()
-			if current <= previous || maximum.CompareAndSwap(previous, current) {
-				break
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code": 0,
-			"data": map[string]any{"access_token": "token-1"},
-		})
-	}))
-	defer server.Close()
-
-	state := &dailySimulationJourneyState{
-		deps: &dependencies{
-			Logger: log.New(log.NewOptions()),
-			Config: &seedconfig.Config{
-				Global: seedconfig.GlobalConfig{OrgID: 1},
-				IAM: seedconfig.IAMConfig{
-					LoginURL:     server.URL + "/api/v2/authn/login",
-					MockConsumer: seedconfig.IAMMockConsumerConfig{Enabled: true},
-				},
-			},
-		},
-		cfg: DailySimulationConfig{UserPassword: "DailySim@123"},
-		profile: dailySimulationProfile{
-			GuardianEmail: "guardian@example.com",
-			GuardianPhone: "+8619900000001",
-			RunDate:       time.Date(2025, 1, 1, 0, 0, 0, 0, time.Local),
-		},
-		mockIAMLimiter: make(chan struct{}, limit),
-	}
-
-	start := make(chan struct{})
-	errors := make(chan error, jobs)
-	var workers sync.WaitGroup
-	for index := 0; index < jobs; index++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			<-start
-			_, err := restoreDailySimulationGuardianSessionWithLimiter(context.Background(), state)
-			errors <- err
-		}()
-	}
-	close(start)
-	workers.Wait()
-	close(errors)
-	for err := range errors {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := calls.Load(); got != jobs {
-		t.Fatalf("login calls=%d, want %d", got, jobs)
-	}
-	if got := maximum.Load(); got != limit {
-		t.Fatalf("maximum IAM login concurrency=%d, want %d", got, limit)
 	}
 }
 

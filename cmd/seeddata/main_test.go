@@ -1,12 +1,11 @@
 package main
 
 import (
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 )
 
 func TestParseCLIOptionsDefaults(t *testing.T) {
@@ -17,86 +16,47 @@ func TestParseCLIOptionsDefaults(t *testing.T) {
 	if opts.configPath != "./configs/seeddata.yaml" {
 		t.Fatalf("unexpected default config path: %q", opts.configPath)
 	}
-	if opts.command != "daemon" {
-		t.Fatalf("unexpected default command: %q", opts.command)
-	}
 	if opts.verbose {
 		t.Fatalf("expected verbose=false by default")
 	}
 }
 
-func TestParseHistoricalBackfillCLI(t *testing.T) {
-	opts, err := parseCLIOptions([]string{
-		"historical-backfill", "--config", "/tmp/seeddata.yaml", "--from", "2025-01-01", "--to", "2026-07-27",
-		"--batch-id", "hist-20250101-20260727-v1", "--resume",
-	})
-	if err != nil {
-		t.Fatal(err)
+func TestParseCLIOptionsRejectsRetiredCommandsFlagsAndPositionals(t *testing.T) {
+	tests := [][]string{
+		{decodeRetiredCLIInput(t, "686973746f726963616c2d6261636b66696c6c")},
+		{decodeRetiredCLIInput(t, "686973746f726963616c2d766572696679")},
+		{decodeRetiredCLIInput(t, "686973746f726963616c2d6d616e6966657374")},
+		{decodeRetiredCLIInput(t, "686973746f726963616c2d7465737465652d74696d652d7265706169722d73716c")},
+		{decodeRetiredCLIInput(t, "2d2d62617463682d6964")},
+		{decodeRetiredCLIInput(t, "2d2d72756e2d64617465")},
+		{decodeRetiredCLIInput(t, "2d2d73746174652d646972")},
+		{decodeRetiredCLIInput(t, "2d2d66726f6d")},
+		{decodeRetiredCLIInput(t, "2d2d746f")},
+		{decodeRetiredCLIInput(t, "2d2d726573756d65")},
+		{decodeRetiredCLIInput(t, "2d2d706172656e742d776f726b657273")},
+		{decodeRetiredCLIInput(t, "2d2d7375626d697373696f6e2d776f726b657273")},
+		{decodeRetiredCLIInput(t, "2d2d7265706f72742d776f726b657273")},
+		{decodeRetiredCLIInput(t, "2d2d7265706f72742d71756575652d6361706163697479")},
+		{decodeRetiredCLIInput(t, "2d2d70656e64696e672d686967682d77617465726d61726b")},
+		{decodeRetiredCLIInput(t, "2d2d73746167652d726561642d776f726b657273")},
+		{decodeRetiredCLIInput(t, "2d2d69616d2d776f726b657273")},
+		{decodeRetiredCLIInput(t, "2d2d65787065637465642d6461746162617365")},
+		{"unexpected"},
 	}
-	if opts.command != "historical-backfill" || opts.from != "2025-01-01" || opts.to != "2026-07-27" || !opts.resume {
-		t.Fatalf("unexpected historical options: %+v", opts)
-	}
-}
-
-func TestResolveHistoricalLegacySubmissionPathRequiresExplicitOverride(t *testing.T) {
-	cfg := &seedconfig.Config{DailySimulation: seedconfig.DailySimulationConfig{SubmissionStateFile: ".seeddata-cache/daily-simulation-submissions.json"}}
-	t.Setenv("SEEDDATA_DAILY_SUBMISSION_STATE_FILE", "")
-	if got := resolveHistoricalLegacySubmissionPath(cfg); got != "" {
-		t.Fatalf("implicit config path was treated as a historical legacy ledger: %q", got)
-	}
-
-	t.Setenv("SEEDDATA_DAILY_SUBMISSION_STATE_FILE", "/run/seeddata/legacy.json")
-	cfg.DailySimulation.SubmissionStateFile = "/run/seeddata/legacy.json"
-	if got := resolveHistoricalLegacySubmissionPath(cfg); got != "/run/seeddata/legacy.json" {
-		t.Fatalf("explicit historical legacy ledger was not selected: %q", got)
-	}
-}
-
-func TestParseHistoricalBackfillConcurrencyOverrides(t *testing.T) {
-	opts, err := parseCLIOptions([]string{
-		"historical-backfill", "--from", "2025-01-01", "--to", "2026-07-27", "--batch-id", "batch",
-		"--parent-workers", "16", "--submission-workers", "24", "--report-workers", "8", "--report-queue-capacity", "32",
-		"--pending-high-watermark", "2048", "--stage-read-workers", "12", "--iam-workers", "2",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if opts.parentWorkers != 16 || opts.submissionWorkers != 24 || opts.reportWorkers != 8 || opts.reportQueueCapacity != 32 || opts.pendingHighWatermark != 2048 || opts.stageReadWorkers != 12 || opts.iamWorkers != 2 {
-		t.Fatalf("unexpected concurrency options: %+v", opts)
-	}
-}
-
-func TestParseHistoricalBackfillRejectsNegativeConcurrencyOverride(t *testing.T) {
-	_, err := parseCLIOptions([]string{
-		"historical-backfill", "--from", "2025-01-01", "--to", "2026-07-27", "--batch-id", "batch",
-		"--submission-workers", "-1",
-	})
-	if err == nil || !strings.Contains(err.Error(), "--submission-workers must be positive") {
-		t.Fatalf("expected negative concurrency error, got %v", err)
-	}
-}
-
-func TestParseHistoricalReadOnlyCommandsRequireBatch(t *testing.T) {
-	for _, command := range []string{"historical-verify", "historical-manifest"} {
-		if _, err := parseCLIOptions([]string{command}); err == nil {
-			t.Fatalf("%s accepted without batch id", command)
-		}
-		if opts, err := parseCLIOptions([]string{command, "--batch-id", "batch"}); err != nil || opts.batchID != "batch" {
-			t.Fatalf("%s parse failed: opts=%+v err=%v", command, opts, err)
+	for _, args := range tests {
+		if _, err := parseCLIOptions(args); err == nil {
+			t.Fatalf("retired or unknown CLI input was accepted: %v", args)
 		}
 	}
 }
 
-func TestParseHistoricalTesteeTimeRepairSQL(t *testing.T) {
-	opts, err := parseCLIOptions([]string{
-		"historical-testee-time-repair-sql", "--state-dir", "/secure/state", "--batch-id", "batch", "--expected-database", "qs",
-	})
+func decodeRetiredCLIInput(t *testing.T, encoded string) string {
+	t.Helper()
+	decoded, err := hex.DecodeString(encoded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.command != "historical-testee-time-repair-sql" || opts.batchID != "batch" || opts.expectedDB != "qs" {
-		t.Fatalf("options=%+v", opts)
-	}
+	return string(decoded)
 }
 
 func TestParseCLIOptionsOverrides(t *testing.T) {

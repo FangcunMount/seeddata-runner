@@ -3,7 +3,6 @@ package dailysim
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,36 +13,20 @@ import (
 	seedapi "github.com/FangcunMount/seeddata-runner/internal/seedapi"
 )
 
-func TestDailySimulationBatchFailuresErrorPreservesEveryCause(t *testing.T) {
-	first := errors.New("http_status=503")
-	second := errors.New("connection reset by peer")
-	err := newDailySimulationBatchFailuresError("historical_day", []error{first, second})
-	if err == nil || err.Error() != "historical_day completed with 2 failures" {
-		t.Fatalf("unexpected batch error: %v", err)
-	}
-	if !errors.Is(err, first) || !errors.Is(err, second) {
-		t.Fatalf("batch error did not preserve causes: %v", err)
-	}
-	var batchErr *dailySimulationBatchFailuresError
-	if !errors.As(err, &batchErr) || len(batchErr.Causes()) != 2 {
-		t.Fatalf("batch error causes are not inspectable: %v", err)
-	}
-}
-
-func TestResolveDailySimulationBatchCountStableRange(t *testing.T) {
+func TestResolveDailySimulationRunCountStableRange(t *testing.T) {
 	cfg := DailySimulationConfig{
 		CountMin: 20,
 		CountMax: 50,
 	}
 	runDate := time.Date(2026, 4, 17, 0, 0, 0, 0, time.Local)
 
-	first, err := resolveDailySimulationBatchCount(cfg, runDate, -1)
+	first, err := resolveDailySimulationRunCount(cfg, runDate, -1)
 	if err != nil {
-		t.Fatalf("resolveDailySimulationBatchCount returned error: %v", err)
+		t.Fatalf("resolveDailySimulationRunCount returned error: %v", err)
 	}
-	second, err := resolveDailySimulationBatchCount(cfg, runDate, -1)
+	second, err := resolveDailySimulationRunCount(cfg, runDate, -1)
 	if err != nil {
-		t.Fatalf("resolveDailySimulationBatchCount returned error on second call: %v", err)
+		t.Fatalf("resolveDailySimulationRunCount returned error on second call: %v", err)
 	}
 	if first != second {
 		t.Fatalf("expected stable count for same date, got %d and %d", first, second)
@@ -331,15 +314,15 @@ func mustTestWindowSchedule(t *testing.T, startAt, endAt scheduler.Clock, interv
 	return window
 }
 
-func TestResolveDailySimulationBatchCountClampsToRemainingQuota(t *testing.T) {
+func TestResolveDailySimulationRunCountClampsToRemainingQuota(t *testing.T) {
 	cfg := DailySimulationConfig{
 		CountPerRun: 20,
 	}
 	runDate := time.Date(2026, 4, 17, 0, 0, 0, 0, time.Local)
 
-	count, err := resolveDailySimulationBatchCount(cfg, runDate, 7)
+	count, err := resolveDailySimulationRunCount(cfg, runDate, 7)
 	if err != nil {
-		t.Fatalf("resolveDailySimulationBatchCount returned error: %v", err)
+		t.Fatalf("resolveDailySimulationRunCount returned error: %v", err)
 	}
 	if count != 7 {
 		t.Fatalf("expected count to be clamped to remaining quota, got %d", count)

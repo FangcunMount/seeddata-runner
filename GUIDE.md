@@ -2,96 +2,65 @@
 
 ## 模块定位
 
-`seeddata-runner` 是和 `qs-server`、`iam` 同层的独立 module，负责模拟真实用户行为，不属于 `qs-server` 主模块运行时。
+`seeddata-runner` 只负责当前日期的普通每日模拟：
 
-它启动后固定并发跑两条后台任务：
+1. `daily_simulation_daemon` 完成 Guardian、Testee、Entry、Plan enrollment、AnswerSheet、Assessment 和 Report 闭环。
+2. `plan_submit_open_tasks_daemon` 查询当天 opened task，并做幂等 admin submit。
 
-1. daily simulation
-2. plan open-task submit
-
-## 1. daily simulation
-
-用途：
-
-- 每天自动生成一批新用户
-- 完成扫码、注册、建档、分配 clinician、填写答卷
-- 按旅程目标模拟只注册、只到 testee、到 entry 但不提交等中途停止场景
-
-实现上按职责链拆成固定阶段：
-
-1. `guardian_account`
-2. `child_profile`
-3. `testee_profile`
-4. `assessment_entry`
-5. `answersheet_submit`
-
-职责链允许在中途阶段提前停止，便于构造更真实的漏斗数据。
-
-## 2. plan open-task submit
-
-用途：
-
-- 常驻扫描指定 plan 当前已经进入 `opened` 的 task
-- 只负责提交答卷，模拟“用户完成 task”
-- 不负责 plan 生命周期推进
-
-说明：
-
-- `worker` 负责 `schedule/open/expire/complete`
-- `seeddata` 只负责把已经 open 的 task 假装成用户完成填写
-
-## 3. 推荐运行方式
+## 运行
 
 ```bash
-cd seeddata-runner
 ./scripts/run_seeddata_daemon.sh
 ```
 
 或：
 
 ```bash
-cd seeddata-runner
 go run ./cmd/seeddata --config ./configs/seeddata.yaml
 ```
 
-如果是服务器常驻部署，优先看 [README.md](./README.md) 里的“编译二进制并通过 systemd 运行”章节；线上推荐固定二进制 + `systemctl`，不要长期依赖 `go run`。
+CLI 只接受 `--config` 和 `--verbose`；配置只接受 README 中列出的严格字段。
 
-## 4. 配置原则
+## daily simulation
 
-`configs/seeddata.yaml` 只保留：
+完整旅程顺序：
 
-- `global`
-- `api`
-- `iam`
-- `dailySimulation`
-- `planSubmit`
+1. ensure Guardian account
+2. create or reuse current-date Testee
+3. resolve and intake Assessment Entry
+4. enroll Plan and record returned task IDs
+5. submit AnswerSheet
+6. wait assessment readiness
+7. wait report interpreted
 
-其中：
+需要测评的目标必须完成第 7 步才算本轮成功。普通 Questionnaire 不需要 readiness/report。
 
-- `planSubmit.planIds` 是 open-task submit daemon 的目标 plan 集合
-- `planSubmit.workers` 控制 open-task submit 并发
-- `planSubmit.completionPercent` 控制每天最多完成当天 task 的比例，默认 `100`
-- `planSubmit` 只会提交 `source` 等于 `dailySimulation.testeeSource` 的 testee task，避免影响正常业务 testee
-- `planSubmit.idleInterval` 控制 open-task submit 空闲轮询间隔
-- `planSubmit.activeInterval` 控制 open-task submit 在发现 opened task 后的下一轮轮询间隔
-- `dailySimulation.runAt` 是兼容的单次调度入口；如果未设置窗口字段，则每天只跑一次
-- `dailySimulation.windowStartAt` / `dailySimulation.windowEndAt` / `dailySimulation.interval` 定义窗口内固定间隔调度
-- `dailySimulation.dailyMaxUsers` 限制当天成功新增用户总数
-- `dailySimulation.targetCode` 仍然是单个入口量表；`additionalTargetCodes` / `additionalTargetMaxCount` 用于入口完成后为每个 testee 随机追加填报 1..N 个量表
-- `dailySimulation.*` 的默认值由配置加载阶段统一补齐，daemon 不再各自做零散 normalize
+after-hours catch-up 只匹配当前日期、相同 source/tags/身份签名的 Testee。
 
-如果 daily simulation 需要限制医生范围，优先使用 `dailySimulation.clinicianIds`。
+## plan submit
 
-如果需要模拟不同深度的用户旅程，使用 `dailySimulation.journeyMix`：
+plan submit daemon：
 
-- `registerOnlyWeight`
-- `createTesteeWeight`
-- `resolveEntryWeight`
-- `submitAnswerWeight`
+- 只查当前日期任务窗口。
+- 只处理 configured Plan、opened task 和 seeddata Testee。
+- 使用独立持久账本保护幂等和冲突语义。
+- 不负责创建、打开、过期或重排任务。
 
-如果不想把 IAM 凭据写在配置文件中，可以在启动前注入：
+## 凭据
+
+生产环境通过环境变量注入：
 
 - `IAM_USERNAME`
 - `IAM_PASSWORD`
+- `IAM_MOCK_CONSUMER_SHARED_SECRET`
 
-当 `api.token` 为空时，runner 会先读取这两个环境变量，再回退到配置文件里的 `iam.username` / `iam.password`。
+不要把真实 secret 写入 YAML、日志或提交记录。
+
+## 故障判断
+
+- `accepted_pending`：AnswerSheet 已持久接受，Assessment 尚未 ready；重试只查 readiness。
+- `ready` 且本轮报错：Assessment 已持久化，Report 尚未 interpreted 或已 failed；重试只查 report。
+- `conflict`：同一 logical ID 的 payload fingerprint 已变化，需要人工检查配置或数据身份。
+- daemon 状态文件控制当前日期 slot 和配额；submission 状态文件控制远端副作用幂等，两者不能互相替代。
+
+详细配置、构建、systemd 和验收步骤见 [README.md](./README.md)。

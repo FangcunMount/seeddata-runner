@@ -47,20 +47,6 @@ type PreparedSubmission struct {
 	ShouldSubmit bool
 }
 
-// SubmissionStore is the durable identity boundary used by AnswerSheet submission.
-// The JSON SubmissionLedger remains the default implementation for daemon and
-// plan-submit modes; historical backfill may provide a different durable store.
-type SubmissionStore interface {
-	Get(logicalID string) (SubmissionRecord, bool, error)
-	Prepare(logicalID string, payload any) (PreparedSubmission, error)
-	MarkAccepted(logicalID, answerSheetID string) (SubmissionRecord, error)
-	MarkAcceptedPending(logicalID string) (SubmissionRecord, error)
-	MarkReady(logicalID, assessmentID string) (SubmissionRecord, error)
-	MarkCompleted(logicalID, answerSheetID string) (SubmissionRecord, error)
-	MarkConflict(logicalID string) (SubmissionRecord, error)
-	ReconcileLegacy(logicalID, answerSheetID string, payload any) (SubmissionRecord, error)
-}
-
 type submissionLedgerState struct {
 	Records map[string]SubmissionRecord `json:"records"`
 }
@@ -101,7 +87,7 @@ func (l *SubmissionLedger) Prepare(logicalID string, payload any) (PreparedSubmi
 	if logicalID == "" {
 		return PreparedSubmission{}, fmt.Errorf("submission logical_id is required")
 	}
-	fingerprint, err := SubmissionFingerprint(payload)
+	fingerprint, err := submissionFingerprint(payload)
 	if err != nil {
 		return PreparedSubmission{}, err
 	}
@@ -256,37 +242,13 @@ func (l *SubmissionLedger) update(logicalID string, mutate func(*SubmissionRecor
 	return record, nil
 }
 
-func SubmissionFingerprint(payload any) (string, error) {
+func submissionFingerprint(payload any) (string, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("encode submission fingerprint payload: %w", err)
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
-}
-
-// SubmissionIdempotencyKey preserves the existing deterministic key contract
-// for alternative durable SubmissionStore implementations.
-func SubmissionIdempotencyKey(mode, logicalID string) string {
-	return submissionIdempotencyKey(mode, logicalID)
-}
-
-// ExportRecords returns a stable snapshot for one-time state migrations.
-func (l *SubmissionLedger) ExportRecords() (map[string]SubmissionRecord, error) {
-	if l == nil {
-		return nil, fmt.Errorf("submission ledger is nil")
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	state, err := l.loadLocked()
-	if err != nil {
-		return nil, err
-	}
-	records := make(map[string]SubmissionRecord, len(state.Records))
-	for key, record := range state.Records {
-		records[key] = record
-	}
-	return records, nil
 }
 
 func submissionIdempotencyKey(mode, logicalID string) string {

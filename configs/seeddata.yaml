@@ -45,7 +45,7 @@ dailySimulation:
   windowStartAt: "10:00"  # 模拟时间窗口开始时间，格式 "HH:mm"
   windowEndAt: "23:00"    # 模拟时间窗口结束时间，格式 "HH:mm"
   interval: "30m"         # 模拟时间窗口内每轮执行间隔，格式支持 Go Duration，如 "30m"、"1h15m" 等；设置后按窗口模式执行
-  retryDelay: "30m"       # 模拟失败重试间隔，格式支持 Go Duration，如 "30m"、"1h15m" 等；设置后模拟失败时会在间隔后重试，直到 runDate 结束
+  retryDelay: "30m"       # 模拟失败重试间隔，格式支持 Go Duration，如 "30m"、"1h15m" 等；当前日期窗口内失败时按该间隔重试
   stateFile: ".seeddata-cache/daily-simulation-daemon-state.json"
   submissionStateFile: ".seeddata-cache/daily-simulation-submissions.json"
   clinicianIds:
@@ -88,16 +88,6 @@ dailySimulation:
     createTesteeWeight: 15  # ~15% 走公开 intake 建档案后停，不写答卷
     resolveEntryWeight: 25  # ~25% 完成入口接入后停，拉开 entry/testee 与答卷指标
     submitAnswerWeight: 50  # ~50% 走完全流程；planSubmit 另有 completionPercent 控制提交比例
-
-historicalBackfill:
-  parentWorkers: 12
-  submissionWorkers: 6
-  reportWorkers: 4
-  reportQueueCapacity: 24
-  pendingHighWatermark: 4096
-  stageReadWorkers: 6
-  iamWorkers: 1
-  progressInterval: "15s"
 
 planSubmit:
   submissionStateFile: ".seeddata-cache/plan-submit-submissions.json"

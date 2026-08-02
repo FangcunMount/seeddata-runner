@@ -15,7 +15,7 @@ env:
 
 jobs:
   test:
-    name: Run Tests
+    name: Go Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,11 +32,14 @@ jobs:
           go mod download
           go mod verify
 
-      - name: Run tests
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
         run: go test ./...
 
   race:
-    name: Historical Backfill Race Tests
+    name: Ordinary Package Race Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -48,15 +51,17 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Run historical race tests
+      - name: Race test
         run: |
           go test -race \
             ./internal/answersheet \
             ./internal/dailysim \
+            ./internal/plansubmit \
+            ./internal/seedapi \
             ./internal/seedruntime
 
-  deployment-contracts:
-    name: Deployment Contracts
+  repository-contracts:
+    name: Repository Contracts
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -74,13 +79,15 @@ jobs:
           "$(go env GOPATH)/bin/actionlint"
 
       - name: Validate shell scripts
+        shell: bash
         run: |
-          bash -n scripts/*.sh scripts/cd/*.sh
-          bash scripts/cd/test-contracts.sh
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(find scripts -type f -name '*.sh' -print0)
 
   build:
-    name: Linux Build
-    needs: [test, race, deployment-contracts]
+    name: Linux Static Build
+    needs: [test, race, repository-contracts]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -92,17 +99,9 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Build static binary
+      - name: Build
         run: |
           mkdir -p tmp/bin
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
             go build -trimpath -o tmp/bin/seeddata ./cmd/seeddata
           file tmp/bin/seeddata
-
-      - name: Build historical image
-        run: |
-          docker build \
-            --file Dockerfile.historical \
-            --tag seeddata-runner:historical-ci \
-            .
-

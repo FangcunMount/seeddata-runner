@@ -18,7 +18,6 @@ import (
 
 	"github.com/FangcunMount/component-base/pkg/log"
 	authsignup "github.com/FangcunMount/iam/v2/pkg/sdk/auth/signup"
-	"github.com/FangcunMount/seeddata-runner/internal/historicalseed"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 )
 
@@ -44,7 +43,6 @@ type APIClient struct {
 
 	publishedModelCache *versionedCache[PublishedAssessmentModelResponse]
 	questionnaireCache  *versionedCache[QuestionnaireDetailResponse]
-	historicalSecret    []byte
 }
 
 type TokenProvider struct {
@@ -100,20 +98,6 @@ func (c *APIClient) BaseURL() string {
 		return ""
 	}
 	return c.baseURL
-}
-
-func (c *APIClient) SetHistoricalSecret(secret []byte) {
-	if c == nil {
-		return
-	}
-	c.historicalSecret = append(c.historicalSecret[:0], secret...)
-}
-
-func (c *APIClient) HistoricalSecret() []byte {
-	if c == nil {
-		return nil
-	}
-	return append([]byte(nil), c.historicalSecret...)
 }
 
 // SetHTTPTimeout updates the underlying HTTP client timeout.
@@ -499,27 +483,6 @@ type EnrollmentResponse struct {
 	Round        uint32         `json:"round"`
 	Idempotent   bool           `json:"idempotent"`
 	Tasks        []TaskResponse `json:"tasks"`
-}
-
-type HistoricalStageRecord struct {
-	ID           uint64          `json:"id"`
-	OrgID        uint64          `json:"org_id"`
-	BatchID      string          `json:"batch_id"`
-	ScenarioID   string          `json:"scenario_id"`
-	Stage        string          `json:"stage"`
-	PayloadHash  string          `json:"payload_hash"`
-	Status       string          `json:"status"`
-	BusinessAt   time.Time       `json:"business_at"`
-	ResourceType string          `json:"resource_type"`
-	ResourceID   string          `json:"resource_id"`
-	PayloadJSON  json.RawMessage `json:"payload_json,omitempty"`
-}
-
-type HistoricalStageBatchResponse struct {
-	BatchID string                  `json:"batch_id"`
-	Offset  int                     `json:"offset"`
-	Limit   int                     `json:"limit"`
-	Stages  []HistoricalStageRecord `json:"stages"`
 }
 
 // TaskResponse 计划任务响应。
@@ -1114,14 +1077,12 @@ func (c *APIClient) doRequestWithHeadersRetryTimeoutAndLimit(
 		}
 
 		var reqBody io.Reader
-		var rawBody []byte
 		if body != nil {
 			jsonData, err := json.Marshal(body)
 			if err != nil {
 				return nil, fmt.Errorf("marshal request body: %w", err)
 			}
-			rawBody = jsonData
-			reqBody = bytes.NewBuffer(rawBody)
+			reqBody = bytes.NewBuffer(jsonData)
 		}
 
 		req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
@@ -1140,16 +1101,6 @@ func (c *APIClient) doRequestWithHeadersRetryTimeoutAndLimit(
 			}
 			req.Header.Set(key, value)
 		}
-		if historical, ok := historicalseed.FromContext(ctx); ok && len(c.historicalSecret) > 0 {
-			signedHeaders, err := historicalseed.HeadersFor(method, req.URL.RequestURI(), rawBody, historical, time.Now(), c.historicalSecret)
-			if err != nil {
-				return nil, err
-			}
-			for key, value := range signedHeaders {
-				req.Header.Set(key, value)
-			}
-		}
-
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -1396,9 +1347,8 @@ func (c *APIClient) ensureFreshToken(ctx context.Context) error {
 }
 
 // decodeAPIResponse keeps JSON numbers lossless while the generic response
-// envelope is decoded through interface{}. Historical resource IDs exceed the
-// exact integer range of float64 and are marshalled into typed response data in
-// a second step by decodeResponseData.
+// envelope is decoded through interface{} and marshalled into typed response
+// data in a second step by decodeResponseData.
 func decodeAPIResponse(body []byte, out *Response) error {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()

@@ -1,6 +1,8 @@
 package seedconfig
 
 import (
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -256,18 +258,8 @@ planSubmit:
 	}
 }
 
-func TestResolveHistoricalBackfillUsesSafeDefaultsWhenBlockMissing(t *testing.T) {
-	cfg := Config{DailySimulation: DailySimulationConfig{Workers: 7}, IAM: IAMConfig{MockConsumer: IAMMockConsumerConfig{MaxConcurrent: 1}}}
-	resolved := cfg.ResolveHistoricalBackfill()
-	if resolved.ParentWorkers != 7 || resolved.SubmissionWorkers != 4 || resolved.ReportWorkers != 4 || resolved.ReportQueueCapacity != 24 || resolved.PendingHighWatermark != 4096 || resolved.StageReadWorkers != 1 || resolved.IAMWorkers != 1 || resolved.ProgressInterval != "15s" {
-		t.Fatalf("unexpected legacy fallback: %+v", resolved)
-	}
-}
-
-func TestLoadHistoricalBackfillConfig(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "seeddata.yaml")
-	content := `
+func TestLoadRejectsRetiredAndUnknownFields(t *testing.T) {
+	base := `
 global:
   orgId: 1
 api:
@@ -277,64 +269,34 @@ dailySimulation:
   targetType: "scale"
   targetCode: "SAS"
   planIds: ["614333603412718126"]
-historicalBackfill:
-  parentWorkers: 16
-  submissionWorkers: 24
-  reportWorkers: 8
-  reportQueueCapacity: 32
-  pendingHighWatermark: 2048
-  stageReadWorkers: 16
-  iamWorkers: 2
-  progressInterval: "15s"
+%s
 planSubmit:
   planIds: ["614333603412718126"]
 `
-	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolved := cfg.ResolveHistoricalBackfill()
-	if resolved.ParentWorkers != 16 || resolved.SubmissionWorkers != 24 || resolved.ReportWorkers != 8 || resolved.ReportQueueCapacity != 32 || resolved.PendingHighWatermark != 2048 || resolved.StageReadWorkers != 16 || resolved.IAMWorkers != 2 || resolved.ProgressInterval != "15s" {
-		t.Fatalf("unexpected historical config: %+v", resolved)
+	for name, extra := range map[string]string{
+		"retired top-level config": decodeRetiredConfigField(t, "686973746f726963616c4261636b66696c6c") + ":\n  parentWorkers: 1",
+		"retired date override":    "  " + decodeRetiredConfigField(t, "72756e44617465") + ": \"2025-01-01\"",
+		"unknown field":            "  unsupportedOption: true",
+	} {
+		t.Run(name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "seeddata.yaml")
+			if err := os.WriteFile(configPath, []byte(fmt.Sprintf(base, extra)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "field") {
+				t.Fatalf("expected strict field error, got %v", err)
+			}
+		})
 	}
 }
 
-func TestLoadHistoricalBackfillConfigDefaultsReportPipelineForLegacyBlock(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "seeddata.yaml")
-	content := `
-global:
-  orgId: 1
-api:
-  baseUrl: "https://qs.example.com"
-dailySimulation:
-  clinicianIds: ["1001"]
-  targetType: "scale"
-  targetCode: "SAS"
-  planIds: ["614333603412718126"]
-historicalBackfill:
-  parentWorkers: 8
-  submissionWorkers: 4
-  stageReadWorkers: 4
-  iamWorkers: 1
-  progressInterval: "15s"
-planSubmit:
-  planIds: ["614333603412718126"]
-`
-	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(configPath)
+func decodeRetiredConfigField(t *testing.T, encoded string) string {
+	t.Helper()
+	decoded, err := hex.DecodeString(encoded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolved := cfg.ResolveHistoricalBackfill()
-	if resolved.ReportWorkers != DefaultHistoricalReportWorkers || resolved.ReportQueueCapacity != DefaultHistoricalReportQueueCapacity || resolved.PendingHighWatermark != DefaultHistoricalPendingHighWatermark {
-		t.Fatalf("legacy historical block did not receive report defaults: %+v", resolved)
-	}
+	return string(decoded)
 }
 
 func TestLoadAcceptsDailySimulationWindowSchedule(t *testing.T) {
