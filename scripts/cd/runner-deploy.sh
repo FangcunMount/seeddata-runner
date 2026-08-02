@@ -28,16 +28,30 @@ case "$OPERATION" in
   *) echo "OPERATION must be deploy or rollback" >&2; exit 2 ;;
 esac
 
+if [ -z "${RUNNER_SUDO_PASSWORD:-}" ]; then
+  echo "RUNNER_SUDO_PASSWORD is required; configure the SVRA_SUDO_PASSWORD Actions secret" >&2
+  exit 2
+fi
+SUDO_PASSWORD="$RUNNER_SUDO_PASSWORD"
+unset RUNNER_SUDO_PASSWORD
+export -n SUDO_PASSWORD
+
 SSH=(ssh -F "$RUNNER_SSH_CONFIG")
 SCP=(scp -F "$RUNNER_SSH_CONFIG")
 REMOTE_DIR="/tmp/seeddata-cd-${RUN_ID}"
+
+run_remote_sudo() {
+  local remote_command="$1"
+  printf '%s\n' "$SUDO_PASSWORD" |
+    "${SSH[@]}" "$RUNNER_SSH_ALIAS" "sudo -S -k -p '' -- $remote_command"
+}
 
 cleanup_remote() {
   "${SSH[@]}" "$RUNNER_SSH_ALIAS" "rm -rf '$REMOTE_DIR'" >/dev/null 2>&1 || true
 }
 trap cleanup_remote EXIT
 
-"${SSH[@]}" "$RUNNER_SSH_ALIAS" "sudo -n true"
+run_remote_sudo "true"
 "${SSH[@]}" "$RUNNER_SSH_ALIAS" "umask 077 && mkdir -p '$REMOTE_DIR'"
 "${SCP[@]}" \
   scripts/cd/remote-common.sh \
@@ -51,9 +65,9 @@ if [ "$OPERATION" = "deploy" ]; then
   REMOTE_PACKAGE="$REMOTE_DIR/seeddata-runner-linux-amd64.tar.gz"
   "${SCP[@]}" "$DEPLOY_PACKAGE" "${RUNNER_SSH_ALIAS}:${REMOTE_PACKAGE}"
   "${SSH[@]}" "$RUNNER_SSH_ALIAS" "gzip -t '$REMOTE_PACKAGE'"
-  "${SSH[@]}" "$RUNNER_SSH_ALIAS" \
-    "sudo -n -- '$REMOTE_DIR/remote-deploy.sh' --package '$REMOTE_PACKAGE' --sha '$DEPLOY_SHA'"
+  run_remote_sudo \
+    "'$REMOTE_DIR/remote-deploy.sh' --package '$REMOTE_PACKAGE' --sha '$DEPLOY_SHA'"
 else
-  "${SSH[@]}" "$RUNNER_SSH_ALIAS" \
-    "sudo -n -- '$REMOTE_DIR/remote-rollback.sh' --backup '$ROLLBACK_BACKUP'"
+  run_remote_sudo \
+    "'$REMOTE_DIR/remote-rollback.sh' --backup '$ROLLBACK_BACKUP'"
 fi

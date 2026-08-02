@@ -127,6 +127,7 @@ jobs:
           DEPLOY_SHA: ${{ env.DEPLOY_SHA }}
           DEPLOY_PACKAGE: dist/seeddata-runner-linux-amd64.tar.gz
           RUNNER_SSH_ALIAS: seeddata-production
+          RUNNER_SUDO_PASSWORD: ${{ secrets.SVRA_SUDO_PASSWORD }}
         run: bash scripts/cd/runner-deploy.sh
 
       - name: Cleanup SSH material
@@ -168,6 +169,7 @@ jobs:
           OPERATION: rollback
           ROLLBACK_BACKUP: ${{ github.event.inputs.rollback_backup || 'latest' }}
           RUNNER_SSH_ALIAS: seeddata-production
+          RUNNER_SUDO_PASSWORD: ${{ secrets.SVRA_SUDO_PASSWORD }}
         run: bash scripts/cd/runner-deploy.sh
 
       - name: Cleanup SSH material

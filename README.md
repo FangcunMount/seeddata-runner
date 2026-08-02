@@ -197,7 +197,7 @@ CD 锁定以下生产契约：
 - `operation=deploy`：可留空 `deploy_sha` 使用所选分支当前 SHA，或填写完整 40 位 SHA。
 - `operation=rollback`：`rollback_backup=latest` 恢复最新二进制备份，也可填写发布日志中输出的备份目录 basename。
 
-回滚只恢复二进制，不恢复配置、EnvironmentFile、调度状态或提交账本。CD 所需的组织配置为 `SVRA_HOST`、`SVRA_USERNAME`、`SVRA_SSH_PORT`、`SVRA_SSH_FINGERPRINT`，以及 `SVR_MINI_SSH_KEY` 或 `SVRA_SSH_KEY`；SSH host key 必须与配置的 SHA-256 指纹匹配。`SVRA_USERNAME` 对应的 SSH 用户必须具备非交互式免密 sudo（`sudo -n true`），部署和回滚脚本会通过该权限访问 `/root` 下的锁定生产目录并管理 systemd 服务，不需要开放 root SSH 登录。
+回滚只恢复二进制，不恢复配置、EnvironmentFile、调度状态或提交账本。CD 所需的组织配置为 `SVRA_HOST`、`SVRA_USERNAME`、`SVRA_SSH_PORT`、`SVRA_SSH_FINGERPRINT`，以及 `SVR_MINI_SSH_KEY` 或 `SVRA_SSH_KEY`；SSH host key 必须与配置的 SHA-256 指纹匹配。`SVRA_USERNAME` 对应的 SSH 用户需要具备 sudo 权限，密码由授权给本仓库的 `SVRA_SUDO_PASSWORD` Actions Secret 提供。脚本只检查 Secret 是否非空，随后通过 SSH 标准输入交给 `sudo -S -k`，不输出其值、不把它放入远端命令参数，也不需要开放 root SSH 登录。
 
 ## 当前日期单用户验收
 

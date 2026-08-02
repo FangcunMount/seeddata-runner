@@ -11,3 +11,4 @@ config-variables:
 config-secrets:
   - SVR_MINI_SSH_KEY
   - SVRA_SSH_KEY
+  - SVRA_SUDO_PASSWORD

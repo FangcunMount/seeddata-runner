@@ -49,7 +49,11 @@ func TestCDWorkflowDeploysTheSuccessfulCISHA(t *testing.T) {
 		"labels: [self-hosted, macOS, ARM64, ops]",
 		"actions/upload-artifact@v4",
 		"actions/download-artifact@v4",
+		"RUNNER_SUDO_PASSWORD: ${{ secrets.SVRA_SUDO_PASSWORD }}",
 	)
+	if count := strings.Count(workflow, "RUNNER_SUDO_PASSWORD: ${{ secrets.SVRA_SUDO_PASSWORD }}"); count != 2 {
+		t.Fatalf("deploy and rollback must both receive the sudo secret; got %d references", count)
+	}
 	for _, forbidden := range []string{"git pull", "git reset", "IAM_MOCK_CONSUMER_SHARED_SECRET:"} {
 		if strings.Contains(workflow, forbidden) {
 			t.Fatalf("CD workflow must not contain %q", forbidden)
@@ -88,15 +92,96 @@ func TestSSHSetupPinsTheProductionHostKey(t *testing.T) {
 	}
 }
 
-func TestRunnerUsesNonInteractiveSudoForPrivilegedOperations(t *testing.T) {
+func TestRunnerPassesSudoPasswordThroughStandardInput(t *testing.T) {
 	runner := readRepositoryFile(t, "scripts/cd/runner-deploy.sh")
 	requireContains(t, runner,
-		`"${SSH[@]}" "$RUNNER_SSH_ALIAS" "sudo -n true"`,
-		`"sudo -n -- '$REMOTE_DIR/remote-deploy.sh' --package '$REMOTE_PACKAGE' --sha '$DEPLOY_SHA'"`,
-		`"sudo -n -- '$REMOTE_DIR/remote-rollback.sh' --backup '$ROLLBACK_BACKUP'"`,
+		`SUDO_PASSWORD="$RUNNER_SUDO_PASSWORD"`,
+		"unset RUNNER_SUDO_PASSWORD",
+		"export -n SUDO_PASSWORD",
+		`printf '%s\n' "$SUDO_PASSWORD" |`,
+		`"sudo -S -k -p '' -- $remote_command"`,
+		`run_remote_sudo "true"`,
+		`"'$REMOTE_DIR/remote-deploy.sh' --package '$REMOTE_PACKAGE' --sha '$DEPLOY_SHA'"`,
+		`"'$REMOTE_DIR/remote-rollback.sh' --backup '$ROLLBACK_BACKUP'"`,
 	)
-	if count := strings.Count(runner, "sudo -n --"); count != 2 {
-		t.Fatalf("deploy and rollback must each use non-interactive sudo; got %d privileged invocations", count)
+	for _, forbidden := range []string{"sudo -n", `echo "$SUDO_PASSWORD"`, `export SUDO_PASSWORD`} {
+		if strings.Contains(runner, forbidden) {
+			t.Fatalf("sudo credential handling must not contain %q", forbidden)
+		}
+	}
+}
+
+func TestRunnerRejectsMissingSudoPassword(t *testing.T) {
+	root := repositoryRoot(t)
+	cmd := exec.Command("bash", filepath.Join(root, "scripts/cd/runner-deploy.sh"))
+	cmd.Dir = root
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"RUNNER_SSH_ALIAS=contract-test",
+		"RUNNER_SSH_CONFIG=/dev/null",
+		"OPERATION=rollback",
+		"ROLLBACK_BACKUP=latest",
+	}
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("missing sudo password was accepted")
+	}
+	if !strings.Contains(string(output), "RUNNER_SUDO_PASSWORD is required") {
+		t.Fatalf("unexpected rejection output: %s", output)
+	}
+}
+
+func TestRunnerDoesNotExposeSudoPasswordToCommandsOrChildEnvironment(t *testing.T) {
+	root := repositoryRoot(t)
+	fakeBin := t.TempDir()
+	traceFile := filepath.Join(t.TempDir(), "trace")
+	secret := "contract-secret-%-!-$"
+	fakeCommand := `#!/bin/sh
+printf '%s\n' "$*" >>"$SUDO_TRACE"
+if [ "${RUNNER_SUDO_PASSWORD+x}" = x ] || [ "${SUDO_PASSWORD+x}" = x ]; then
+  echo "sudo secret leaked into child environment" >&2
+  exit 92
+fi
+case "$*" in
+  *"sudo -S -k"*)
+    IFS= read -r supplied
+    [ "$supplied" = "$EXPECTED_TEST_PASSWORD" ] || exit 93
+    ;;
+esac
+`
+	for _, name := range []string{"ssh", "scp"} {
+		path := filepath.Join(fakeBin, name)
+		if err := os.WriteFile(path, []byte(fakeCommand), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cmd := exec.Command("bash", filepath.Join(root, "scripts/cd/runner-deploy.sh"))
+	cmd.Dir = root
+	cmd.Env = []string{
+		"PATH=" + fakeBin + ":/usr/bin:/bin",
+		"RUNNER_SSH_ALIAS=contract-test",
+		"RUNNER_SSH_CONFIG=/dev/null",
+		"RUNNER_SUDO_PASSWORD=" + secret,
+		"EXPECTED_TEST_PASSWORD=" + secret,
+		"SUDO_TRACE=" + traceFile,
+		"OPERATION=rollback",
+		"ROLLBACK_BACKUP=latest",
+		"GITHUB_RUN_ID=12345",
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("runner failed with mocked transport: %v\n%s", err, output)
+	}
+	trace, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(output), secret) || strings.Contains(string(trace), secret) {
+		t.Fatal("sudo password appeared in command output or arguments")
+	}
+	if count := strings.Count(string(trace), "sudo -S -k"); count != 2 {
+		t.Fatalf("preflight and rollback must both authenticate with sudo; got %d calls\n%s", count, trace)
 	}
 }
 
