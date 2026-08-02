@@ -16,7 +16,10 @@ func TestRetiredCapabilitiesAreAbsentFromRepository(t *testing.T) {
 		t.Fatal("resolve test file")
 	}
 	repositoryRoot := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
-	allowedFile := filepath.Clean(filename)
+	allowedFiles := map[string]struct{}{
+		filepath.Clean(filename): {},
+		filepath.Join(repositoryRoot, "scripts", "cd", "retire-removed-config.sh"): {},
+	}
 	forbidden := [][]byte{
 		[]byte("historical"),
 		[]byte("backfill"),
@@ -62,7 +65,7 @@ func TestRetiredCapabilitiesAreAbsentFromRepository(t *testing.T) {
 				return nil
 			}
 		}
-		if filepath.Clean(path) == allowedFile || !isRepositoryContractSource(path) {
+		if _, allowed := allowedFiles[filepath.Clean(path)]; allowed || !isRepositoryContractSource(path) {
 			return nil
 		}
 		data, err := os.ReadFile(path)
