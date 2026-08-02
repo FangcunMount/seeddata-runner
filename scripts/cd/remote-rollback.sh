@@ -16,7 +16,7 @@ done
 seeddata_cd_init
 resolve_rollback_backup "$ROLLBACK_BACKUP"
 TARGET_BACKUP="$ROLLBACK_RESULT"
-TARGET_SHA=$(tr -d '[:space:]' <"$TARGET_BACKUP/binary.sha256")
+TARGET_SHA=$(stored_binary_sha256 "$TARGET_BACKUP/binary.sha256")
 validate_sha256 "$TARGET_SHA" || fail "rollback backup checksum is invalid"
 [ "$(binary_sha256 "$TARGET_BACKUP/seeddata")" = "$TARGET_SHA" ] || fail "rollback backup checksum does not match"
 
@@ -24,15 +24,17 @@ SOURCE_BACKUP=""
 rollback_allowed=0
 
 restore_source_binary() {
-  local source_sha
+  local source_sha actual_source_sha
   [ -n "$SOURCE_BACKUP" ] || return 1
-  source_sha=$(tr -d '[:space:]' <"$SOURCE_BACKUP/binary.sha256")
+  source_sha=$(stored_binary_sha256 "$SOURCE_BACKUP/binary.sha256")
   validate_sha256 "$source_sha" || return 1
+  actual_source_sha=$(binary_sha256 "$SOURCE_BACKUP/seeddata")
+  [ "$actual_source_sha" = "$source_sha" ] || return 1
   echo "Requested rollback failed; restoring pre-rollback binary $SOURCE_BACKUP" >&2
-  systemctl stop "$SERVICE" || true
+  sudo_systemctl stop "$SERVICE" || true
   install_binary_atomically "$SOURCE_BACKUP/seeddata" "$source_sha"
-  systemctl reset-failed "$SERVICE"
-  systemctl start "$SERVICE"
+  sudo_systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+  sudo_systemctl start "$SERVICE"
   wait_for_active_service
   verify_running_binary "$source_sha"
 }
@@ -51,8 +53,8 @@ backup_current_binary "pre-rollback"
 SOURCE_BACKUP="$BACKUP_RESULT"
 rollback_allowed=1
 install_binary_atomically "$TARGET_BACKUP/seeddata" "$TARGET_SHA"
-systemctl reset-failed "$SERVICE"
-systemctl restart "$SERVICE"
+sudo_systemctl reset-failed "$SERVICE"
+sudo_systemctl restart "$SERVICE"
 wait_for_active_service
 verify_running_binary "$TARGET_SHA"
 if [ "$(service_restart_count)" -ne 0 ]; then

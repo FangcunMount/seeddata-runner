@@ -31,15 +31,17 @@ cleanup() {
 }
 
 rollback_immediate() {
-  local backup_sha
+  local backup_sha actual_backup_sha
   [ -n "$BACKUP_PATH" ] || return 1
-  backup_sha=$(tr -d '[:space:]' <"$BACKUP_PATH/binary.sha256")
+  backup_sha=$(stored_binary_sha256 "$BACKUP_PATH/binary.sha256")
   validate_sha256 "$backup_sha" || return 1
+  actual_backup_sha=$(binary_sha256 "$BACKUP_PATH/seeddata")
+  [ "$actual_backup_sha" = "$backup_sha" ] || return 1
   echo "New binary failed before startup verification; restoring $BACKUP_PATH" >&2
-  systemctl stop "$SERVICE" || true
+  sudo_systemctl stop "$SERVICE" || true
   install_binary_atomically "$BACKUP_PATH/seeddata" "$backup_sha"
-  systemctl reset-failed "$SERVICE"
-  systemctl start "$SERVICE"
+  sudo_systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+  sudo_systemctl start "$SERVICE"
   wait_for_active_service
   verify_running_binary "$backup_sha"
   write_deployment_receipt "automatic-rollback" "unknown" "$backup_sha" "$BACKUP_PATH"
@@ -79,7 +81,7 @@ validate_sha256 "$EXPECTED_BINARY_SHA" || fail "deployment package contains an i
 printf '%s  bin/seeddata\n' "$EXPECTED_BINARY_SHA" | (cd "$STAGE_DIR" && sha256sum -c -)
 chmod 0755 "$STAGE_DIR/bin/seeddata"
 
-run_config_preflight "$STAGE_DIR/bin/seeddata" "$DEPLOY_SHA"
+run_config_preflight "$STAGE_DIR/bin/seeddata" "$SCRIPT_DIR/seeddata-runner-preflight.service"
 
 deploy_started_epoch=$(date +%s)
 backup_current_binary "deploy"
@@ -88,8 +90,8 @@ install_binary_atomically "$STAGE_DIR/bin/seeddata" "$EXPECTED_BINARY_SHA"
 deployed=1
 rollback_allowed=1
 
-systemctl reset-failed "$SERVICE"
-systemctl restart "$SERVICE"
+sudo_systemctl reset-failed "$SERVICE"
+sudo_systemctl restart "$SERVICE"
 wait_for_active_service
 verify_running_binary "$EXPECTED_BINARY_SHA"
 restart_count_after_start=$(service_restart_count)
@@ -113,7 +115,7 @@ fi
 
 RECENT_LOG=$(mktemp "/tmp/seeddata-deploy-log.XXXXXX")
 trap 'rm -f "$RECENT_LOG"; cleanup' EXIT
-journalctl -u "$SERVICE" --since "@${deploy_started_epoch}" --no-pager -o cat >"$RECENT_LOG"
+sudo_journalctl -u "$SERVICE" --since "@${deploy_started_epoch}" --no-pager -o cat >"$RECENT_LOG"
 if grep -E 'Load seeddata config failed|Initialize seeddata dependencies failed|Seeddata supervisor exited with error|Daily simulation daemon (run|after-hours catchup) failed' "$RECENT_LOG"; then
   fail "post-deploy journal contains a startup or immediate runtime failure"
 fi

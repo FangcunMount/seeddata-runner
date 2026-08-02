@@ -1,0 +1,11 @@
+[Unit]
+Description=QS Seeddata Runner deployment preflight
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/workspace/golang/src/github.com/fangcun-mount/seeddata-runner
+EnvironmentFile=/etc/default/seeddata-runner
+ExecStart=/root/workspace/golang/src/github.com/fangcun-mount/seeddata-runner/bin/seeddata.preflight --config /root/workspace/golang/src/github.com/fangcun-mount/seeddata-runner/configs/seeddata.yaml --check-config
