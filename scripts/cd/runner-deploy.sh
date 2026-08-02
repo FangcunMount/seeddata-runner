@@ -45,10 +45,9 @@ trap cleanup_remote EXIT
   scripts/cd/remote-common.sh \
   scripts/cd/remote-deploy.sh \
   scripts/cd/remote-rollback.sh \
-  scripts/cd/retire-removed-config.sh \
   scripts/cd/seeddata-runner-preflight.service \
   "${RUNNER_SSH_ALIAS}:${REMOTE_DIR}/"
-"${SSH[@]}" "$RUNNER_SSH_ALIAS" "chmod 700 '$REMOTE_DIR/remote-deploy.sh' '$REMOTE_DIR/remote-rollback.sh' && chmod 600 '$REMOTE_DIR/remote-common.sh' '$REMOTE_DIR/retire-removed-config.sh' '$REMOTE_DIR/seeddata-runner-preflight.service'"
+"${SSH[@]}" "$RUNNER_SSH_ALIAS" "chmod 700 '$REMOTE_DIR/remote-deploy.sh' '$REMOTE_DIR/remote-rollback.sh' && chmod 600 '$REMOTE_DIR/remote-common.sh' '$REMOTE_DIR/seeddata-runner-preflight.service'"
 
 if [ "$OPERATION" = "deploy" ]; then
   gzip -t "$DEPLOY_PACKAGE"
