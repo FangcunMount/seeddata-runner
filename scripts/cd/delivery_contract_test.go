@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -49,12 +50,8 @@ func TestCDWorkflowDeploysTheSuccessfulCISHA(t *testing.T) {
 		"labels: [self-hosted, macOS, ARM64, ops]",
 		"actions/upload-artifact@v4",
 		"actions/download-artifact@v4",
-		"RUNNER_SUDO_PASSWORD: ${{ secrets.SVRA_SUDO_PASSWORD }}",
 	)
-	if count := strings.Count(workflow, "RUNNER_SUDO_PASSWORD: ${{ secrets.SVRA_SUDO_PASSWORD }}"); count != 2 {
-		t.Fatalf("deploy and rollback must both receive the sudo secret; got %d references", count)
-	}
-	for _, forbidden := range []string{"git pull", "git reset", "IAM_MOCK_CONSUMER_SHARED_SECRET:"} {
+	for _, forbidden := range []string{"git pull", "git reset", "IAM_MOCK_CONSUMER_SHARED_SECRET:", "SVRA_SUDO_PASSWORD"} {
 		if strings.Contains(workflow, forbidden) {
 			t.Fatalf("CD workflow must not contain %q", forbidden)
 		}
@@ -92,62 +89,27 @@ func TestSSHSetupPinsTheProductionHostKey(t *testing.T) {
 	}
 }
 
-func TestRunnerPassesSudoPasswordThroughStandardInput(t *testing.T) {
+func TestRunnerUsesExistingNopasswdPolicyWithoutElevatingScripts(t *testing.T) {
 	runner := readRepositoryFile(t, "scripts/cd/runner-deploy.sh")
 	requireContains(t, runner,
-		`SUDO_PASSWORD="$RUNNER_SUDO_PASSWORD"`,
-		"unset RUNNER_SUDO_PASSWORD",
-		"export -n SUDO_PASSWORD",
-		`printf '%s\n' "$SUDO_PASSWORD" |`,
-		`"sudo -S -k -p '' -- $remote_command"`,
-		`run_remote_sudo "true"`,
+		`"sudo -n /usr/bin/true"`,
 		`"'$REMOTE_DIR/remote-deploy.sh' --package '$REMOTE_PACKAGE' --sha '$DEPLOY_SHA'"`,
 		`"'$REMOTE_DIR/remote-rollback.sh' --backup '$ROLLBACK_BACKUP'"`,
+		"scripts/cd/seeddata-runner-preflight.service",
 	)
-	for _, forbidden := range []string{"sudo -n", `echo "$SUDO_PASSWORD"`, `export SUDO_PASSWORD`} {
+	for _, forbidden := range []string{"sudo -S", "SUDO_PASSWORD", "RUNNER_SUDO_PASSWORD", "SVRA_SUDO_PASSWORD"} {
 		if strings.Contains(runner, forbidden) {
-			t.Fatalf("sudo credential handling must not contain %q", forbidden)
+			t.Fatalf("runner must not contain %q", forbidden)
 		}
 	}
 }
 
-func TestRunnerRejectsMissingSudoPassword(t *testing.T) {
-	root := repositoryRoot(t)
-	cmd := exec.Command("bash", filepath.Join(root, "scripts/cd/runner-deploy.sh"))
-	cmd.Dir = root
-	cmd.Env = []string{
-		"PATH=/usr/bin:/bin",
-		"RUNNER_SSH_ALIAS=contract-test",
-		"RUNNER_SSH_CONFIG=/dev/null",
-		"OPERATION=rollback",
-		"ROLLBACK_BACKUP=latest",
-	}
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatal("missing sudo password was accepted")
-	}
-	if !strings.Contains(string(output), "RUNNER_SUDO_PASSWORD is required") {
-		t.Fatalf("unexpected rejection output: %s", output)
-	}
-}
-
-func TestRunnerDoesNotExposeSudoPasswordToCommandsOrChildEnvironment(t *testing.T) {
+func TestRunnerInvokesRollbackDirectlyUsingMockedTransport(t *testing.T) {
 	root := repositoryRoot(t)
 	fakeBin := t.TempDir()
 	traceFile := filepath.Join(t.TempDir(), "trace")
-	secret := "contract-secret-%-!-$"
 	fakeCommand := `#!/bin/sh
 printf '%s\n' "$*" >>"$SUDO_TRACE"
-if [ "${RUNNER_SUDO_PASSWORD+x}" = x ] || [ "${SUDO_PASSWORD+x}" = x ]; then
-  echo "sudo secret leaked into child environment" >&2
-  exit 92
-fi
-case "$*" in
-  *"sudo -S -k"*)
-    IFS= read -r supplied
-    [ "$supplied" = "$EXPECTED_TEST_PASSWORD" ] || exit 93
-    ;;
-esac
 `
 	for _, name := range []string{"ssh", "scp"} {
 		path := filepath.Join(fakeBin, name)
@@ -162,8 +124,6 @@ esac
 		"PATH=" + fakeBin + ":/usr/bin:/bin",
 		"RUNNER_SSH_ALIAS=contract-test",
 		"RUNNER_SSH_CONFIG=/dev/null",
-		"RUNNER_SUDO_PASSWORD=" + secret,
-		"EXPECTED_TEST_PASSWORD=" + secret,
 		"SUDO_TRACE=" + traceFile,
 		"OPERATION=rollback",
 		"ROLLBACK_BACKUP=latest",
@@ -177,11 +137,61 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(output), secret) || strings.Contains(string(trace), secret) {
-		t.Fatal("sudo password appeared in command output or arguments")
+	traceText := string(trace)
+	if !strings.Contains(traceText, "sudo -n /usr/bin/true") {
+		t.Fatalf("runner did not verify NOPASSWD access\n%s", trace)
 	}
-	if count := strings.Count(string(trace), "sudo -S -k"); count != 2 {
-		t.Fatalf("preflight and rollback must both authenticate with sudo; got %d calls\n%s", count, trace)
+	if !strings.Contains(traceText, "/remote-rollback.sh' --backup 'latest'") {
+		t.Fatalf("runner did not invoke rollback script directly\n%s", trace)
+	}
+	if strings.Contains(traceText, "sudo -S") || strings.Contains(traceText, "sudo -n '/tmp/") {
+		t.Fatalf("runner elevated an uploaded script or requested a password\n%s", trace)
+	}
+}
+
+func TestRemoteScriptsOnlyElevateAllowlistedCommands(t *testing.T) {
+	allowed := map[string]bool{
+		"/usr/bin/grep":       true,
+		"/usr/bin/install":    true,
+		"/usr/bin/journalctl": true,
+		"/usr/bin/ls":         true,
+		"/usr/bin/rsync":      true,
+		"/usr/bin/sha256sum":  true,
+		"/usr/bin/systemctl":  true,
+		"/usr/bin/test":       true,
+		"/usr/bin/true":       true,
+	}
+	sudoCommand := regexp.MustCompile(`sudo -n (/usr/bin/[a-z0-9-]+)`)
+	var all strings.Builder
+	for _, path := range []string{
+		"scripts/cd/runner-deploy.sh",
+		"scripts/cd/remote-common.sh",
+		"scripts/cd/remote-deploy.sh",
+		"scripts/cd/remote-rollback.sh",
+	} {
+		body := readRepositoryFile(t, path)
+		all.WriteString(body)
+		matches := sudoCommand.FindAllStringSubmatch(body, -1)
+		if count := strings.Count(body, "sudo -n "); count != len(matches) {
+			t.Fatalf("%s contains a sudo -n invocation without a literal /usr/bin command", path)
+		}
+		for _, match := range matches {
+			if !allowed[match[1]] {
+				t.Fatalf("%s elevates command outside the serverA allowlist: %s", path, match[1])
+			}
+		}
+	}
+	for _, forbidden := range []string{
+		"sudo -S",
+		"sudo -n /bin/bash",
+		"sudo -n /usr/bin/env",
+		"sudo -n /bin/sh",
+		"systemd-run",
+		"SVRA_SUDO_PASSWORD",
+	} {
+		if strings.Contains(all.String(), forbidden) {
+			t.Fatalf("deployment scripts must not contain %q", forbidden)
+		}
 	}
 }
 
@@ -200,18 +210,20 @@ func TestRemoteDeployPreservesProductionStateAndSupportsImmediateRollback(t *tes
 		"flock -n",
 		"EnvironmentFiles",
 		"WorkingDirectory",
-		"--check-config",
+		"sudo_rsync --archive --checksum",
 		`/proc/${pid}/exe`,
 	)
 	requireContains(t, deploy,
 		"backup_current_binary",
 		"install_binary_atomically",
-		"systemctl restart",
+		"sudo_systemctl restart",
+		"seeddata-runner-preflight.service",
 		"rollback_immediate",
 		"rollback_allowed=0",
 	)
 	requireContains(t, rollback,
 		"resolve_rollback_backup",
+		"stored_binary_sha256",
 		"backup_current_binary",
 		"install_binary_atomically",
 		"verify_running_binary",
@@ -236,6 +248,17 @@ func TestRemoteDeployPreservesProductionStateAndSupportsImmediateRollback(t *tes
 			t.Fatalf("deployment scripts must not contain %q", forbidden)
 		}
 	}
+}
+
+func TestPreflightUnitUsesTheProductionRuntimeContract(t *testing.T) {
+	unit := readRepositoryFile(t, "scripts/cd/seeddata-runner-preflight.service")
+	requireContains(t, unit,
+		"Type=oneshot",
+		"User=root",
+		"WorkingDirectory=/root/workspace/golang/src/github.com/fangcun-mount/seeddata-runner",
+		"EnvironmentFile=/etc/default/seeddata-runner",
+		"ExecStart=/root/workspace/golang/src/github.com/fangcun-mount/seeddata-runner/bin/seeddata.preflight --config /root/workspace/golang/src/github.com/fangcun-mount/seeddata-runner/configs/seeddata.yaml --check-config",
+	)
 }
 
 func TestCDShellScriptsParse(t *testing.T) {
