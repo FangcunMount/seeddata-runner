@@ -48,8 +48,8 @@ func TestCDWorkflowDeploysTheSuccessfulCISHA(t *testing.T) {
 		"name: production",
 		"group: qlume",
 		"labels: [self-hosted, macOS, ARM64, ops]",
-		"actions/upload-artifact@v4",
-		"actions/download-artifact@v4",
+		"actions/upload-artifact@v7",
+		"actions/download-artifact@v8",
 		"vars.SEEDDATA_DEPLOY_TARGET != 'macmini'",
 	)
 	for _, forbidden := range []string{"git pull", "git reset", "IAM_MOCK_CONSUMER_SHARED_SECRET:", "SVRA_SUDO_PASSWORD"} {
@@ -128,6 +128,8 @@ func TestMacWorkflowSeparatesPreflightFromProductionCutover(t *testing.T) {
 		"labels: [self-hosted, macOS, ARM64, ops]",
 		"docker/setup-qemu-action@v3",
 		"docker/setup-buildx-action@v3",
+		"actions/upload-artifact@v7",
+		"actions/download-artifact@v8",
 		"seeddata-runner-linux-arm64-${{ env.DEPLOY_SHA }}",
 		"SEEDDATA_SERVERA_TAILSCALE_IP: ${{ vars.SVRA_TAILSCALE_IP }}",
 		"macmini-cutover.sh",
@@ -135,7 +137,7 @@ func TestMacWorkflowSeparatesPreflightFromProductionCutover(t *testing.T) {
 		"macmini-return-servera.sh",
 		"name: production",
 	)
-	for _, value := range []string{"IAM_MOCK_CONSUMER_SHARED_SECRET:", "SVRA_SUDO_PASSWORD", "seeddata-runner:latest"} {
+	for _, value := range []string{"IAM_MOCK_CONSUMER_SHARED_SECRET:", "SVRA_SUDO_PASSWORD", "seeddata-runner:latest", "actions/upload-artifact@v4", "actions/download-artifact@v4"} {
 		if strings.Contains(workflow, value) {
 			t.Fatalf("Mac workflow must not contain %q", value)
 		}

@@ -99,7 +99,7 @@ jobs:
         run: bash scripts/cd/build-container-package.sh
 
       - name: Upload deployment package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: seeddata-runner-linux-arm64-${{ env.DEPLOY_SHA }}
           path: |
@@ -125,7 +125,7 @@ jobs:
           fetch-depth: 1
 
       - name: Download container package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: seeddata-runner-linux-arm64-${{ env.DEPLOY_SHA }}
           path: dist
@@ -155,7 +155,7 @@ jobs:
           fetch-depth: 1
 
       - name: Download container package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: seeddata-runner-linux-arm64-${{ env.DEPLOY_SHA }}
           path: dist
@@ -210,7 +210,7 @@ jobs:
           fetch-depth: 1
 
       - name: Download container package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: seeddata-runner-linux-arm64-${{ env.DEPLOY_SHA }}
           path: dist

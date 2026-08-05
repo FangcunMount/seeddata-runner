@@ -81,7 +81,7 @@ jobs:
         run: bash scripts/cd/build-package.sh
 
       - name: Upload deployment package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: seeddata-runner-linux-amd64-${{ env.DEPLOY_SHA }}
           path: dist/seeddata-runner-linux-amd64.tar.gz
@@ -106,7 +106,7 @@ jobs:
           fetch-depth: 1
 
       - name: Download deployment package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: seeddata-runner-linux-amd64-${{ env.DEPLOY_SHA }}
           path: dist
