@@ -14,6 +14,7 @@ LOCK_DIR="${MAC_ROOT}/.deploy.lock"
 CONTAINER_NAME="seeddata-runner"
 TARGET_IMAGE=""
 TARGET_IMAGE_ID=""
+SOURCE_IMAGE_ID=""
 TARGET_GIT_SHA=""
 STATE_BACKUP_RESULT=""
 LOCK_HELD=0
@@ -70,7 +71,7 @@ metadata_value() {
 
 mac_init() {
   local expected_prefix
-  for command_name in awk basename curl date ditto docker find grep gzip id install mkdir mv rsync sed shasum sleep stat tr wc; do
+  for command_name in awk basename curl date ditto docker find grep gzip id install mkdir mv rsync sed shasum sleep stat tar tr wc; do
     mac_require_command "$command_name"
   done
   [ -n "${HOME:-}" ] && [ "$HOME" != "/" ] || mac_fail "HOME is unsafe"
@@ -116,7 +117,7 @@ release_mac_lock() {
 }
 
 verify_and_load_container_package() {
-  local archive="$1" metadata="$2" checksums="$3" expected_sha archive_sha actual_sha loaded
+  local archive="$1" metadata="$2" checksums="$3" expected_sha archive_sha actual_sha loaded source_digest
   [ -f "$archive" ] || mac_fail "container archive is missing: $archive"
   [ -f "$metadata" ] || mac_fail "container metadata is missing: $metadata"
   [ -f "$checksums" ] || mac_fail "container checksum file is missing: $checksums"
@@ -129,20 +130,26 @@ verify_and_load_container_package() {
 
   TARGET_GIT_SHA=$(metadata_value git_sha "$metadata")
   TARGET_IMAGE=$(metadata_value image "$metadata")
-  TARGET_IMAGE_ID=$(metadata_value image_id "$metadata")
+  SOURCE_IMAGE_ID=$(metadata_value source_image_id "$metadata")
   validate_git_sha "$TARGET_GIT_SHA" || mac_fail "container metadata Git SHA is invalid"
   [ "$TARGET_IMAGE" = "seeddata-runner:${TARGET_GIT_SHA}" ] || mac_fail "container image tag is not immutable"
-  case "$TARGET_IMAGE_ID" in sha256:*) ;; *) mac_fail "container image ID is invalid" ;; esac
+  case "$SOURCE_IMAGE_ID" in sha256:*) ;; *) mac_fail "source container image ID is invalid" ;; esac
+  source_digest=${SOURCE_IMAGE_ID#sha256:}
+  validate_sha256 "$source_digest" || mac_fail "source container image ID is invalid"
   [ "$(metadata_value platform "$metadata")" = "linux/arm64" ] || mac_fail "container platform metadata is invalid"
+
+  tar -tzf "$archive" "blobs/sha256/${source_digest}" >/dev/null || \
+    mac_fail "source image ID does not match archive config"
 
   gzip -t "$archive"
   loaded=$(gzip -dc "$archive" | docker image load)
   printf '%s\n' "$loaded"
-  [ "$(docker image inspect --format '{{.Id}}' "$TARGET_IMAGE")" = "$TARGET_IMAGE_ID" ] || mac_fail "loaded image ID does not match metadata"
+  TARGET_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$TARGET_IMAGE")
+  case "$TARGET_IMAGE_ID" in sha256:*) ;; *) mac_fail "loaded container image ID is invalid" ;; esac
   [ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$TARGET_IMAGE")" = "linux/arm64" ] || mac_fail "loaded image is not linux/arm64"
   [ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$TARGET_IMAGE")" = "$TARGET_GIT_SHA" ] || mac_fail "loaded image revision label mismatch"
   archive_sha="$actual_sha"
-  echo "Verified container package: git_sha=${TARGET_GIT_SHA} image_id=${TARGET_IMAGE_ID} archive_sha256=${archive_sha}"
+  echo "Verified container package: git_sha=${TARGET_GIT_SHA} source_image_id=${SOURCE_IMAGE_ID} target_image_id=${TARGET_IMAGE_ID} archive_sha256=${archive_sha}"
 }
 
 install_compose_contract() {

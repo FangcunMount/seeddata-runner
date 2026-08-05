@@ -24,7 +24,7 @@ docker buildx build \
   --load \
   .
 
-image_id=$(docker image inspect --format '{{.Id}}' "$IMAGE")
+source_image_id=$(docker image inspect --format '{{.Id}}' "$IMAGE")
 image_os=$(docker image inspect --format '{{.Os}}' "$IMAGE")
 image_arch=$(docker image inspect --format '{{.Architecture}}' "$IMAGE")
 image_revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")
@@ -33,8 +33,8 @@ image_revision=$(docker image inspect --format '{{index .Config.Labels "org.open
 [ "$image_revision" = "$DEPLOY_SHA" ] || { echo "image revision label does not match DEPLOY_SHA" >&2; exit 1; }
 
 docker image save "$IMAGE" | gzip -9 >"$ARCHIVE"
-printf 'git_sha=%s\nimage=%s\nimage_id=%s\nplatform=linux/arm64\nbuild_time=%s\n' \
-  "$DEPLOY_SHA" "$IMAGE" "$image_id" "$BUILD_TIME" >"$METADATA"
+printf 'git_sha=%s\nimage=%s\nsource_image_id=%s\nplatform=linux/arm64\nbuild_time=%s\n' \
+  "$DEPLOY_SHA" "$IMAGE" "$source_image_id" "$BUILD_TIME" >"$METADATA"
 
 if command -v sha256sum >/dev/null 2>&1; then
   archive_sha=$(sha256sum "$ARCHIVE" | awk '{print $1}')
@@ -43,4 +43,4 @@ else
 fi
 printf '%s  %s\n' "$archive_sha" "$(basename "$ARCHIVE")" >"$CHECKSUMS"
 
-echo "Container package built: image=${IMAGE} id=${image_id} archive=${ARCHIVE}"
+echo "Container package built: image=${IMAGE} source_id=${source_image_id} archive=${ARCHIVE}"

@@ -47,7 +47,7 @@ go run ./cmd/seeddata --config ./configs/seeddata.yaml --verbose
 
 容器运行约束：
 
-- 镜像按 40 位 Git SHA 标记并校验镜像 ID，不使用浮动标签。
+- 镜像按 40 位 Git SHA 标记，不使用浮动标签；产物校验构建端 config digest，加载后记录目标 Docker daemon 的镜像 ID，用于约束实际运行与回滚。
 - 以宿主机普通用户 UID/GID 运行，根文件系统只读，移除 Linux capabilities，不开放入站端口。
 - 固定 `TZ=Asia/Shanghai`，避免每日调度日期发生偏移。
 - 配置只读挂载；状态持久化到 `${HOME}/.local/share/seeddata-runner/state`。

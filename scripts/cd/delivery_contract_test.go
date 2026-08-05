@@ -113,6 +113,7 @@ func TestContainerPackageIsImmutableAndSelfVerifying(t *testing.T) {
 		"container-metadata.env",
 		"container-SHA256SUMS",
 		"seeddata-runner-linux-arm64-image.tar.gz",
+		"source_image_id=",
 		"org.opencontainers.image.revision",
 	)
 }
@@ -198,7 +199,8 @@ func TestMacPreflightValidatesSecretWithoutPrintingIt(t *testing.T) {
 	requireContains(t, common,
 		"SEEDDATA_MAC_ROOT must be a child of HOME",
 		"container archive checksum mismatch",
-		"loaded image ID does not match metadata",
+		"source image ID does not match archive config",
+		`TARGET_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$TARGET_IMAGE")`,
 		"--check-config",
 		".container-write-probe",
 		"X-IAM-Seed-Secret: ${IAM_MOCK_CONSUMER_SHARED_SECRET}",
