@@ -1,0 +1,49 @@
+name: seeddata-runner
+
+services:
+  seeddata-runner:
+    image: ${SEEDDATA_IMAGE:?SEEDDATA_IMAGE is required}
+    platform: linux/arm64
+    pull_policy: never
+    container_name: seeddata-runner
+    init: true
+    restart: unless-stopped
+    user: ${SEEDDATA_HOST_UID:?SEEDDATA_HOST_UID is required}:${SEEDDATA_HOST_GID:?SEEDDATA_HOST_GID is required}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      TZ: Asia/Shanghai
+    extra_hosts:
+      - "qs.fangcunmount.cn=${SEEDDATA_SERVERA_TAILSCALE_IP:?SEEDDATA_SERVERA_TAILSCALE_IP is required}"
+      - "collect.fangcunmount.cn=${SEEDDATA_SERVERA_TAILSCALE_IP:?SEEDDATA_SERVERA_TAILSCALE_IP is required}"
+      - "iam.fangcunmount.cn=${SEEDDATA_SERVERA_TAILSCALE_IP:?SEEDDATA_SERVERA_TAILSCALE_IP is required}"
+    env_file:
+      - ${SEEDDATA_ENV_FILE:?SEEDDATA_ENV_FILE is required}
+    volumes:
+      - type: bind
+        source: ${SEEDDATA_CONFIG_FILE:?SEEDDATA_CONFIG_FILE is required}
+        target: /run/seeddata/config.yaml
+        read_only: true
+      - type: bind
+        source: ${SEEDDATA_STATE_DIR:?SEEDDATA_STATE_DIR is required}
+        target: /app/.seeddata-cache
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    stop_grace_period: 2m
+    pids_limit: 256
+    cpus: ${SEEDDATA_CPUS:-2.0}
+    mem_limit: ${SEEDDATA_MEMORY:-1g}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/seeddata", "--config", "/run/seeddata/config.yaml", "--check-config"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"

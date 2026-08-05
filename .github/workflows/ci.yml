@@ -104,4 +104,7 @@ jobs:
           mkdir -p tmp/bin
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
             go build -trimpath -o tmp/bin/seeddata ./cmd/seeddata
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -trimpath -o tmp/bin/seeddata-arm64 ./cmd/seeddata
           file tmp/bin/seeddata
+          file tmp/bin/seeddata-arm64

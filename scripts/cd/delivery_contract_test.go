@@ -50,11 +50,186 @@ func TestCDWorkflowDeploysTheSuccessfulCISHA(t *testing.T) {
 		"labels: [self-hosted, macOS, ARM64, ops]",
 		"actions/upload-artifact@v4",
 		"actions/download-artifact@v4",
+		"vars.SEEDDATA_DEPLOY_TARGET != 'macmini'",
 	)
 	for _, forbidden := range []string{"git pull", "git reset", "IAM_MOCK_CONSUMER_SHARED_SECRET:", "SVRA_SUDO_PASSWORD"} {
 		if strings.Contains(workflow, forbidden) {
 			t.Fatalf("CD workflow must not contain %q", forbidden)
 		}
+	}
+}
+
+func TestContainerImageIsARM64AndRunsWithoutRoot(t *testing.T) {
+	dockerfile := readRepositoryFile(t, "Dockerfile")
+	requireContains(t, dockerfile,
+		"ARG TARGETARCH=arm64",
+		"CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH",
+		"apk add --no-cache ca-certificates curl tzdata",
+		"USER 10001:10001",
+		`CMD ["--config", "/run/seeddata/config.yaml"]`,
+		"org.opencontainers.image.revision",
+	)
+	for _, value := range []string{"IAM_MOCK_CONSUMER_SHARED_SECRET", "COPY configs/seeddata.yaml"} {
+		if strings.Contains(dockerfile, value) {
+			t.Fatalf("Dockerfile must not contain %q", value)
+		}
+	}
+}
+
+func TestMacComposeHasSingleHardenedPersistentService(t *testing.T) {
+	compose := readRepositoryFile(t, "deploy/macmini/compose.yaml")
+	requireContains(t, compose,
+		"platform: linux/arm64",
+		"pull_policy: never",
+		"restart: unless-stopped",
+		"read_only: true",
+		"no-new-privileges:true",
+		"TZ: Asia/Shanghai",
+		"extra_hosts:",
+		"qs.fangcunmount.cn=${SEEDDATA_SERVERA_TAILSCALE_IP",
+		"collect.fangcunmount.cn=${SEEDDATA_SERVERA_TAILSCALE_IP",
+		"iam.fangcunmount.cn=${SEEDDATA_SERVERA_TAILSCALE_IP",
+		"target: /app/.seeddata-cache",
+		"--check-config",
+		"max-size: 20m",
+	)
+	for _, value := range []string{"ports:", "privileged:", "network_mode: host", "latest"} {
+		if strings.Contains(compose, value) {
+			t.Fatalf("Mac Compose contract must not contain %q", value)
+		}
+	}
+	if count := strings.Count(compose, "  seeddata-runner:\n"); count != 1 {
+		t.Fatalf("expected exactly one seeddata service, got %d", count)
+	}
+}
+
+func TestContainerPackageIsImmutableAndSelfVerifying(t *testing.T) {
+	build := readRepositoryFile(t, "scripts/cd/build-container-package.sh")
+	requireContains(t, build,
+		`: "${DEPLOY_SHA:?DEPLOY_SHA is required}"`,
+		"--platform linux/arm64",
+		`IMAGE="seeddata-runner:${DEPLOY_SHA}"`,
+		"docker image save",
+		"container-metadata.env",
+		"container-SHA256SUMS",
+		"seeddata-runner-linux-arm64-image.tar.gz",
+		"org.opencontainers.image.revision",
+	)
+}
+
+func TestMacWorkflowSeparatesPreflightFromProductionCutover(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/macmini.yml")
+	requireContains(t, workflow,
+		`workflows: ["CI"]`,
+		"group: seeddata-production-deploy",
+		"cancel-in-progress: false",
+		"host-preflight",
+		"vars.SEEDDATA_DEPLOY_TARGET == 'macmini'",
+		"labels: [self-hosted, macOS, ARM64, ops]",
+		"docker/setup-qemu-action@v3",
+		"docker/setup-buildx-action@v3",
+		"seeddata-runner-linux-arm64-${{ env.DEPLOY_SHA }}",
+		"SEEDDATA_SERVERA_TAILSCALE_IP: ${{ vars.SVRA_TAILSCALE_IP }}",
+		"macmini-cutover.sh",
+		"macmini-rollback.sh",
+		"macmini-return-servera.sh",
+		"name: production",
+	)
+	for _, value := range []string{"IAM_MOCK_CONSUMER_SHARED_SECRET:", "SVRA_SUDO_PASSWORD", "seeddata-runner:latest"} {
+		if strings.Contains(workflow, value) {
+			t.Fatalf("Mac workflow must not contain %q", value)
+		}
+	}
+}
+
+func TestMacPreflightPinsProductionDomainsToServerATailnet(t *testing.T) {
+	common := readRepositoryFile(t, "scripts/cd/macmini-common.sh")
+	hostPreflight := readRepositoryFile(t, "scripts/cd/macmini-host-preflight.sh")
+	compose := readRepositoryFile(t, "deploy/macmini/compose.yaml")
+
+	requireContains(t, common,
+		"SEEDDATA_SERVERA_TAILSCALE_IP is required",
+		"SEEDDATA_SERVERA_TAILSCALE_IP must be an IPv4 address in 100.64.0.0/10",
+		`--add-host "qs.fangcunmount.cn:${SERVERA_TAILSCALE_IP}"`,
+		`--add-host "collect.fangcunmount.cn:${SERVERA_TAILSCALE_IP}"`,
+		`--add-host "iam.fangcunmount.cn:${SERVERA_TAILSCALE_IP}"`,
+		`SEEDDATA_SERVERA_TAILSCALE_IP="$SERVERA_TAILSCALE_IP"`,
+	)
+	requireContains(t, hostPreflight,
+		`--resolve "${host}:443:${SERVERA_TAILSCALE_IP}"`,
+		`"${TAILSCALE_HOST_ARGS[@]}"`,
+		"https://qs.fangcunmount.cn/healthz",
+		"https://collect.fangcunmount.cn/readyz",
+		"https://iam.fangcunmount.cn/healthz",
+	)
+	for _, body := range []string{common, hostPreflight, compose} {
+		if strings.Contains(body, "47.94.204.124") {
+			t.Fatal("Mac deployment must not hard-code the public ServerA address")
+		}
+	}
+}
+
+func TestReturnToServerAPreservesLatestStateAndRemovesMacInstance(t *testing.T) {
+	returnScript := readRepositoryFile(t, "scripts/cd/macmini-return-servera.sh")
+	requireContains(t, returnScript,
+		`REMOTE_SERVICE="seeddata-runner.service"`,
+		`wait_for_healthy_container "$current_image_id"`,
+		`compose_seeddata "$current_image" down --remove-orphans`,
+		`backup_container_state "before-return-servera"`,
+		`scp -F "$RUNNER_SSH_CONFIG" -r "$STATE_DIR/."`,
+		"sudo -n /usr/bin/rsync --archive --checksum --delete",
+		"sudo -n /usr/bin/systemctl enable '$REMOTE_SERVICE'",
+		"sudo -n /usr/bin/systemctl start '$REMOTE_SERVICE'",
+		`write_container_receipt "return-servera"`,
+		"restoring the prior Mac container",
+	)
+	down := strings.Index(returnScript, `compose_seeddata "$current_image" down --remove-orphans`)
+	copyState := strings.Index(returnScript, "sudo -n /usr/bin/rsync --archive --checksum --delete")
+	start := strings.Index(returnScript, "sudo -n /usr/bin/systemctl start '$REMOTE_SERVICE'")
+	if down < 0 || copyState <= down || start <= copyState {
+		t.Fatal("return must remove the Mac instance, copy current state, then start ServerA")
+	}
+}
+
+func TestMacPreflightValidatesSecretWithoutPrintingIt(t *testing.T) {
+	common := readRepositoryFile(t, "scripts/cd/macmini-common.sh")
+	requireContains(t, common,
+		"SEEDDATA_MAC_ROOT must be a child of HOME",
+		"container archive checksum mismatch",
+		"loaded image ID does not match metadata",
+		"--check-config",
+		".container-write-probe",
+		"X-IAM-Seed-Secret: ${IAM_MOCK_CONSUMER_SHARED_SECRET}",
+		`[ "$code" = "400" ]`,
+		"container restarted during verification",
+	)
+	for _, value := range []string{`. "$ENV_FILE"`, `source "$ENV_FILE"`, "echo $IAM_MOCK_CONSUMER_SHARED_SECRET"} {
+		if strings.Contains(common, value) {
+			t.Fatalf("Mac deployment common code must not contain %q", value)
+		}
+	}
+}
+
+func TestInitialCutoverPreservesSingleInstanceBoundary(t *testing.T) {
+	cutover := readRepositoryFile(t, "scripts/cd/macmini-cutover.sh")
+	requireContains(t, cutover,
+		`REMOTE_SERVICE="seeddata-runner.service"`,
+		"candidate_runtime_preflight",
+		"sudo -n /usr/bin/systemctl stop '$REMOTE_SERVICE'",
+		"sudo -n /usr/bin/rsync --archive --checksum --delete",
+		"server_stopped=1",
+		"macmini-deploy.sh",
+		"sudo -n /usr/bin/systemctl disable '$REMOTE_SERVICE'",
+		"ServerA remains stopped to protect the single-instance state contract",
+		"restarting ServerA",
+	)
+	preflight := strings.Index(cutover, `candidate_runtime_preflight "$TARGET_IMAGE"`)
+	stop := strings.Index(cutover, "sudo -n /usr/bin/systemctl stop '$REMOTE_SERVICE'")
+	stateCopy := strings.Index(cutover, "sudo -n /usr/bin/rsync --archive --checksum --delete")
+	deploy := strings.Index(cutover, `"$SCRIPT_DIR/macmini-deploy.sh"`)
+	disable := strings.Index(cutover, "sudo -n /usr/bin/systemctl disable '$REMOTE_SERVICE'")
+	if preflight < 0 || stop <= preflight || stateCopy <= stop || deploy <= stateCopy || disable <= deploy {
+		t.Fatal("cutover must preflight, stop, copy state, deploy, then disable ServerA in that order")
 	}
 }
 
@@ -168,6 +343,8 @@ func TestRemoteScriptsOnlyElevateAllowlistedCommands(t *testing.T) {
 		"scripts/cd/remote-common.sh",
 		"scripts/cd/remote-deploy.sh",
 		"scripts/cd/remote-rollback.sh",
+		"scripts/cd/macmini-cutover.sh",
+		"scripts/cd/macmini-return-servera.sh",
 	} {
 		body := readRepositoryFile(t, path)
 		all.WriteString(body)

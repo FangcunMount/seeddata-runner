@@ -1,0 +1,319 @@
+name: Mac Mini Container Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Preflight, perform the initial cutover, deploy, or roll back a Mac container'
+        required: true
+        type: choice
+        default: host-preflight
+        options:
+          - host-preflight
+          - cutover
+          - deploy
+          - rollback
+          - return-servera
+      deploy_sha:
+        description: 'Optional 40-character Git SHA; required for deploying a revision other than this workflow SHA'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seeddata-production-deploy
+  cancel-in-progress: false
+
+env:
+  DEPLOY_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.event.inputs.deploy_sha || github.sha }}
+  BUILD_TIME: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.updated_at || github.event.repository.updated_at }}
+  SEEDDATA_SERVERA_TAILSCALE_IP: ${{ vars.SVRA_TAILSCALE_IP }}
+
+jobs:
+  target-guard:
+    name: Verify Mac Production Target
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.operation != 'host-preflight'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the explicit Mac target gate
+        env:
+          DEPLOY_TARGET: ${{ vars.SEEDDATA_DEPLOY_TARGET }}
+        run: |
+          case "${{ github.event.inputs.operation }}" in
+            return-servera)
+              [ "$DEPLOY_TARGET" = "servera" ] || {
+                echo "Set SEEDDATA_DEPLOY_TARGET=servera before returning production" >&2
+                exit 1
+              }
+              ;;
+            *)
+              [ "$DEPLOY_TARGET" = "macmini" ] || {
+                echo "Set SEEDDATA_DEPLOY_TARGET=macmini before changing Mac production" >&2
+                exit 1
+              }
+              ;;
+          esac
+
+  package:
+    name: Build Immutable ARM64 Container
+    if: |
+      (github.event_name == 'workflow_run' &&
+       vars.SEEDDATA_DEPLOY_TARGET == 'macmini' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main') ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.event.inputs.operation != 'rollback' &&
+       github.event.inputs.operation != 'return-servera')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout selected revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          fetch-depth: 1
+
+      - name: Verify manually selected revision
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git_sha=$(git rev-parse HEAD)
+          [ "$git_sha" = "$DEPLOY_SHA" ]
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and verify container package
+        env:
+          DEPLOY_SHA: ${{ env.DEPLOY_SHA }}
+          BUILD_TIME: ${{ env.BUILD_TIME }}
+        run: bash scripts/cd/build-container-package.sh
+
+      - name: Upload deployment package
+        uses: actions/upload-artifact@v4
+        with:
+          name: seeddata-runner-linux-arm64-${{ env.DEPLOY_SHA }}
+          path: |
+            dist/seeddata-runner-linux-arm64-image.tar.gz
+            dist/container-metadata.env
+            dist/container-SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  host-preflight:
+    name: Preflight Mac Host
+    needs: [package]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'host-preflight' && needs.package.result == 'success'
+    runs-on:
+      group: qlume
+      labels: [self-hosted, macOS, ARM64, ops]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout selected revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          fetch-depth: 1
+
+      - name: Download container package
+        uses: actions/download-artifact@v4
+        with:
+          name: seeddata-runner-linux-arm64-${{ env.DEPLOY_SHA }}
+          path: dist
+
+      - name: Verify Docker, image, and production egress
+        run: |
+          bash scripts/cd/macmini-host-preflight.sh \
+            dist/seeddata-runner-linux-arm64-image.tar.gz \
+            dist/container-metadata.env \
+            dist/container-SHA256SUMS
+
+  cutover:
+    name: Move Production to Mac Container
+    needs: [target-guard, package]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'cutover' && needs.target-guard.result == 'success' && needs.package.result == 'success'
+    runs-on:
+      group: qlume
+      labels: [self-hosted, macOS, ARM64, ops]
+    timeout-minutes: 20
+    environment:
+      name: production
+    steps:
+      - name: Checkout selected revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          fetch-depth: 1
+
+      - name: Download container package
+        uses: actions/download-artifact@v4
+        with:
+          name: seeddata-runner-linux-arm64-${{ env.DEPLOY_SHA }}
+          path: dist
+
+      - name: Setup pinned ServerA SSH connection
+        env:
+          RUNNER_SSH_KEY: ${{ secrets.SVR_MINI_SSH_KEY || secrets.SVRA_SSH_KEY }}
+          RUNNER_SSH_HOST: ${{ vars.SVRA_HOST }}
+          RUNNER_SSH_USER: ${{ vars.SVRA_USERNAME }}
+          RUNNER_SSH_PORT: ${{ vars.SVRA_SSH_PORT || 22 }}
+          RUNNER_SSH_FINGERPRINT: ${{ vars.SVRA_SSH_FINGERPRINT }}
+          RUNNER_SSH_ALIAS: seeddata-production
+          EXPECTED_HOSTNAME: serverA
+        run: bash scripts/cd/setup-runner-ssh.sh
+
+      - name: Stop, copy state, and verify Mac container
+        env:
+          RUNNER_SSH_ALIAS: seeddata-production
+        run: |
+          bash scripts/cd/macmini-cutover.sh \
+            dist/seeddata-runner-linux-arm64-image.tar.gz \
+            dist/container-metadata.env \
+            dist/container-SHA256SUMS \
+            deploy/macmini/compose.yaml
+
+      - name: Cleanup SSH material
+        if: always()
+        run: |
+          if [ -n "${RUNNER_SSH_DIR:-}" ] && [ -d "$RUNNER_SSH_DIR" ]; then
+            rm -rf -- "$RUNNER_SSH_DIR"
+          fi
+
+  deploy:
+    name: Deploy Mac Container
+    needs: [package]
+    if: |
+      needs.package.result == 'success' &&
+      vars.SEEDDATA_DEPLOY_TARGET == 'macmini' &&
+      ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+       (github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'deploy'))
+    runs-on:
+      group: qlume
+      labels: [self-hosted, macOS, ARM64, ops]
+    timeout-minutes: 15
+    environment:
+      name: production
+    steps:
+      - name: Checkout selected revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          fetch-depth: 1
+
+      - name: Download container package
+        uses: actions/download-artifact@v4
+        with:
+          name: seeddata-runner-linux-arm64-${{ env.DEPLOY_SHA }}
+          path: dist
+
+      - name: Deploy and verify container
+        run: |
+          bash scripts/cd/macmini-deploy.sh \
+            dist/seeddata-runner-linux-arm64-image.tar.gz \
+            dist/container-metadata.env \
+            dist/container-SHA256SUMS \
+            deploy/macmini/compose.yaml
+
+  rollback:
+    name: Roll Back Mac Container Image
+    needs: [target-guard]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'rollback' && needs.target-guard.result == 'success'
+    runs-on:
+      group: qlume
+      labels: [self-hosted, macOS, ARM64, ops]
+    timeout-minutes: 10
+    environment:
+      name: production
+    steps:
+      - name: Checkout rollback script
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Restore previous Mac image and preserve current state
+        run: bash scripts/cd/macmini-rollback.sh
+
+  return-servera:
+    name: Return Production to ServerA
+    needs: [target-guard]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'return-servera' && needs.target-guard.result == 'success'
+    runs-on:
+      group: qlume
+      labels: [self-hosted, macOS, ARM64, ops]
+    timeout-minutes: 15
+    environment:
+      name: production
+    steps:
+      - name: Checkout return script
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Setup pinned ServerA SSH connection
+        env:
+          RUNNER_SSH_KEY: ${{ secrets.SVR_MINI_SSH_KEY || secrets.SVRA_SSH_KEY }}
+          RUNNER_SSH_HOST: ${{ vars.SVRA_HOST }}
+          RUNNER_SSH_USER: ${{ vars.SVRA_USERNAME }}
+          RUNNER_SSH_PORT: ${{ vars.SVRA_SSH_PORT || 22 }}
+          RUNNER_SSH_FINGERPRINT: ${{ vars.SVRA_SSH_FINGERPRINT }}
+          RUNNER_SSH_ALIAS: seeddata-production
+          EXPECTED_HOSTNAME: serverA
+        run: bash scripts/cd/setup-runner-ssh.sh
+
+      - name: Stop Mac, transfer state, and start ServerA
+        env:
+          RUNNER_SSH_ALIAS: seeddata-production
+        run: bash scripts/cd/macmini-return-servera.sh
+
+      - name: Cleanup SSH material
+        if: always()
+        run: |
+          if [ -n "${RUNNER_SSH_DIR:-}" ] && [ -d "$RUNNER_SSH_DIR" ]; then
+            rm -rf -- "$RUNNER_SSH_DIR"
+          fi
+
+  summary:
+    name: Mac Deployment Summary
+    needs: [target-guard, package, host-preflight, cutover, deploy, rollback, return-servera]
+    if: always() && (github.event_name == 'workflow_dispatch' || vars.SEEDDATA_DEPLOY_TARGET == 'macmini')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report result
+        env:
+          OPERATION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation || 'deploy' }}
+          GUARD_RESULT: ${{ needs.target-guard.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          PREFLIGHT_RESULT: ${{ needs.host-preflight.result }}
+          CUTOVER_RESULT: ${{ needs.cutover.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          ROLLBACK_RESULT: ${{ needs.rollback.result }}
+          RETURN_RESULT: ${{ needs.return-servera.result }}
+        run: |
+          echo "Operation: ${OPERATION}"
+          echo "Target Git SHA: ${DEPLOY_SHA}"
+          echo "Target guard: ${GUARD_RESULT}"
+          echo "Package: ${PACKAGE_RESULT}"
+          echo "Host preflight: ${PREFLIGHT_RESULT}"
+          echo "Cutover: ${CUTOVER_RESULT}"
+          echo "Deploy: ${DEPLOY_RESULT}"
+          echo "Rollback: ${ROLLBACK_RESULT}"
+          echo "Return to ServerA: ${RETURN_RESULT}"
+          case "$OPERATION" in
+            host-preflight) [ "$PREFLIGHT_RESULT" = "success" ] ;;
+            cutover) [ "$CUTOVER_RESULT" = "success" ] ;;
+            deploy) [ "$DEPLOY_RESULT" = "success" ] ;;
+            rollback) [ "$ROLLBACK_RESULT" = "success" ] ;;
+            return-servera) [ "$RETURN_RESULT" = "success" ] ;;
+            *) exit 1 ;;
+          esac

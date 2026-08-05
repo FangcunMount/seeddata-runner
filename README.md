@@ -9,11 +9,12 @@ runner 不创建 Plan，也不推进 Plan 的 schedule/open/expire 生命周期�
 
 ## CLI
 
-可执行程序只接受两个参数：
+可执行程序接受以下参数：
 
 ```text
 --config <path>   配置文件，默认 ./configs/seeddata.yaml
 --verbose         开启 debug 日志
+--check-config    只校验配置并退出
 ```
 
 位置参数、未知参数和其他命令都会立即返回 CLI 错误。配置文件采用严格 YAML 字段解析，未知字段会导致启动失败。
@@ -39,6 +40,31 @@ go run ./cmd/seeddata --config ./configs/seeddata.yaml --verbose
 ```
 
 两个 daemon 共享进程生命周期：任意一条异常退出都会结束 supervisor；`SIGINT` 和 `SIGTERM` 会停止整个进程。
+
+## Mac mini 容器部署
+
+生产环境支持从 ServerA 的 systemd 单进程切换到 Mac mini 上的 Linux ARM64 容器。迁移设计仍然只允许一个 runner 实例运行，并保留现有配置、环境变量文件和 `.seeddata-cache` 状态。
+
+容器运行约束：
+
+- 镜像按 40 位 Git SHA 标记并校验镜像 ID，不使用浮动标签。
+- 以宿主机普通用户 UID/GID 运行，根文件系统只读，移除 Linux capabilities，不开放入站端口。
+- 固定 `TZ=Asia/Shanghai`，避免每日调度日期发生偏移。
+- 配置只读挂载；状态持久化到 `${HOME}/.local/share/seeddata-runner/state`。
+- `qs.fangcunmount.cn`、`collect.fangcunmount.cn` 和 `iam.fangcunmount.cn` 在容器内映射到仓库变量 `SVRA_TAILSCALE_IP`，保留原 HTTPS 域名、SNI 和证书校验，同时避开 Mac 所在网络到 ServerA 公网入口的异常路径。
+- Compose 只声明一个服务，使用 `unless-stopped` 和有限日志轮转。
+
+GitHub Actions 使用仓库变量 `SEEDDATA_DEPLOY_TARGET` 控制生产目标：
+
+- 未设置或不是 `macmini`：继续执行 `.github/workflows/cd.yml` 的 ServerA systemd 发布。
+- 设置为 `macmini`：ServerA 自动发布停止，`.github/workflows/macmini.yml` 在 CI 成功后发布 ARM64 容器。
+- `host-preflight` 不要求修改生产目标，可提前验证 Docker、ARM64 镜像和外部服务连通性。
+- 首次切换必须手工运行 `cutover`。脚本先验证配置、状态写入和 IAM shared secret，再停止 ServerA、复制状态、启动 Mac 容器；容器健康后才禁用 ServerA 服务。
+- 后续 `deploy` 保留切换前状态副本；`rollback` 只切回上一 Mac 镜像，并继续使用当前状态。
+- 返回 ServerA 前先把仓库变量改为 `servera`，再手工运行 `return-servera`；流程会移除 Mac 容器、同步最新状态并重新启用 systemd。
+
+Mac mini 必须在接通电源后保持不睡眠，Docker Desktop 必须随运维用户登录自动启动。生产切换前应先确认 Docker daemon 在重启后可自动恢复，且 runner 用户可直接执行 `docker info` 与 `docker compose version`。
+`SVRA_TAILSCALE_IP` 必须设置为 ServerA 当前的 Tailscale IPv4 地址（`100.64.0.0/10`）；`host-preflight` 会同时从 Mac 宿主机和候选 ARM64 容器验证三个生产 HTTPS 健康接口。
 
 ## 认证和环境变量
 
@@ -178,7 +204,7 @@ sudo journalctl -u seeddata-runner -n 200 --no-pager
 
 ## 生产自动 CD
 
-`.github/workflows/cd.yml` 在 `main` 的 `CI` 成功后构建对应精确 Git SHA 的 Linux amd64 静态二进制，并通过 `production` Environment 发布到 serverA。生产 Environment 建议先启用 required reviewer；批准后无需再登录服务器执行构建或替换。
+当 `SEEDDATA_DEPLOY_TARGET` 未设置或不是 `macmini` 时，`.github/workflows/cd.yml` 在 `main` 的 `CI` 成功后构建对应精确 Git SHA 的 Linux amd64 静态二进制，并通过 `production` Environment 发布到 ServerA。目标为 `macmini` 时，改由 `.github/workflows/macmini.yml` 构建和发布 Linux ARM64 容器。生产 Environment 建议启用 required reviewer。
 
 CD 锁定以下生产契约：
 
@@ -197,7 +223,7 @@ CD 锁定以下生产契约：
 - `operation=deploy`：可留空 `deploy_sha` 使用所选分支当前 SHA，或填写完整 40 位 SHA。
 - `operation=rollback`：`rollback_backup=latest` 恢复最新二进制备份，也可填写发布日志中输出的备份目录 basename。
 
-回滚只恢复二进制，不恢复配置、EnvironmentFile、调度状态或提交账本。CD 所需的组织配置为 `SVRA_HOST`、`SVRA_USERNAME`、`SVRA_SSH_PORT`、`SVRA_SSH_FINGERPRINT`，以及 `SVR_MINI_SSH_KEY` 或 `SVRA_SSH_KEY`；SSH host key 必须与配置的 SHA-256 指纹匹配。
+ServerA 回滚只恢复二进制，不恢复配置、EnvironmentFile、调度状态或提交账本。CD 所需的仓库变量为 `SEEDDATA_DEPLOY_TARGET`、`SVRA_HOST`、`SVRA_USERNAME`、`SVRA_SSH_PORT`、`SVRA_SSH_FINGERPRINT`；Mac 容器部署还需要 `SVRA_TAILSCALE_IP`。密钥为 `SVR_MINI_SSH_KEY` 或 `SVRA_SSH_KEY`；SSH host key 必须与配置的 SHA-256 指纹匹配。
 
 `SVRA_USERNAME` 对应的 SSH 用户以普通用户身份执行远端编排，只对 sudoers 已明确允许的 `/usr/bin/true`、`/usr/bin/install`、`/usr/bin/rsync`、`/usr/bin/systemctl`、`/usr/bin/test`、`/usr/bin/ls`、`/usr/bin/grep`、`/usr/bin/sha256sum` 和 `/usr/bin/journalctl` 逐条使用 `sudo -n`。CD 不运行任意 root shell，也不把上传到 `/tmp` 的脚本整体交给 sudo；无需 sudo 密码 Secret 或 root SSH。候选二进制的 root 环境预检 unit 由 CD 自动安装和更新，不需要人工预置服务器 helper。
 

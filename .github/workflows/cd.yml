@@ -43,11 +43,12 @@ jobs:
   package:
     name: Build Immutable Linux Package
     if: |
-      (github.event_name == 'workflow_run' &&
+      vars.SEEDDATA_DEPLOY_TARGET != 'macmini' &&
+      ((github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main') ||
       (github.event_name == 'workflow_dispatch' &&
-       github.event.inputs.operation == 'deploy')
+       github.event.inputs.operation == 'deploy'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -138,7 +139,7 @@ jobs:
 
   rollback:
     name: Roll Back Production Binary
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'rollback'
+    if: vars.SEEDDATA_DEPLOY_TARGET != 'macmini' && github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'rollback'
     runs-on:
       group: qlume
       labels: [self-hosted, macOS, ARM64, ops]
@@ -183,6 +184,7 @@ jobs:
     runs-on: ubuntu-latest
     if: |
       always() &&
+      vars.SEEDDATA_DEPLOY_TARGET != 'macmini' &&
       (github.event_name == 'workflow_dispatch' ||
        github.event.workflow_run.conclusion == 'success')
     steps:

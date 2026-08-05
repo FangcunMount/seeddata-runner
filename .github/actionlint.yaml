@@ -3,10 +3,12 @@ self-hosted-runner:
     - ops
 
 config-variables:
+  - SEEDDATA_DEPLOY_TARGET
   - SVRA_HOST
   - SVRA_USERNAME
   - SVRA_SSH_PORT
   - SVRA_SSH_FINGERPRINT
+  - SVRA_TAILSCALE_IP
 
 config-secrets:
   - SVR_MINI_SSH_KEY

@@ -1,0 +1,11 @@
+.git
+.github
+.seeddata-cache
+bin
+dist
+logs
+tmp
+*.log
+.DS_Store
+.idea
+.vscode
