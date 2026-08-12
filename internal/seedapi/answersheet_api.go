@@ -87,6 +87,19 @@ func (c *APIClient) GetAssessmentReadiness(ctx context.Context, answerSheetID st
 	return &readiness, nil
 }
 
+// VerifyCollectionAnswerSheetOwnership uses the collection authorization path
+// to prove that an answer sheet belongs to the current guardian and testee.
+func (c *APIClient) VerifyCollectionAnswerSheetOwnership(ctx context.Context, answerSheetID string, testeeID uint64) (bool, error) {
+	_, err := c.GetAssessmentReadiness(ctx, answerSheetID, testeeID)
+	if isAPIHTTPStatus(err, http.StatusForbidden) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (c *APIClient) WaitAssessmentReport(ctx context.Context, assessmentID string, testeeID uint64, timeoutSeconds int) (*AssessmentReportStatusResponse, error) {
 	assessmentID = strings.TrimSpace(assessmentID)
 	if assessmentID == "" || testeeID == 0 {

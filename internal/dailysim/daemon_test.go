@@ -11,6 +11,7 @@ import (
 
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 	seedapi "github.com/FangcunMount/seeddata-runner/internal/seedapi"
+	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 )
 
 func TestResolveDailySimulationRunCountStableRange(t *testing.T) {
@@ -329,6 +330,35 @@ func TestResolveDailySimulationRunCountClampsToRemainingQuota(t *testing.T) {
 	}
 }
 
+func TestResolveDailySimulationJobIndexesContinuesFromCompletedDailyCount(t *testing.T) {
+	runDate := time.Date(2026, 8, 5, 0, 0, 0, 0, time.Local)
+	state := &dailySimulationDaemonState{
+		DailyUserCountDate: "2026-08-05",
+		DailyUserCount:     182,
+	}
+
+	indexes := resolveDailySimulationJobIndexes(state, runDate, 118)
+	if len(indexes) != 118 {
+		t.Fatalf("job indexes len=%d, want 118", len(indexes))
+	}
+	if indexes[0] != 182 || indexes[len(indexes)-1] != 299 {
+		t.Fatalf("job indexes range=%d..%d, want 182..299", indexes[0], indexes[len(indexes)-1])
+	}
+}
+
+func TestResolveDailySimulationJobIndexesStartsAtZeroForAnotherDay(t *testing.T) {
+	runDate := time.Date(2026, 8, 6, 0, 0, 0, 0, time.Local)
+	state := &dailySimulationDaemonState{
+		DailyUserCountDate: "2026-08-05",
+		DailyUserCount:     182,
+	}
+
+	indexes := resolveDailySimulationJobIndexes(state, runDate, 3)
+	if len(indexes) != 3 || indexes[0] != 0 || indexes[2] != 2 {
+		t.Fatalf("job indexes=%v, want [0 1 2]", indexes)
+	}
+}
+
 func TestMatchDailySimulationExistingTesteesByIndex(t *testing.T) {
 	cfg := DailySimulationConfig{
 		TesteeSource: "daily_simulation",
@@ -553,5 +583,60 @@ func TestListDailySimulationTesteesByOrgUsesApiserverMaxPageSize(t *testing.T) {
 		if got := query.Get("created_end_date"); got != "2026-04-20" {
 			t.Fatalf("request %d used unexpected created_end_date %q", idx+1, got)
 		}
+	}
+}
+
+func TestLoadDailySimulationExistingTesteesHydratesGuardianFromDetail(t *testing.T) {
+	runDate := time.Date(2026, 8, 12, 0, 0, 0, 0, time.Local)
+	cfg := DailySimulationConfig{TesteeSource: "daily_simulation"}
+	profile := buildDailySimulationProfile(cfg, runDate, 0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/testees":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"items": []map[string]any{{
+						"id":         "t-1",
+						"name":       profile.ChildName,
+						"gender":     dailySimulationProfileGender(profile.ChildGender),
+						"birthday":   profile.ChildDOB,
+						"source":     "daily_simulation",
+						"created_at": "2026-08-12T10:00:00+08:00",
+						"updated_at": "2026-08-12T10:00:00+08:00",
+					}},
+					"total": 1, "page": 1, "page_size": 100, "total_pages": 1,
+				},
+			})
+		case "/api/v1/testees/t-1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"id": "t-1", "profile_id": "profile-1", "name": profile.ChildName,
+					"gender": dailySimulationProfileGender(profile.ChildGender), "birthday": profile.ChildDOB,
+					"source": "daily_simulation", "guardians": []map[string]any{{"phone": profile.GuardianPhone}},
+					"created_at": "2026-08-12T10:00:00+08:00", "updated_at": "2026-08-12T10:00:00+08:00",
+				},
+			})
+		default:
+			t.Fatalf("unexpected request %s", r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := seedapi.NewAPIClient(server.URL, "admin-token", nil)
+	matched, err := loadDailySimulationExistingTesteesByIndex(context.Background(), &dependencies{
+		Config: &seedconfig.Config{
+			Global: seedconfig.GlobalConfig{OrgID: 7},
+			IAM:    seedconfig.IAMConfig{MockConsumer: seedconfig.IAMMockConsumerConfig{Enabled: true}},
+		},
+		APIClient: client,
+	}, cfg, runDate, 1)
+	if err != nil {
+		t.Fatalf("load existing testees: %v", err)
+	}
+	if got := matched[profile.Index]; got == nil || got.ID != "t-1" || got.ProfileID == nil || *got.ProfileID != "profile-1" {
+		t.Fatalf("matched testee=%+v", got)
 	}
 }

@@ -172,8 +172,12 @@ func TestShouldRetryDailySimulationIAMLogin(t *testing.T) {
 func TestEnsureDailySimulationTesteeDoesNotSendSeedTagByDefault(t *testing.T) {
 	var captured CollectionCreateTesteeRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/testees":
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/testees":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"items":[],"total":0}}`))
+			return
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/testees":
 			if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
 				t.Fatalf("decode request: %v", err)
 			}
@@ -218,6 +222,11 @@ func TestEnsureDailySimulationTesteeNormalizesLegacyGuardianRelation(t *testing.
 		if r.URL.Path != "/api/v1/testees" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"items":[],"total":0}}`))
+			return
+		}
 		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
@@ -240,6 +249,112 @@ func TestEnsureDailySimulationTesteeNormalizesLegacyGuardianRelation(t *testing.
 	}
 	if captured.Relation != seedconfig.DefaultDailySimulationGuardianRelation {
 		t.Fatalf("unexpected relation %q", captured.Relation)
+	}
+}
+
+func TestEnsureDailySimulationTesteeReusesEarliestExactGuardianTestee(t *testing.T) {
+	var postCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			postCalls++
+			t.Fatalf("unexpected duplicate testee POST")
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/testees" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":{"items":[` +
+			`{"id":"later","name":"王子轩","gender":1,"birthday":"2014-04-20","source":"daily_simulation","iam_profile_id":"profile-later","created_at":"2026-08-12T10:30:00+08:00"},` +
+			`{"id":"wrong-child","name":"王子涵","gender":1,"birthday":"2014-04-20","source":"daily_simulation","iam_profile_id":"profile-wrong","created_at":"2026-08-12T09:00:00+08:00"},` +
+			`{"id":"earliest","name":"王子轩","gender":1,"birthday":"2014-04-20","source":"daily_simulation","iam_profile_id":"profile-earliest","created_at":"2026-08-12T10:00:00+08:00"}` +
+			`],"total":3}}`))
+	}))
+	defer server.Close()
+
+	testee, created, err := ensureDailySimulationTestee(
+		context.Background(),
+		NewAPIClient(server.URL, "guardian-token", nil),
+		DailySimulationConfig{TesteeSource: "daily_simulation"},
+		dailySimulationProfile{ChildName: "王子轩", ChildDOB: "2014-04-20", ChildGender: 1},
+	)
+	if err != nil {
+		t.Fatalf("ensure testee: %v", err)
+	}
+	if created {
+		t.Fatal("expected existing testee to be reused")
+	}
+	if postCalls != 0 {
+		t.Fatalf("testee POST calls=%d, want 0", postCalls)
+	}
+	if testee == nil || testee.ID != "earliest" || testee.IAMProfileID != "profile-earliest" {
+		t.Fatalf("unexpected reused testee: %+v", testee)
+	}
+}
+
+func TestEnsureDailySimulationTesteeReconcilesCommittedCreateAfterError(t *testing.T) {
+	var getCalls, postCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			getCalls++
+			if getCalls == 1 {
+				_, _ = w.Write([]byte(`{"code":0,"data":{"items":[],"total":0}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"code":0,"data":{"items":[{"id":"committed","name":"王子轩","gender":1,"birthday":"2014-04-20","source":"daily_simulation","iam_profile_id":"profile-committed","created_at":"2026-08-12T10:00:00+08:00"}],"total":1}}`))
+		case http.MethodPost:
+			postCalls++
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"code":503,"message":"response lost after commit"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "guardian-token", log.New(log.NewOptions()))
+	testee, created, err := ensureDailySimulationTestee(
+		context.Background(),
+		client,
+		DailySimulationConfig{TesteeSource: "daily_simulation"},
+		dailySimulationProfile{ChildName: "王子轩", ChildDOB: "2014-04-20", ChildGender: 1},
+	)
+	if err != nil {
+		t.Fatalf("ensure testee: %v", err)
+	}
+	if created || testee == nil || testee.ID != "committed" {
+		t.Fatalf("reconciled testee=%+v created=%t", testee, created)
+	}
+	if postCalls != 1 || getCalls != 2 {
+		t.Fatalf("post_calls=%d get_calls=%d, want 1 and 2", postCalls, getCalls)
+	}
+}
+
+func TestEnsureDailySimulationTesteeFailsClosedWhenGuardianLookupFails(t *testing.T) {
+	var postCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postCalls++
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"code":500,"message":"lookup unavailable"}`))
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "guardian-token", log.New(log.NewOptions()))
+	client.SetRetryConfig(seedconfig.RetryConfig{MaxRetries: 0})
+	_, _, err := ensureDailySimulationTestee(
+		context.Background(),
+		client,
+		DailySimulationConfig{TesteeSource: "daily_simulation"},
+		dailySimulationProfile{ChildName: "王子轩", ChildDOB: "2014-04-20", ChildGender: 1},
+	)
+	if err == nil || !strings.Contains(err.Error(), "list guardian testees before create") {
+		t.Fatalf("expected fail-closed lookup error, got %v", err)
+	}
+	if postCalls != 0 {
+		t.Fatalf("testee POST calls=%d, want 0", postCalls)
 	}
 }
 

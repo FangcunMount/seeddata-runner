@@ -4,13 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 )
 
 // CreateCollectionTestee 创建 collection 受试者。
 func (c *APIClient) CreateCollectionTestee(ctx context.Context, req CollectionCreateTesteeRequest) (*TesteeResponse, error) {
-	resp, err := c.doRequest(ctx, "POST", "/api/v1/testees", req)
+	// The collection create endpoint has no idempotency key. Retrying a request
+	// after a timeout or 5xx can create another IAM profile/link and testee even
+	// when the first request was committed successfully.
+	resp, err := c.doRequestWithRetryTimeoutAndLimit(
+		ctx,
+		http.MethodPost,
+		"/api/v1/testees",
+		req,
+		true,
+		c.httpClient.Timeout,
+		0,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -20,6 +32,20 @@ func (c *APIClient) CreateCollectionTestee(ctx context.Context, req CollectionCr
 		return nil, fmt.Errorf("decode create testee response: %w", err)
 	}
 	return &testeeResp, nil
+}
+
+// ListCollectionTestees lists testees linked to the authenticated guardian.
+func (c *APIClient) ListCollectionTestees(ctx context.Context, offset, limit int) (*CollectionTesteeListResponse, error) {
+	path := fmt.Sprintf("/api/v1/testees?offset=%d&limit=%d", offset, limit)
+	resp, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var listResp CollectionTesteeListResponse
+	if err := decodeResponseData(resp, &listResp); err != nil {
+		return nil, fmt.Errorf("decode collection testee list response: %w", err)
+	}
+	return &listResp, nil
 }
 
 // ListTesteesByOrg 获取受试者列表（apiserver）。

@@ -3,6 +3,7 @@ package dailysim
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -173,6 +174,16 @@ func ensureDailySimulationTestee(
 	cfg DailySimulationConfig,
 	profile dailySimulationProfile,
 ) (*TesteeResponse, bool, error) {
+	existing, err := findDailySimulationGuardianTestee(ctx, collectionClient, cfg, profile)
+	if err != nil {
+		// Fail closed: creating when the guardian lookup is unavailable would
+		// turn a transient read failure into another profile/testee chain.
+		return nil, false, fmt.Errorf("list guardian testees before create: %w", err)
+	}
+	if existing != nil {
+		return existing, false, nil
+	}
+
 	testeeResp, err := collectionClient.CreateCollectionTestee(ctx, CollectionCreateTesteeRequest{
 		Name:       profile.ChildName,
 		Gender:     int32(profile.ChildGender),
@@ -183,9 +194,73 @@ func ensureDailySimulationTestee(
 		IsKeyFocus: cfg.IsKeyFocus,
 	})
 	if err != nil {
+		// A timeout can happen after the server commits. Reconcile once before
+		// returning the error so the caller never blindly repeats the POST.
+		reconciled, reconcileErr := findDailySimulationGuardianTestee(ctx, collectionClient, cfg, profile)
+		if reconcileErr == nil && reconciled != nil {
+			return reconciled, false, nil
+		}
+		if reconcileErr != nil {
+			return nil, false, fmt.Errorf("create collection testee %s: %w; reconcile guardian testees: %v", profile.ChildName, err, reconcileErr)
+		}
 		return nil, false, fmt.Errorf("create collection testee %s: %w", profile.ChildName, err)
 	}
 	return testeeResp, true, nil
+}
+
+func findDailySimulationGuardianTestee(
+	ctx context.Context,
+	collectionClient *APIClient,
+	cfg DailySimulationConfig,
+	profile dailySimulationProfile,
+) (*TesteeResponse, error) {
+	if collectionClient == nil {
+		return nil, fmt.Errorf("guardian collection client is nil")
+	}
+	const pageSize = 100
+	items := make([]*TesteeResponse, 0, pageSize)
+	for offset := 0; ; offset += pageSize {
+		resp, err := collectionClient.ListCollectionTestees(ctx, offset, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, resp.Items...)
+		if len(resp.Items) == 0 || int64(len(items)) >= resp.Total {
+			break
+		}
+	}
+
+	wantSource := normalizeDailySimulationSource(cfg.TesteeSource)
+	matches := make([]*TesteeResponse, 0, 1)
+	for _, item := range items {
+		if item == nil || strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.IAMProfileID) == "" {
+			continue
+		}
+		if strings.TrimSpace(item.Name) != strings.TrimSpace(profile.ChildName) ||
+			item.Gender != int32(profile.ChildGender) ||
+			strings.TrimSpace(item.Birthday) != strings.TrimSpace(profile.ChildDOB) ||
+			strings.TrimSpace(item.Source) != wantSource {
+			continue
+		}
+		matches = append(matches, item)
+	}
+	if len(matches) == 0 {
+		return nil, nil
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		left, right := matches[i], matches[j]
+		if left.CreatedAt.Equal(right.CreatedAt) {
+			return strings.TrimSpace(left.ID) < strings.TrimSpace(right.ID)
+		}
+		if left.CreatedAt.IsZero() {
+			return false
+		}
+		if right.CreatedAt.IsZero() {
+			return true
+		}
+		return left.CreatedAt.Before(right.CreatedAt)
+	})
+	return matches[0], nil
 }
 
 func hasAssessmentEntryRelation(

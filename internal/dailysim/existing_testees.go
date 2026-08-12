@@ -22,6 +22,16 @@ func loadDailySimulationExistingTesteesByIndex(
 	if err != nil {
 		return nil, err
 	}
+	for idx, item := range items {
+		if !isDailySimulationExistingTesteeCandidate(item, cfg, runDate) || dailySimulationExistingTesteeSignature(item) != "" {
+			continue
+		}
+		detail, detailErr := deps.APIClient.GetTesteeByID(ctx, item.ID)
+		if detailErr != nil {
+			return nil, fmt.Errorf("get daily simulation testee %s detail: %w", item.ID, detailErr)
+		}
+		items[idx] = detail
+	}
 	return matchDailySimulationExistingTesteesByIndex(cfg, runDate, count, items), nil
 }
 

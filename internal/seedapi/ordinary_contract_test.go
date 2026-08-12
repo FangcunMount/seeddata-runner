@@ -29,6 +29,8 @@ func TestOrdinaryDailyAPIPathsRemainStable(t *testing.T) {
 
 	_, err := client.CreateCollectionTestee(ctx, CollectionCreateTesteeRequest{})
 	check(err)
+	_, err = client.ListCollectionTestees(ctx, 0, 100)
+	check(err)
 	_, err = client.ListTesteesByOrgCreatedOnDate(ctx, 7, time.Date(2026, 8, 2, 12, 0, 0, 0, time.Local), 1, 100)
 	check(err)
 	_, err = client.CreateClinicianAssessmentEntry(ctx, "clinician-1", CreateAssessmentEntryRequest{})
@@ -48,6 +50,7 @@ func TestOrdinaryDailyAPIPathsRemainStable(t *testing.T) {
 
 	want := []string{
 		"POST /api/v1/testees",
+		"GET /api/v1/testees?offset=0&limit=100",
 		"GET /api/v1/testees?org_id=7&page=1&page_size=100&created_start_date=2026-08-02&created_end_date=2026-08-02",
 		"POST /api/v1/clinicians/clinician-1/assessment-entries",
 		"GET /api/v1/public/assessment-entries/entry-token",

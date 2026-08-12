@@ -430,6 +430,45 @@ func TestDailySimulationSubmissionIdentityPreservesPrimaryLedgerCompatibility(t 
 	}
 }
 
+func TestFindDailySimulationLegacyAnswerSheetRequiresCurrentTesteeOwnership(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/answersheets":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"total":2,"items":[` +
+				`{"id":"sheet-other","questionnaire_code":"Q","filler_id":"7001"},` +
+				`{"id":"sheet-current","questionnaire_code":"Q","filler_id":"7001"}` +
+				`]}}`))
+		case r.URL.Path == "/api/v1/answersheets/sheet-other/assessment-readiness":
+			if got := r.URL.Query().Get("testee_id"); got != "42" {
+				t.Fatalf("testee_id=%q, want 42", got)
+			}
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"code":403,"message":"answer sheet does not belong to testee"}`))
+		case r.URL.Path == "/api/v1/answersheets/sheet-current/assessment-readiness":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"status":"pending","answersheet_id":"sheet-current"}}`))
+		default:
+			t.Fatalf("unexpected request %s", r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	legacy, err := findDailySimulationLegacyAnswerSheet(
+		context.Background(),
+		NewAPIClient(server.URL, "admin-token", nil),
+		NewAPIClient(server.URL, "guardian-token", nil),
+		"Q",
+		"7001",
+		42,
+	)
+	if err != nil {
+		t.Fatalf("find legacy answer sheet: %v", err)
+	}
+	if legacy == nil || legacy.ID != "sheet-current" {
+		t.Fatalf("legacy answer sheet=%+v, want sheet-current", legacy)
+	}
+}
+
 func newDailySubmissionTestState(t *testing.T, serverURL string, requiresAssessment bool, index int) (*dailySimulationJourneyState, *toolanswersheet.SubmissionLedger) {
 	t.Helper()
 	ledger, err := toolanswersheet.NewSubmissionLedger(filepath.Join(t.TempDir(), "daily-submissions.json"), "daily")

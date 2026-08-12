@@ -609,7 +609,13 @@ type ApiserverTesteeListResponse struct {
 // TesteeResponse 受试者响应（collection-server）
 type TesteeResponse struct {
 	ID               string    `json:"id"`
+	OrgID            string    `json:"org_id,omitempty"`
 	Name             string    `json:"name"`
+	Gender           int32     `json:"gender,omitempty"`
+	Birthday         string    `json:"birthday,omitempty"`
+	Tags             []string  `json:"tags,omitempty"`
+	Source           string    `json:"source,omitempty"`
+	IsKeyFocus       bool      `json:"is_key_focus,omitempty"`
 	IAMUserID        string    `json:"iam_user_id,omitempty"`
 	IAMProfileID     string    `json:"iam_profile_id,omitempty"`
 	IAMProfileLinkID string    `json:"iam_profile_link_id,omitempty"`
@@ -619,13 +625,19 @@ type TesteeResponse struct {
 
 func (r *TesteeResponse) UnmarshalJSON(data []byte) error {
 	type alias struct {
-		ID               string `json:"id"`
-		Name             string `json:"name"`
-		IAMUserID        string `json:"iam_user_id,omitempty"`
-		IAMProfileID     string `json:"iam_profile_id,omitempty"`
-		IAMProfileLinkID string `json:"iam_profile_link_id,omitempty"`
-		CreatedAt        string `json:"created_at,omitempty"`
-		UpdatedAt        string `json:"updated_at,omitempty"`
+		ID               string   `json:"id"`
+		OrgID            string   `json:"org_id,omitempty"`
+		Name             string   `json:"name"`
+		Gender           int32    `json:"gender,omitempty"`
+		Birthday         *string  `json:"birthday,omitempty"`
+		Tags             []string `json:"tags,omitempty"`
+		Source           string   `json:"source,omitempty"`
+		IsKeyFocus       bool     `json:"is_key_focus,omitempty"`
+		IAMUserID        string   `json:"iam_user_id,omitempty"`
+		IAMProfileID     string   `json:"iam_profile_id,omitempty"`
+		IAMProfileLinkID string   `json:"iam_profile_link_id,omitempty"`
+		CreatedAt        string   `json:"created_at,omitempty"`
+		UpdatedAt        string   `json:"updated_at,omitempty"`
 	}
 
 	var raw alias
@@ -650,13 +662,27 @@ func (r *TesteeResponse) UnmarshalJSON(data []byte) error {
 	}
 
 	r.ID = raw.ID
+	r.OrgID = strings.TrimSpace(raw.OrgID)
 	r.Name = raw.Name
+	r.Gender = raw.Gender
+	r.Birthday = ""
+	if raw.Birthday != nil {
+		r.Birthday = strings.TrimSpace(*raw.Birthday)
+	}
+	r.Tags = append([]string(nil), raw.Tags...)
+	r.Source = strings.TrimSpace(raw.Source)
+	r.IsKeyFocus = raw.IsKeyFocus
 	r.IAMUserID = strings.TrimSpace(raw.IAMUserID)
 	r.IAMProfileID = strings.TrimSpace(raw.IAMProfileID)
 	r.IAMProfileLinkID = strings.TrimSpace(raw.IAMProfileLinkID)
 	r.CreatedAt = createdAt
 	r.UpdatedAt = updatedAt
 	return nil
+}
+
+type CollectionTesteeListResponse struct {
+	Items []*TesteeResponse `json:"items"`
+	Total int64             `json:"total"`
 }
 
 // ClinicianResponse 临床医师响应（apiserver）。

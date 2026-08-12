@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/FangcunMount/component-base/pkg/log"
 )
 
 func TestAPIClientNeverSendsRetiredHeaders(t *testing.T) {
@@ -110,6 +112,25 @@ func TestCollectionTesteeResponseCarriesProfileLinkIdentity(t *testing.T) {
 	}
 	if result.ID != "10" || result.IAMProfileID != "20" || result.IAMProfileLinkID != "30" {
 		t.Fatalf("unexpected collection testee identity: %+v", result)
+	}
+}
+
+func TestCreateCollectionTesteeDoesNotRetryNonIdempotentPost(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"code":503,"message":"unavailable"}`))
+	}))
+	defer server.Close()
+
+	client := NewAPIClient(server.URL, "guardian-token", log.New(log.NewOptions()))
+	_, err := client.CreateCollectionTestee(context.Background(), CollectionCreateTesteeRequest{Name: "child", Gender: 1})
+	if err == nil {
+		t.Fatal("expected create testee error")
+	}
+	if calls != 1 {
+		t.Fatalf("create testee calls=%d, want 1", calls)
 	}
 }
 

@@ -69,21 +69,22 @@ func runDailySimulationRunWithOptions(
 		return err
 	}
 
-	existingTesteesByIndex := options.ExistingTesteesByIndex
-	if existingTesteesByIndex == nil {
-		existingTesteesByIndex, err = loadDailySimulationExistingTesteesByIndex(ctx, deps, cfg, runDate, count)
-		if err != nil {
-			return err
-		}
-	}
 	jobIndexes := append([]int(nil), options.JobIndexes...)
-	reuseOnly := options.ExistingTesteesByIndex != nil && len(jobIndexes) > 0
 	if len(jobIndexes) == 0 {
 		jobIndexes = make([]int, 0, count)
 		for idx := 0; idx < count; idx++ {
 			jobIndexes = append(jobIndexes, idx)
 		}
 	}
+	existingTesteesByIndex := options.ExistingTesteesByIndex
+	if existingTesteesByIndex == nil {
+		// Normal runs resolve an existing testee through the authenticated
+		// guardian immediately before create. The org-wide preload is reserved
+		// for after-hours reuse-only catchup, where it determines which indexes
+		// are allowed to run without creating new testees.
+		existingTesteesByIndex = map[int]*ApiserverTesteeResponse{}
+	}
+	reuseOnly := options.ExistingTesteesByIndex != nil && len(jobIndexes) > 0
 	jobCount := len(jobIndexes)
 	if jobCount == 0 {
 		return fmt.Errorf("%s resolved zero job indexes", progressLabel)

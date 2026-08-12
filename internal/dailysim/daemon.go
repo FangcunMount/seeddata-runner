@@ -134,7 +134,16 @@ func seedDailySimulationDaemon(ctx context.Context, deps *dependencies) error {
 			"remaining_daily_quota", decision.RemainingQuota,
 		)
 
-		if err := runDailySimulationRun(ctx, deps, cfg, decision.RunDate, count, "daily_simulation_daemon"); err != nil {
+		jobIndexes := resolveDailySimulationJobIndexes(state, decision.RunDate, count)
+		if err := runDailySimulationRunWithOptions(
+			ctx,
+			deps,
+			cfg,
+			decision.RunDate,
+			count,
+			"daily_simulation_daemon",
+			dailySimulationRunOptions{JobIndexes: jobIndexes},
+		); err != nil {
 			deps.Logger.Warnw("Daily simulation daemon run failed",
 				"run_date", decision.RunDate.Format("2006-01-02"),
 				"count", count,
@@ -152,6 +161,22 @@ func seedDailySimulationDaemon(ctx context.Context, deps *dependencies) error {
 			return err
 		}
 	}
+}
+
+func resolveDailySimulationJobIndexes(state *dailySimulationDaemonState, runDate time.Time, count int) []int {
+	if count <= 0 {
+		return nil
+	}
+	start := 0
+	dayKey := runDate.In(time.Local).Format("2006-01-02")
+	if state != nil && state.DailyUserCountDate == dayKey && state.DailyUserCount > 0 {
+		start = state.DailyUserCount
+	}
+	indexes := make([]int, 0, count)
+	for idx := start; idx < start+count; idx++ {
+		indexes = append(indexes, idx)
+	}
+	return indexes
 }
 
 func maybeHandleDailySimulationAfterHoursCatchup(

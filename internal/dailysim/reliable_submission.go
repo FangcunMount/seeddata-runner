@@ -48,8 +48,10 @@ func submitDailySimulationAnswerSheet(ctx context.Context, state *dailySimulatio
 		legacy, findErr := findDailySimulationLegacyAnswerSheet(
 			ctx,
 			state.deps.APIClient,
+			state.collectionClient,
 			req.QuestionnaireCode,
 			state.guardianUserID,
+			req.TesteeID,
 		)
 		if findErr != nil {
 			return findErr
@@ -241,7 +243,9 @@ func dailySimulationSubmissionOriginRef(state *dailySimulationJourneyState, task
 func findDailySimulationLegacyAnswerSheet(
 	ctx context.Context,
 	adminClient *APIClient,
+	collectionClient *APIClient,
 	questionnaireCode, guardianUserID string,
+	testeeID uint64,
 ) (*AdminAnswerSheetListItem, error) {
 	userID := parseID(guardianUserID)
 	if userID == 0 {
@@ -251,8 +255,25 @@ func findDailySimulationLegacyAnswerSheet(
 	if err != nil {
 		return nil, fmt.Errorf("list legacy admin answersheets for questionnaire %s filler %s: %w", questionnaireCode, guardianUserID, err)
 	}
+	if testeeID == 0 {
+		return nil, fmt.Errorf("invalid testee id 0")
+	}
+	if collectionClient == nil {
+		return nil, fmt.Errorf("guardian collection client is nil")
+	}
+	if len(resp.Items) == 0 {
+		return nil, nil
+	}
 	for _, item := range resp.Items {
-		if strings.TrimSpace(item.ID) != "" {
+		answerSheetID := strings.TrimSpace(item.ID)
+		if answerSheetID == "" {
+			continue
+		}
+		owned, verifyErr := collectionClient.VerifyCollectionAnswerSheetOwnership(ctx, answerSheetID, testeeID)
+		if verifyErr != nil {
+			return nil, fmt.Errorf("verify legacy answersheet %s ownership for testee %d: %w", answerSheetID, testeeID, verifyErr)
+		}
+		if owned {
 			cloned := item
 			return &cloned, nil
 		}
