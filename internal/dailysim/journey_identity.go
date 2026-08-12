@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
-	identityv2 "github.com/FangcunMount/iam/v2/api/grpc/iam/identity/v2"
-	sdk "github.com/FangcunMount/iam/v2/pkg/sdk"
-	sdkerrors "github.com/FangcunMount/iam/v2/pkg/sdk/errors"
+	identityv2 "github.com/FangcunMount/iam/v3/api/grpc/iam/identity/v2"
+	sdk "github.com/FangcunMount/iam/v3/pkg/sdk"
+	sdkerrors "github.com/FangcunMount/iam/v3/pkg/sdk/errors"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 )
 
