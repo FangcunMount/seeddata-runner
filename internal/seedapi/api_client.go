@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
-	authsignup "github.com/FangcunMount/iam/v2/pkg/sdk/auth/signup"
+	authsignup "github.com/FangcunMount/iam/v3/pkg/sdk/auth/signup"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 )
 

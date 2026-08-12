@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	sdk "github.com/FangcunMount/iam/v2/pkg/sdk"
-	"github.com/FangcunMount/iam/v2/pkg/sdk/identity"
+	sdk "github.com/FangcunMount/iam/v3/pkg/sdk"
+	"github.com/FangcunMount/iam/v3/pkg/sdk/identity"
 	toolchain "github.com/FangcunMount/seeddata-runner/internal/chain"
 	"github.com/FangcunMount/seeddata-runner/internal/seediauth"
 )

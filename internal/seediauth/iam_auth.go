@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
-	"github.com/FangcunMount/iam/v2/pkg/sdk/auth/loginv2"
+	"github.com/FangcunMount/iam/v3/pkg/sdk/auth/loginv2"
 )
 
 const defaultIAMLoginPath = "/api/v2/authn/login"

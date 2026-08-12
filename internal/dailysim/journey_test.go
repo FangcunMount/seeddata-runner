@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
-	sdkerrors "github.com/FangcunMount/iam/v2/pkg/sdk/errors"
+	sdkerrors "github.com/FangcunMount/iam/v3/pkg/sdk/errors"
 	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 )
 
