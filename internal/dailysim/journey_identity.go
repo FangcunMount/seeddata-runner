@@ -76,7 +76,7 @@ func ensureDailySimulationGuardianAccount(
 		return "", "", false, err
 	}
 	if strings.TrimSpace(userID) == "" {
-		return "", "", false, fmt.Errorf("daily_simulation guardian provisioning requires iam.mockConsumer.enabled=true with IAM v2; IAM AuthN gRPC no longer exposes password account onboarding")
+		return "", "", false, fmt.Errorf("daily_simulation guardian provisioning requires iam.mockConsumer.enabled=true with IAM v3; IAM AuthN gRPC no longer exposes password account onboarding")
 	}
 
 	loginURL, err := resolveDailySimulationIAMLoginURL(deps.Config.IAM)
@@ -90,7 +90,7 @@ func ensureDailySimulationGuardianAccount(
 		return userID, token, false, nil
 	}
 
-	return "", "", false, fmt.Errorf("login existing guardian %s: %w; IAM v2 password onboarding is only available through iam.mockConsumer REST ensure", profile.GuardianEmail, err)
+	return "", "", false, fmt.Errorf("login existing guardian %s: %w; IAM v3 password onboarding is only available through iam.mockConsumer REST ensure", profile.GuardianEmail, err)
 }
 
 func ensureDailySimulationGuardianMockConsumer(
@@ -131,8 +131,7 @@ func ensureDailySimulationGuardianMockConsumer(
 		return "", "", false, err
 	}
 	// IAM mock-consumer onboarding creates a username identity in the default
-	// realm. Password login must therefore omit tenant_id; IAM will default the
-	// principal tenant before issuing the token.
+	// realm. Password login uses IAM's default username namespace.
 	deviceID := fmt.Sprintf("%s-%s-%03d", dailySimulationDeviceIDPrefix, profile.RunDate.Format("20060102"), profile.Index+1)
 
 	token, err := tryDailySimulationGuardianLoginWithRetry(ctx, loginURL, deviceID, profile.GuardianEmail, profile.GuardianPhone, password, deps.Logger)

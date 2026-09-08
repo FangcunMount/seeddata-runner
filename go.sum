@@ -1,7 +1,7 @@
 github.com/FangcunMount/component-base v0.6.1 h1:LRuZ7f4Ft2ElShEmDQDYlK6n94b/O5+z3IuTJRceJG0=
 github.com/FangcunMount/component-base v0.6.1/go.mod h1:YDJbNH8P+pNBE8MWgQCI1DptDXD2gCzBhHdd9kgSVFk=
-github.com/FangcunMount/iam/v5 v5.0.0 h1:hyzqJTLIy/pezsi5/ziM5LOXB6GvPZWTpt5hwAoQ/Pg=
-github.com/FangcunMount/iam/v5 v5.0.0/go.mod h1:fE5htGDjL8tiOB5c7YYDe88xiC/+buB0Olbnjg59tzQ=
+github.com/FangcunMount/iam/v5 v5.0.0 h1:QepuDZTabhVBC2pL6zdgFhgAptNGJ0mRJ/Ld/J1GX7w=
+github.com/FangcunMount/iam/v5 v5.0.0/go.mod h1:pExB3fi3/bm3tiKJWis1oP/jIGSmXhy7Wcv7MAc8zeo=
 github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 h1:DklsrG3dyBCFEj5IhUbnKptjxatkF07cF2ak3yi77so=
 github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2/go.mod h1:WaHUgvxTVq04UNunO+XhnAqY/wQc+bxr74GqbsZ/Jqw=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=

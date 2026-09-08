@@ -189,7 +189,7 @@ compose_seeddata() {
 candidate_runtime_preflight() {
   local image="$1" probe_url
   validate_runtime_files
-  probe_url="${SEEDDATA_IAM_PREFLIGHT_URL:-https://iam.fangcunmount.cn/api/v2/internal/authn/mock-consumers/ensure}"
+  probe_url="${SEEDDATA_IAM_PREFLIGHT_URL:-https://iam.fangcunmount.cn/api/v3/internal/authn/mock-consumers/ensure}"
 
   docker run --rm --platform linux/arm64 \
     "${TAILSCALE_HOST_ARGS[@]}" \

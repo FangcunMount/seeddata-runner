@@ -496,7 +496,7 @@ func resolveDailySimulationIAMBaseURL(cfg IAMConfig) (string, error) {
 func resolveDailySimulationIAMMockConsumerEndpointPath(cfg IAMConfig) string {
 	path := strings.TrimSpace(cfg.MockConsumer.EndpointPath)
 	if path == "" {
-		return "/api/v2/internal/authn/mock-consumers/ensure"
+		return "/api/v3/internal/authn/mock-consumers/ensure"
 	}
 	if strings.HasPrefix(path, "/") {
 		return path

@@ -16,12 +16,11 @@ iam:
   loginUrl: "https://iam.fangcunmount.cn/api/v3/authn/login"
   username: ""
   password: ""
-  tenantId: "1"
   mockConsumer:
     enabled: true
     # 只允许通过 IAM_MOCK_CONSUMER_SHARED_SECRET 或部署密钥注入。
     sharedSecret: ""
-    endpointPath: "/api/v2/internal/authn/mock-consumers/ensure"
+    endpointPath: "/api/v3/internal/authn/mock-consumers/ensure"
     # 保护 IAM 网关：mock C 端建号/登录默认串行执行，必要时可按机器能力调大。
     maxConcurrent: 1
   grpc:
