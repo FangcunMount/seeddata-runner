@@ -59,11 +59,11 @@ type APIConfig struct {
 
 // IAMConfig IAM 登录配置
 type IAMConfig struct {
-	BaseURL      string                `yaml:"baseUrl"`
-	LoginURL     string                `yaml:"loginUrl"`
-	Username     string                `yaml:"username"`
-	Password     string                `yaml:"password"`
-	TenantID     string                `yaml:"tenantId"`
+	BaseURL  string `yaml:"baseUrl"`
+	LoginURL string `yaml:"loginUrl"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+
 	GRPC         IAMGRPCConfig         `yaml:"grpc"`
 	MockConsumer IAMMockConsumerConfig `yaml:"mockConsumer"`
 }
@@ -291,7 +291,6 @@ func (cfg *IAMConfig) Normalize() {
 	cfg.LoginURL = strings.TrimSpace(cfg.LoginURL)
 	cfg.Username = strings.TrimSpace(cfg.Username)
 	cfg.Password = strings.TrimSpace(cfg.Password)
-	cfg.TenantID = strings.TrimSpace(cfg.TenantID)
 	cfg.GRPC.Address = strings.TrimSpace(cfg.GRPC.Address)
 	cfg.GRPC.Timeout = strings.TrimSpace(cfg.GRPC.Timeout)
 	cfg.GRPC.TLS.CAFile = strings.TrimSpace(cfg.GRPC.TLS.CAFile)

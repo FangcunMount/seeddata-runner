@@ -5,13 +5,12 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math/rand"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	sdk "github.com/FangcunMount/iam/v3/pkg/sdk"
-	"github.com/FangcunMount/iam/v3/pkg/sdk/identity"
+	sdk "github.com/FangcunMount/iam/v5/pkg/sdk"
+	"github.com/FangcunMount/iam/v5/pkg/sdk/identity"
 	toolchain "github.com/FangcunMount/seeddata-runner/internal/chain"
 	"github.com/FangcunMount/seeddata-runner/internal/seediauth"
 )
@@ -507,16 +506,6 @@ func resolveDailySimulationIAMMockConsumerEndpointPath(cfg IAMConfig) string {
 
 func dailySimulationUsesIAMMockConsumer(cfg IAMConfig) bool {
 	return cfg.MockConsumer.Enabled
-}
-
-func resolveDailySimulationTenantID(cfg IAMConfig, orgID int64) string {
-	if strings.TrimSpace(cfg.TenantID) != "" {
-		return strings.TrimSpace(cfg.TenantID)
-	}
-	if orgID > 0 {
-		return strconv.FormatInt(orgID, 10)
-	}
-	return ""
 }
 
 func normalizeDailySimulationWorkers(value, count int) int {

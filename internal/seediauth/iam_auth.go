@@ -12,17 +12,16 @@ import (
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
-	"github.com/FangcunMount/iam/v3/pkg/sdk/auth/loginv2"
+	"github.com/FangcunMount/iam/v5/pkg/sdk/auth/loginv3"
 )
 
-const defaultIAMLoginPath = "/api/v2/authn/login"
+const defaultIAMLoginPath = "/api/v3/authn/login"
 
 type Config struct {
 	BaseURL  string
 	LoginURL string
 	Username string
 	Password string
-	TenantID string
 }
 
 func FetchTokenFromIAM(ctx context.Context, cfg Config, logger log.Logger) (string, error) {
@@ -30,7 +29,7 @@ func FetchTokenFromIAM(ctx context.Context, cfg Config, logger log.Logger) (stri
 	if err != nil {
 		return "", err
 	}
-	return FetchTokenFromIAMWithPassword(ctx, loginURL, cfg.Username, cfg.Password, cfg.TenantID, "seeddata", logger)
+	return FetchTokenFromIAMWithPassword(ctx, loginURL, cfg.Username, cfg.Password, "seeddata", logger)
 }
 
 func ResolveLoginURL(cfg Config) (string, error) {
@@ -53,7 +52,7 @@ func ResolveLoginURL(cfg Config) (string, error) {
 
 func FetchTokenFromIAMWithPassword(
 	ctx context.Context,
-	loginURL, username, password, tenantID, deviceID string,
+	loginURL, username, password, deviceID string,
 	logger log.Logger,
 ) (string, error) {
 	if strings.TrimSpace(loginURL) == "" {
@@ -66,21 +65,11 @@ func FetchTokenFromIAMWithPassword(
 		deviceID = "seeddata"
 	}
 
-	var parsedTenantID uint64
-	if rawTenantID := strings.TrimSpace(tenantID); rawTenantID != "" {
-		parsed, err := strconv.ParseUint(rawTenantID, 10, 64)
-		if err != nil {
-			return "", fmt.Errorf("parse iam tenant_id %q: %w", rawTenantID, err)
-		}
-		parsedTenantID = parsed
-	}
-
-	loginReq := loginv2.LoginRequest{
-		AuthMethod: loginv2.AuthMethodPassword,
-		MethodPayload: loginv2.PasswordPayload{
+	loginReq := loginv3.LoginRequest{
+		AuthMethod: loginv3.AuthMethodPassword,
+		MethodPayload: loginv3.PasswordPayload{
 			Username: username,
 			Password: password,
-			TenantID: parsedTenantID,
 		},
 		DeviceID: deviceID,
 	}
@@ -92,7 +81,7 @@ func FetchTokenFromIAMWithPassword(
 	if err != nil {
 		return "", err
 	}
-	client, err := loginv2.NewClient(baseURL, loginv2.WithHTTPClient(&http.Client{Timeout: 15 * time.Second}))
+	client, err := loginv3.NewClient(baseURL, loginv3.WithHTTPClient(&http.Client{Timeout: 15 * time.Second}))
 	if err != nil {
 		return "", fmt.Errorf("create iam login client: %w", err)
 	}
@@ -112,7 +101,6 @@ func FetchTokenFromIAMWithPassword(
 		"subject", identity.Subject,
 		"user_id", identity.UserID,
 		"account_id", identity.AccountID,
-		"tenant_id", identity.TenantID,
 		"issuer", identity.Issuer,
 		"audience", identity.Audience,
 		"expires_at", identity.ExpiresAt,
@@ -153,7 +141,7 @@ func appendIAMLoginPath(path string) string {
 		return defaultIAMLoginPath
 	case strings.HasSuffix(path, defaultIAMLoginPath):
 		return path
-	case strings.HasSuffix(path, "/api/v2"):
+	case strings.HasSuffix(path, "/api/v3"):
 		return path + "/authn/login"
 	default:
 		return path + defaultIAMLoginPath
@@ -164,7 +152,7 @@ type seedTokenIdentity struct {
 	Subject   string
 	UserID    string
 	AccountID string
-	TenantID  string
+
 	Issuer    string
 	Audience  []string
 	ExpiresAt time.Time
@@ -191,7 +179,7 @@ func parseSeedTokenIdentity(token string) seedTokenIdentity {
 		Subject:   readStringField(claims, "sub"),
 		UserID:    readStringField(claims, "user_id"),
 		AccountID: readStringField(claims, "account_id"),
-		TenantID:  readStringField(claims, "tenant_id"),
+
 		Issuer:    readStringField(claims, "iss"),
 		Audience:  readStringSliceField(claims, "aud"),
 		ExpiresAt: readUnixTimeField(claims, "exp"),

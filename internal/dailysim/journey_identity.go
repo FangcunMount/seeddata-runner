@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
-	identityv2 "github.com/FangcunMount/iam/v3/api/grpc/iam/identity/v2"
-	sdk "github.com/FangcunMount/iam/v3/pkg/sdk"
-	sdkerrors "github.com/FangcunMount/iam/v3/pkg/sdk/errors"
+	identityv2 "github.com/FangcunMount/iam/v5/api/grpc/iam/identity/v2"
+	sdk "github.com/FangcunMount/iam/v5/pkg/sdk"
+	sdkerrors "github.com/FangcunMount/iam/v5/pkg/sdk/errors"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 )
 
@@ -83,10 +83,9 @@ func ensureDailySimulationGuardianAccount(
 	if err != nil {
 		return "", "", false, err
 	}
-	tenantID := resolveDailySimulationTenantID(deps.Config.IAM, deps.Config.Global.OrgID)
 	deviceID := fmt.Sprintf("%s-%s-%03d", dailySimulationDeviceIDPrefix, profile.RunDate.Format("20060102"), profile.Index+1)
 
-	token, err := tryDailySimulationGuardianLogin(ctx, loginURL, tenantID, deviceID, profile.GuardianEmail, profile.GuardianPhone, password, deps.Logger)
+	token, err := tryDailySimulationGuardianLogin(ctx, loginURL, deviceID, profile.GuardianEmail, profile.GuardianPhone, password, deps.Logger)
 	if err == nil {
 		return userID, token, false, nil
 	}
@@ -134,10 +133,9 @@ func ensureDailySimulationGuardianMockConsumer(
 	// IAM mock-consumer onboarding creates a username identity in the default
 	// realm. Password login must therefore omit tenant_id; IAM will default the
 	// principal tenant before issuing the token.
-	tenantID := ""
 	deviceID := fmt.Sprintf("%s-%s-%03d", dailySimulationDeviceIDPrefix, profile.RunDate.Format("20060102"), profile.Index+1)
 
-	token, err := tryDailySimulationGuardianLoginWithRetry(ctx, loginURL, tenantID, deviceID, profile.GuardianEmail, profile.GuardianPhone, password, deps.Logger)
+	token, err := tryDailySimulationGuardianLoginWithRetry(ctx, loginURL, deviceID, profile.GuardianEmail, profile.GuardianPhone, password, deps.Logger)
 	if err != nil {
 		return "", "", false, fmt.Errorf("login guardian %s after ensuring mock-consumer: %w", profile.GuardianEmail, err)
 	}
@@ -169,7 +167,7 @@ func findDailySimulationIAMUser(
 
 func tryDailySimulationGuardianLogin(
 	ctx context.Context,
-	loginURL, tenantID, deviceID, email, phone, password string,
+	loginURL, deviceID, email, phone, password string,
 	logger log.Logger,
 ) (string, error) {
 	credentials := []string{normalizeEmail(email), normalizePhone(phone)}
@@ -178,7 +176,7 @@ func tryDailySimulationGuardianLogin(
 		if strings.TrimSpace(username) == "" {
 			continue
 		}
-		token, err := fetchTokenFromIAMWithPassword(ctx, loginURL, username, password, tenantID, deviceID, logger)
+		token, err := fetchTokenFromIAMWithPassword(ctx, loginURL, username, password, deviceID, logger)
 		if err == nil && strings.TrimSpace(token) != "" {
 			return token, nil
 		}
@@ -195,14 +193,14 @@ func tryDailySimulationGuardianLogin(
 
 func tryDailySimulationGuardianLoginWithRetry(
 	ctx context.Context,
-	loginURL, tenantID, deviceID, email, phone, password string,
+	loginURL, deviceID, email, phone, password string,
 	logger log.Logger,
 ) (string, error) {
 	const maxAttempts = 2
 
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		token, err := tryDailySimulationGuardianLogin(ctx, loginURL, tenantID, deviceID, email, phone, password, logger)
+		token, err := tryDailySimulationGuardianLogin(ctx, loginURL, deviceID, email, phone, password, logger)
 		if err == nil {
 			return token, nil
 		}

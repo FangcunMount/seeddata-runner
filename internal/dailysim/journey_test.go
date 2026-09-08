@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
-	sdkerrors "github.com/FangcunMount/iam/v3/pkg/sdk/errors"
+	sdkerrors "github.com/FangcunMount/iam/v5/pkg/sdk/errors"
 	"github.com/FangcunMount/seeddata-runner/internal/seedconfig"
 )
 
@@ -375,7 +375,7 @@ func TestEnsureDailySimulationGuardianMockConsumerLoginOmitsTenantID(t *testing.
 					IsNewIdentity:   true,
 				},
 			})
-		case "/api/v2/authn/login":
+		case "/api/v3/authn/login":
 			if err := json.NewDecoder(r.Body).Decode(&capturedLogin); err != nil {
 				t.Fatalf("decode login request: %v", err)
 			}
@@ -405,8 +405,8 @@ func TestEnsureDailySimulationGuardianMockConsumerLoginOmitsTenantID(t *testing.
 			Global: seedconfig.GlobalConfig{OrgID: 1},
 			IAM: seedconfig.IAMConfig{
 				BaseURL:  server.URL,
-				LoginURL: server.URL + "/api/v2/authn/login",
-				TenantID: "1",
+				LoginURL: server.URL + "/api/v3/authn/login",
+
 				MockConsumer: seedconfig.IAMMockConsumerConfig{
 					Enabled:      true,
 					SharedSecret: "secret",
@@ -453,7 +453,7 @@ func TestDailySimulationGuardianStagePropagatesMockConsumerError(t *testing.T) {
 				Global: seedconfig.GlobalConfig{OrgID: 1},
 				IAM: seedconfig.IAMConfig{
 					BaseURL:  server.URL,
-					LoginURL: server.URL + "/api/v2/authn/login",
+					LoginURL: server.URL + "/api/v3/authn/login",
 					MockConsumer: seedconfig.IAMMockConsumerConfig{
 						Enabled:      true,
 						SharedSecret: "wrong-secret",

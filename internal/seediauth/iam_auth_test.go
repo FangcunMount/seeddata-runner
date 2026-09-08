@@ -11,14 +11,14 @@ import (
 	"github.com/FangcunMount/component-base/pkg/log"
 )
 
-func TestFetchTokenFromIAMWithPasswordSendsV2PasswordPayload(t *testing.T) {
+func TestFetchTokenFromIAMWithPasswordSendsV3PasswordPayload(t *testing.T) {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("unexpected method: %s", r.Method)
 		}
-		if r.URL.Path != "/api/v2/authn/login" {
+		if r.URL.Path != "/api/v3/authn/login" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if got := r.Header.Get("Accept"); got != "application/json" {
@@ -43,11 +43,8 @@ func TestFetchTokenFromIAMWithPasswordSendsV2PasswordPayload(t *testing.T) {
 		if got := methodPayload["username"]; got != "seed-admin" {
 			t.Fatalf("unexpected username: %#v", got)
 		}
-		if _, ok := methodPayload["tenant_id"].(float64); !ok {
-			t.Fatalf("expected tenant_id to marshal as number, got %#v", methodPayload["tenant_id"])
-		}
-		if got := methodPayload["tenant_id"].(float64); got != 1 {
-			t.Fatalf("expected tenant_id=1, got %v", got)
+		if _, ok := methodPayload["tenant_id"]; ok {
+			t.Fatal("retired field must not be sent")
 		}
 
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -59,7 +56,7 @@ func TestFetchTokenFromIAMWithPasswordSendsV2PasswordPayload(t *testing.T) {
 	}))
 	defer server.Close()
 
-	token, err := FetchTokenFromIAMWithPassword(context.Background(), server.URL+"/api/v2/authn/login", "seed-admin", "secret", "1", "seeddata", log.New(log.NewOptions()))
+	token, err := FetchTokenFromIAMWithPassword(context.Background(), server.URL+"/api/v3/authn/login", "seed-admin", "secret", "seeddata", log.New(log.NewOptions()))
 	if err != nil {
 		t.Fatalf("FetchTokenFromIAMWithPassword returned error: %v", err)
 	}
@@ -73,13 +70,13 @@ func TestResolveLoginURLDefaultsToAPIV2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveLoginURL returned error: %v", err)
 	}
-	if got != "https://iam.example.com/api/v2/authn/login" {
+	if got != "https://iam.example.com/api/v3/authn/login" {
 		t.Fatalf("unexpected login url: %s", got)
 	}
 }
 
 func TestLoginClientBaseURLAcceptsResolvedLoginEndpoint(t *testing.T) {
-	got, err := loginClientBaseURL("https://iam.example.com/proxy/api/v2/authn/login")
+	got, err := loginClientBaseURL("https://iam.example.com/proxy/api/v3/authn/login")
 	if err != nil {
 		t.Fatalf("loginClientBaseURL returned error: %v", err)
 	}

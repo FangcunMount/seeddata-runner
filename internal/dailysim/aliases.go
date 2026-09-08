@@ -71,10 +71,10 @@ func RunDaemon(ctx context.Context, deps *Dependencies) error {
 
 func fetchTokenFromIAMWithPassword(
 	ctx context.Context,
-	loginURL, username, password, tenantID, deviceID string,
+	loginURL, username, password, deviceID string,
 	logger log.Logger,
 ) (string, error) {
-	return seediauth.FetchTokenFromIAMWithPassword(ctx, loginURL, username, password, tenantID, deviceID, logger)
+	return seediauth.FetchTokenFromIAMWithPassword(ctx, loginURL, username, password, deviceID, logger)
 }
 
 func parseID(raw string) uint64 {

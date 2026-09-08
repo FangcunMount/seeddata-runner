@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/FangcunMount/component-base/pkg/log"
-	authsignup "github.com/FangcunMount/iam/v3/pkg/sdk/auth/signup"
+	authsignup "github.com/FangcunMount/iam/v5/pkg/sdk/auth/signup"
 	"github.com/FangcunMount/seeddata-runner/internal/scheduler"
 )
 
@@ -334,7 +334,7 @@ type TokenIdentity struct {
 	Subject   string
 	UserID    string
 	AccountID string
-	TenantID  string
+
 	ExpiresAt time.Time
 }
 
@@ -359,7 +359,7 @@ func parseSeedTokenIdentity(token string) TokenIdentity {
 		Subject:   readStringField(claims, "sub"),
 		UserID:    readStringField(claims, "user_id"),
 		AccountID: readStringField(claims, "account_id"),
-		TenantID:  readStringField(claims, "tenant_id"),
+
 		ExpiresAt: readUnixTimeField(claims, "exp"),
 	}
 }

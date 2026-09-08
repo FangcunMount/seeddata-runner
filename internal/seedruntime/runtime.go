@@ -131,7 +131,6 @@ func resolveAPIToken(ctx context.Context, cfg *seedconfig.Config, logger log.Log
 		LoginURL: cfg.IAM.LoginURL,
 		Username: cfg.IAM.Username,
 		Password: cfg.IAM.Password,
-		TenantID: cfg.IAM.TenantID,
 	}, logger)
 	if err != nil {
 		return "", fmt.Errorf("fetch token from iam: %w", err)
@@ -156,7 +155,6 @@ func configureIAMTokenRefresh(cfg *seedconfig.Config, logger log.Logger, token s
 			LoginURL: cfg.IAM.LoginURL,
 			Username: cfg.IAM.Username,
 			Password: cfg.IAM.Password,
-			TenantID: cfg.IAM.TenantID,
 		}, logger)
 	}
 

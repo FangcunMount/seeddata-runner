@@ -13,7 +13,7 @@ api:
 
 iam:
   baseUrl: "https://iam.fangcunmount.cn"
-  loginUrl: "https://iam.fangcunmount.cn/api/v2/authn/login"
+  loginUrl: "https://iam.fangcunmount.cn/api/v3/authn/login"
   username: ""
   password: ""
   tenantId: "1"

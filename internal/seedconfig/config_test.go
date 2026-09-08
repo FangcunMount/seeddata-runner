@@ -227,7 +227,7 @@ api:
   collectionBaseUrl: "https://collect.example.com"
 iam:
   baseUrl: "https://iam.example.com"
-  loginUrl: "https://iam.example.com/api/v2/authn/login"
+  loginUrl: "https://iam.example.com/api/v3/authn/login"
 dailySimulation:
   clinicianIds: ["1001"]
   targetType: "scale"
@@ -242,7 +242,7 @@ planSubmit:
 	t.Setenv("SEEDDATA_API_BASE_URL", "http://qs-apiserver:8080")
 	t.Setenv("SEEDDATA_COLLECTION_BASE_URL", "http://qs-collection-server:8080")
 	t.Setenv("SEEDDATA_IAM_BASE_URL", "http://iam-apiserver:9080")
-	t.Setenv("SEEDDATA_IAM_LOGIN_URL", "http://iam-apiserver:9080/api/v2/authn/login")
+	t.Setenv("SEEDDATA_IAM_LOGIN_URL", "http://iam-apiserver:9080/api/v3/authn/login")
 	t.Setenv("SEEDDATA_DAILY_SUBMISSION_STATE_FILE", "/state/legacy-submissions.json")
 
 	cfg, err := Load(configPath)
@@ -250,7 +250,7 @@ planSubmit:
 		t.Fatal(err)
 	}
 	if cfg.API.BaseURL != "http://qs-apiserver:8080" || cfg.API.CollectionBaseURL != "http://qs-collection-server:8080" ||
-		cfg.IAM.BaseURL != "http://iam-apiserver:9080" || cfg.IAM.LoginURL != "http://iam-apiserver:9080/api/v2/authn/login" {
+		cfg.IAM.BaseURL != "http://iam-apiserver:9080" || cfg.IAM.LoginURL != "http://iam-apiserver:9080/api/v3/authn/login" {
 		t.Fatalf("unexpected internal urls: api=%q collection=%q iam=%q login=%q", cfg.API.BaseURL, cfg.API.CollectionBaseURL, cfg.IAM.BaseURL, cfg.IAM.LoginURL)
 	}
 	if cfg.DailySimulation.SubmissionStateFile != "/state/legacy-submissions.json" {
