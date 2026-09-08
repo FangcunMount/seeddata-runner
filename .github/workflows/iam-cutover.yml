@@ -7,7 +7,7 @@ on:
         description: 'IAM 一次切换期间暂停或恢复模拟数据写入'
         required: true
         type: choice
-        options: [status, stop, start]
+        options: [status, stop, start, preview-config, prepare-config]
 
 permissions:
   contents: read
@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 3
     environment: production
     steps:
+      - uses: actions/checkout@v6
       - name: Control seeddata writer
         env:
           OPERATION: ${{ inputs.operation }}
@@ -34,6 +35,13 @@ jobs:
           docker inspect seeddata-runner --format 'image={{.Config.Image}} running={{.State.Running}}'
           case "$OPERATION" in
             status) ;;
+            preview-config)
+              python3 scripts/cd/migrate_iam_v5_config.py --root "$HOME/.local/share/seeddata-runner"
+              ;;
+            prepare-config)
+              test "$(docker inspect seeddata-runner --format '{{.State.Running}}')" = false
+              python3 scripts/cd/migrate_iam_v5_config.py --root "$HOME/.local/share/seeddata-runner" --apply
+              ;;
             stop) docker stop --time 30 seeddata-runner ;;
             start) docker start seeddata-runner ;;
             *) exit 1 ;;
