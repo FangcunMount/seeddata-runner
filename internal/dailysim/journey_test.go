@@ -129,7 +129,7 @@ func TestDailySimulationStageEnrollPlanRecordsEnrollmentAndTasks(t *testing.T) {
 
 func TestResolveDailySimulationIAMMockConsumerEndpointPathDefaults(t *testing.T) {
 	got := resolveDailySimulationIAMMockConsumerEndpointPath(IAMConfig{})
-	if got != "/api/v2/internal/authn/mock-consumers/ensure" {
+	if got != "/api/v3/internal/authn/mock-consumers/ensure" {
 		t.Fatalf("unexpected default endpoint path: %q", got)
 	}
 }
@@ -363,7 +363,7 @@ func TestEnsureDailySimulationGuardianMockConsumerLoginOmitsTenantID(t *testing.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/api/v2/internal/authn/mock-consumers/ensure":
+		case "/api/v3/internal/authn/mock-consumers/ensure":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"code":    0,
 				"message": "success",
@@ -410,7 +410,7 @@ func TestEnsureDailySimulationGuardianMockConsumerLoginOmitsTenantID(t *testing.
 				MockConsumer: seedconfig.IAMMockConsumerConfig{
 					Enabled:      true,
 					SharedSecret: "secret",
-					EndpointPath: "/api/v2/internal/authn/mock-consumers/ensure",
+					EndpointPath: "/api/v3/internal/authn/mock-consumers/ensure",
 				},
 			},
 		},
@@ -457,7 +457,7 @@ func TestDailySimulationGuardianStagePropagatesMockConsumerError(t *testing.T) {
 					MockConsumer: seedconfig.IAMMockConsumerConfig{
 						Enabled:      true,
 						SharedSecret: "wrong-secret",
-						EndpointPath: "/api/v2/internal/authn/mock-consumers/ensure",
+						EndpointPath: "/api/v3/internal/authn/mock-consumers/ensure",
 					},
 				},
 			},

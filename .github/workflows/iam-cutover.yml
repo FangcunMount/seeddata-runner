@@ -1,0 +1,41 @@
+name: IAM Coordinated Cutover
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'IAM 一次切换期间暂停或恢复模拟数据写入'
+        required: true
+        type: choice
+        options: [status, stop, start]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seeddata-iam-cutover
+  cancel-in-progress: false
+
+jobs:
+  maintenance:
+    if: vars.SEEDDATA_DEPLOY_TARGET == 'macmini'
+    runs-on:
+      group: qlume
+      labels: [self-hosted, macOS, ARM64, ops]
+    timeout-minutes: 3
+    environment: production
+    steps:
+      - name: Control seeddata writer
+        env:
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+          docker inspect seeddata-runner --format 'image={{.Config.Image}} running={{.State.Running}}'
+          case "$OPERATION" in
+            status) ;;
+            stop) docker stop --time 30 seeddata-runner ;;
+            start) docker start seeddata-runner ;;
+            *) exit 1 ;;
+          esac
+          docker inspect seeddata-runner --format 'running={{.State.Running}}'

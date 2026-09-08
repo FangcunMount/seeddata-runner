@@ -192,6 +192,7 @@ jobs:
     name: Deploy Mac Container
     needs: [package]
     if: |
+      vars.PRODUCTION_DEPLOY_PAUSED != 'true' &&
       needs.package.result == 'success' &&
       vars.SEEDDATA_DEPLOY_TARGET == 'macmini' &&
       ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||

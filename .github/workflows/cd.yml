@@ -91,7 +91,7 @@ jobs:
   deploy:
     name: Deploy to ServerA
     needs: [package]
-    if: needs.package.result == 'success'
+    if: vars.PRODUCTION_DEPLOY_PAUSED != 'true' && needs.package.result == 'success'
     runs-on:
       group: qlume
       labels: [self-hosted, macOS, ARM64, ops]
